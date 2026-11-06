@@ -5,9 +5,10 @@ use otto_tools::{
         edit::Edit,
         multiedit::Multiedit,
         read::Read,
-        shell::{Job, Jobs, Shell},
+        shell::{Job, Shell},
         write::Write,
     },
+    jobs::Jobs,
     policy::Policy,
 };
 use serde_json::json;

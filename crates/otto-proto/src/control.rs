@@ -225,6 +225,17 @@ pub enum Method {
         #[serde(default)]
         append_to: Option<String>,
     },
+    /// Read a session attachment (a user's file or generated media): `length` bytes from `offset`
+    /// (at most [`crate::model::ATTACHMENT_READ`]; absent: up to that).
+    #[serde(rename = "attachment.get")]
+    AttachmentGet {
+        session_id: SessionId,
+        attachment_id: String,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default)]
+        length: Option<u64>,
+    },
     /// Withdraw a pending input (queued or a steer not yet handed to the model).
     #[serde(rename = "session.queue_remove")]
     SessionQueueRemove { session_id: SessionId, input_id: String },
@@ -239,11 +250,11 @@ pub enum Method {
     SessionHandBack { session_id: SessionId },
     #[serde(rename = "session.compact")]
     SessionCompact { session_id: SessionId },
-    /// Detach the session's running `shell` call `call_id`: the call returns now
-    /// (`Started <job_id>`) and its command runs on as a background job.
+    /// Detach the session's running `shell` or `generate_*` call `call_id`: the call returns now
+    /// (`Started <job_id>`) and its work runs on as a background job. Named for shells, which came first.
     #[serde(rename = "shell.detach")]
     ShellDetach { session_id: SessionId, call_id: String },
-    /// The session's background shell jobs, running or recently ended.
+    /// The session's background jobs (shell commands, media generations), running or recently ended.
     #[serde(rename = "job.list")]
     JobList { session_id: SessionId },
     /// Stop one of the session's jobs; its report says it was stopped.
@@ -406,13 +417,34 @@ pub enum Method {
         #[serde(default)]
         style: TextStyle,
     },
+    /// Media providers (docs/MEDIA.md): their kinds, keys and models, and each kind's default.
+    #[serde(rename = "media.status")]
+    MediaStatus {},
+    /// Set a media provider's own API key; absent or empty removes it (a chat or environment key may still apply).
+    #[serde(rename = "media.set_key")]
+    MediaSetKey {
+        provider: String,
+        #[serde(default)]
+        api_key: Option<String>,
+    },
+    /// The provider and model `kind` uses by default; no provider: automatic.
+    #[serde(rename = "media.set_default")]
+    MediaSetDefault {
+        kind: MediaKind,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+    },
 }
 
 impl std::fmt::Debug for Method {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut value = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
         match self {
-            Self::AuthLogin { api_key: Some(_), .. } => value["params"]["api_key"] = Value::String("[REDACTED]".into()),
+            Self::AuthLogin { api_key: Some(_), .. } | Self::MediaSetKey { api_key: Some(_), .. } => {
+                value["params"]["api_key"] = Value::String("[REDACTED]".into());
+            }
             Self::AuthLoginComplete { code: Some(_), .. } | Self::McpLoginComplete { code: Some(_), .. } => {
                 value["params"]["code"] = Value::String("[REDACTED]".into());
             }
@@ -454,14 +486,15 @@ pub const METHODS: &[(&str, &str)] = &[
     ("session.archive", "Archive a session."),
     ("session.prompt", "Submit input: queue, steer at the next step, or interrupt."),
     ("attachment.put", "Store a file for the session's prompts; large files in chunks."),
+    ("attachment.get", "Read a session attachment or generated media, in chunks."),
     ("session.queue_remove", "Withdraw a queued input or a pending steer."),
     ("session.queue_update", "Change a pending input's delivery: steer, queue, or interrupt."),
     ("session.cancel", "Cancel the current turn and its children."),
     ("session.hand_back", "Hand a stopped sub-agent back: its held report goes to the parent now."),
     ("session.compact", "Compact session history."),
-    ("shell.detach", "Detach a running shell call: it returns now and its command runs on as a background job."),
-    ("job.list", "List a session's background shell jobs."),
-    ("job.kill", "Stop a session's background shell job."),
+    ("shell.detach", "Detach a running shell or media generation call: it returns now and its work runs on as a background job."),
+    ("job.list", "List a session's background jobs (shell commands, media generations)."),
+    ("job.kill", "Stop a session's background job."),
     ("approval.answer", "Resolve a pending tool approval."),
     ("question.answer", "Answer a pending question."),
     ("model.list", "List available provider models."),
@@ -492,6 +525,9 @@ pub const METHODS: &[(&str, &str)] = &[
     ("mcp.login_cancel", "Abandon a pending MCP sign-in."),
     ("mcp.logout", "Forget an MCP server's OAuth tokens."),
     ("text.polish", "Tidy dictated text: punctuation, casing, vocabulary and lists; never new content."),
+    ("media.status", "Media providers: kinds, keys, models and each kind's default."),
+    ("media.set_key", "Set or remove a media provider's own API key."),
+    ("media.set_default", "Choose the provider and model a media kind uses by default."),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

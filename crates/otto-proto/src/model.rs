@@ -205,13 +205,16 @@ impl SessionInfo {
     }
 }
 
-/// A session's background shell command (`job.list`): started with
-/// `background`, after waiting for input, or detached (`shell.detach`).
+/// A session's background job (`job.list`): a shell command started with `background`, after waiting for input,
+/// or detached (`shell.detach`); or a media generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct JobInfo {
     pub job_id: String,
+    #[serde(default)]
+    pub kind: JobKind,
+    /// The shell command, or `generate_video: <prompt>`.
     pub command: String,
-    /// The shell call that started it.
+    /// The call that started it.
     pub call_id: String,
     /// Its terminal block, when it runs in one.
     #[serde(default)]
@@ -221,6 +224,17 @@ pub struct JobInfo {
     /// It ended and reported; listed until it expires (five minutes) or its output is read.
     #[serde(default)]
     pub completed: bool,
+    /// Its latest progress message (`Generating with xAI… 40 %, 12 s`).
+    #[serde(default)]
+    pub progress: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    #[default]
+    Shell,
+    Media,
 }
 
 /// A provider's subscription limits as its last response reported them (`plan.usage`).
@@ -272,6 +286,86 @@ pub struct AttachmentInfo {
     pub name: String,
     pub mime: String,
     pub size: u64,
+}
+
+/// The most bytes one `attachment.get` returns.
+pub const ATTACHMENT_READ: u64 = 4 * 1024 * 1024;
+
+/// Part of an attachment's bytes (`attachment.get`): user files and generated media alike.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AttachmentData {
+    pub id: String,
+    pub name: String,
+    pub mime: String,
+    /// The whole file's size.
+    pub size: u64,
+    /// Where `data_base64` starts in the file.
+    pub offset: u64,
+    pub data_base64: String,
+}
+
+/// What a media provider makes (docs/MEDIA.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Image,
+    Video,
+    Audio,
+}
+
+/// Where a media provider's key comes from (docs/MEDIA.md §2.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKeySource {
+    /// Its own media key (`media.set_key`).
+    Media,
+    /// The chat provider's API key of the same id.
+    Chat,
+    /// An environment variable.
+    Env,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaModel {
+    pub id: String,
+    pub kind: MediaKind,
+    /// As people say it (`GPT Image 2.5 Flare`).
+    pub name: String,
+    /// Its `@` mention handle, unique across providers (`gpt-image-2.5-flare`).
+    #[serde(default)]
+    pub handle: String,
+    /// The provider's default for `kind`.
+    #[serde(default)]
+    pub default: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaProviderInfo {
+    pub id: String,
+    pub name: String,
+    pub kinds: Vec<MediaKind>,
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<MediaKeySource>,
+    #[serde(default)]
+    pub models: Vec<MediaModel>,
+}
+
+/// The provider and model a kind uses by default; `None` fields: automatic (the first connected provider, its default).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaChoice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// `media.status`: every media provider, and each kind's default.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaStatus {
+    pub providers: Vec<MediaProviderInfo>,
+    #[serde(default)]
+    pub defaults: std::collections::BTreeMap<MediaKind, MediaChoice>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

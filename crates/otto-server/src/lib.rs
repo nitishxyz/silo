@@ -58,6 +58,8 @@ pub struct Services {
     pub auth: Arc<dyn AuthService>,
     /// MCP servers (`mcp.*`); its status events become global `mcp.status` / `mcp.changed`.
     pub mcp: Arc<otto_mcp::Mcp>,
+    /// Media providers and keys (`media.*`); its tools are added to the runtime by whoever builds it.
+    pub media: Arc<otto_media::Media>,
 }
 
 #[derive(Debug, thiserror::Error)]

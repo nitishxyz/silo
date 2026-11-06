@@ -58,6 +58,7 @@ otto-client = { path = "crates/otto-client" }
 otto-cli = { path = "crates/otto-cli" }
 otto-silo-tools = { path = "crates/otto-silo-tools" }
 otto-mcp = { path = "crates/otto-mcp" }
+otto-media = { path = "crates/otto-media" }
 async-trait = "0.1"
 futures = "0.3"
 bytes = "1"

@@ -321,3 +321,36 @@ async fn a_fork_at_an_item_is_a_top_level_session_and_a_sub_agent_is_not() {
     assert!(old.info.forked_from.is_none() && old.item_seqs.is_empty());
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn attachments_read_back_in_chunks_and_media_settings_round_trip() {
+    let f = Fixture::new(vec![]).await;
+    let _server = f.start().await;
+    let client = f.connect().await;
+    let session = f.session(&client).await;
+    let bytes: Vec<u8> = (0..=255u8).cycle().take(5000).collect();
+    let put = client.attachment_put(&session.id, "data.bin", "application/octet-stream", otto_core::attachments::encode(&bytes), None).await.unwrap();
+    let head = client.attachment_get(&session.id, &put.id, 0, Some(4096)).await.unwrap();
+    let tail = client.attachment_get(&session.id, &put.id, 4096, None).await.unwrap();
+    assert_eq!((head.size, head.offset, tail.offset, head.name.as_str()), (5000, 0, 4096, "data.bin"));
+    let mut read = otto_core::attachments::decode(&head.data_base64).unwrap();
+    read.extend(otto_core::attachments::decode(&tail.data_base64).unwrap());
+    assert_eq!(read, bytes);
+    let past = client.attachment_get(&session.id, &put.id, 9000, None).await.unwrap();
+    assert_eq!((past.offset, past.data_base64.as_str()), (5000, ""));
+    let missing = |r: Result<AttachmentData, otto_client::ClientError>| matches!(r, Err(otto_client::ClientError::Rpc(RpcError { code, .. })) if code == RpcError::NOT_FOUND);
+    assert!(missing(client.attachment_get(&session.id, "att_00000000", 0, None).await));
+    assert!(missing(client.attachment_get("nope", &put.id, 0, None).await));
+
+    let status = client.media_status().await.unwrap();
+    assert!(status.providers.iter().all(|p| !p.connected));
+    let fal = client.media_set_key("fal", Some("fal-test-key".into())).await.unwrap();
+    assert_eq!((fal.connected, fal.source), (true, Some(MediaKeySource::Media)));
+    assert!(client.media_status().await.unwrap().providers.iter().any(|p| p.id == "fal" && p.connected));
+    let bad = |r: Result<_, otto_client::ClientError>| matches!(r, Err(otto_client::ClientError::Rpc(RpcError { code, .. })) if code == RpcError::BAD_REQUEST);
+    assert!(bad(client.media_set_key("midjourney", Some("k".into())).await.map(|_| ())));
+    assert!(bad(client.media_set_default(MediaKind::Video, Some("openai".into()), None).await.map(|_| ())));
+    let status = client.media_set_default(MediaKind::Image, Some("fal".into()), None).await.unwrap();
+    assert_eq!(status.defaults[&MediaKind::Image].provider.as_deref(), Some("fal"));
+    assert!(!client.media_set_key("fal", None).await.unwrap().connected);
+}

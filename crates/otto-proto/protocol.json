@@ -444,6 +444,10 @@
           {
             "const": "file",
             "type": "string"
+          },
+          {
+            "const": "model",
+            "type": "string"
           }
         ]
       },
@@ -2706,6 +2710,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -2716,6 +2728,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -3083,6 +3099,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -3093,6 +3117,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -3541,6 +3569,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -3551,6 +3587,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -3944,6 +3984,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -3954,6 +4002,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -4408,6 +4460,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -4418,6 +4478,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -4789,6 +4853,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -4799,6 +4871,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -5168,6 +5244,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -5178,6 +5262,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -5227,6 +5315,436 @@
       "result": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Empty",
+        "type": "object"
+      }
+    },
+    "attachment.get": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
+          "McpScope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "type": "string"
+          },
+          "McpTransport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "stdio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "attachment_id": {
+            "type": "string"
+          },
+          "length": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "attachment_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "data_base64": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "offset": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "size": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "mime",
+          "size",
+          "offset",
+          "data_base64"
+        ],
+        "title": "AttachmentData",
         "type": "object"
       }
     },
@@ -5549,6 +6067,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -5559,6 +6085,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -5957,6 +6487,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -5967,6 +6505,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -6506,6 +7048,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -6516,6 +7066,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -6873,6 +7427,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -6883,6 +7445,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -7309,6 +7875,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -7319,6 +7893,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -7676,6 +8254,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -7686,6 +8272,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -8104,6 +8694,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -8114,6 +8712,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -8497,6 +9099,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -8507,6 +9117,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -8870,6 +9484,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -8880,6 +9502,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -9239,6 +9865,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -9249,6 +9883,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -9636,6 +10274,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -9646,6 +10292,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -10007,6 +10657,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -10017,6 +10675,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -10073,6 +10735,17 @@
               "job_id": {
                 "type": "string"
               },
+              "kind": {
+                "$ref": "#/$defs/JobKind",
+                "default": "shell"
+              },
+              "progress": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "started_at": {
                 "format": "int64",
                 "type": "integer"
@@ -10085,6 +10758,13 @@
               "started_at"
             ],
             "type": "object"
+          },
+          "JobKind": {
+            "enum": [
+              "shell",
+              "media"
+            ],
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -10414,6 +11094,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -10424,6 +11112,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -11003,6 +11695,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -11013,6 +11713,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -11580,6 +12284,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -11590,6 +12302,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -11990,6 +12706,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -12000,6 +12724,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -12357,6 +13085,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -12367,6 +13103,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -12934,6 +13674,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -12944,6 +13692,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -13308,6 +14060,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -13318,6 +14078,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -13686,6 +14450,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -13696,6 +14468,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -13961,6 +14737,1529 @@
           "tools"
         ],
         "title": "McpServer",
+        "type": "object"
+      }
+    },
+    "media.set_default": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
+          "McpScope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "type": "string"
+          },
+          "McpTransport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "stdio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/MediaKind"
+          },
+          "model": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "MediaChoice": {
+            "properties": {
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "MediaKeySource": {
+            "oneOf": [
+              {
+                "const": "media",
+                "type": "string"
+              },
+              {
+                "const": "chat",
+                "type": "string"
+              },
+              {
+                "const": "env",
+                "type": "string"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MediaModel": {
+            "properties": {
+              "default": {
+                "default": false,
+                "type": "boolean"
+              },
+              "handle": {
+                "default": "",
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/MediaKind"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          "MediaProviderInfo": {
+            "properties": {
+              "connected": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kinds": {
+                "items": {
+                  "$ref": "#/$defs/MediaKind"
+                },
+                "type": "array"
+              },
+              "models": {
+                "default": [],
+                "items": {
+                  "$ref": "#/$defs/MediaModel"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MediaKeySource"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kinds",
+              "connected"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "defaults": {
+            "additionalProperties": false,
+            "default": {},
+            "properties": {
+              "audio": {
+                "$ref": "#/$defs/MediaChoice"
+              },
+              "image": {
+                "$ref": "#/$defs/MediaChoice"
+              },
+              "video": {
+                "$ref": "#/$defs/MediaChoice"
+              }
+            },
+            "type": "object"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/$defs/MediaProviderInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "providers"
+        ],
+        "title": "MediaStatus",
+        "type": "object"
+      }
+    },
+    "media.set_key": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
+          "McpScope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "type": "string"
+          },
+          "McpTransport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "stdio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "api_key": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "MediaKeySource": {
+            "oneOf": [
+              {
+                "const": "media",
+                "type": "string"
+              },
+              {
+                "const": "chat",
+                "type": "string"
+              },
+              {
+                "const": "env",
+                "type": "string"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MediaModel": {
+            "properties": {
+              "default": {
+                "default": false,
+                "type": "boolean"
+              },
+              "handle": {
+                "default": "",
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/MediaKind"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "connected": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kinds": {
+            "items": {
+              "$ref": "#/$defs/MediaKind"
+            },
+            "type": "array"
+          },
+          "models": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/MediaModel"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaKeySource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kinds",
+          "connected"
+        ],
+        "title": "MediaProviderInfo",
+        "type": "object"
+      }
+    },
+    "media.status": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
+          "McpScope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "type": "string"
+          },
+          "McpTransport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "stdio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "MediaChoice": {
+            "properties": {
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "MediaKeySource": {
+            "oneOf": [
+              {
+                "const": "media",
+                "type": "string"
+              },
+              {
+                "const": "chat",
+                "type": "string"
+              },
+              {
+                "const": "env",
+                "type": "string"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MediaModel": {
+            "properties": {
+              "default": {
+                "default": false,
+                "type": "boolean"
+              },
+              "handle": {
+                "default": "",
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/MediaKind"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          "MediaProviderInfo": {
+            "properties": {
+              "connected": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kinds": {
+                "items": {
+                  "$ref": "#/$defs/MediaKind"
+                },
+                "type": "array"
+              },
+              "models": {
+                "default": [],
+                "items": {
+                  "$ref": "#/$defs/MediaModel"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MediaKeySource"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kinds",
+              "connected"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "defaults": {
+            "additionalProperties": false,
+            "default": {},
+            "properties": {
+              "audio": {
+                "$ref": "#/$defs/MediaChoice"
+              },
+              "image": {
+                "$ref": "#/$defs/MediaChoice"
+              },
+              "video": {
+                "$ref": "#/$defs/MediaChoice"
+              }
+            },
+            "type": "object"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/$defs/MediaProviderInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "providers"
+        ],
+        "title": "MediaStatus",
         "type": "object"
       }
     },
@@ -14283,6 +16582,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -14293,6 +16600,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -14881,6 +17192,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -14891,6 +17210,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -15240,6 +17563,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -15250,6 +17581,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -15669,6 +18004,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -15679,6 +18022,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -16058,6 +18405,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -16068,6 +18423,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -16452,6 +18811,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -16462,6 +18829,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -16827,6 +19198,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -16837,6 +19216,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -17278,6 +19661,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -17288,6 +19679,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -17637,6 +20032,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -17647,6 +20050,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -18004,6 +20411,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -18014,6 +20429,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -18371,6 +20790,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -18381,6 +20808,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -18738,6 +21169,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -18748,6 +21187,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -19479,6 +21922,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -19489,6 +21940,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -20170,6 +22625,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -20180,6 +22643,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -20537,6 +23004,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -20547,6 +23022,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -21231,6 +23710,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -21241,6 +23728,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -21617,6 +24108,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -21627,6 +24126,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -21988,6 +24491,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -21998,6 +24509,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -22363,6 +24878,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -22373,6 +24896,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -22734,6 +25261,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -22744,6 +25279,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -23105,6 +25644,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -23115,6 +25662,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -23492,6 +26043,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -23502,6 +26061,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -23859,6 +26422,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -23869,6 +26440,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -24585,6 +27160,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -24595,6 +27178,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -25010,6 +27597,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -26324,6 +28915,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -26334,6 +28933,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -26695,6 +29298,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -26705,6 +29316,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -27082,6 +29697,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -27092,6 +29715,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -27468,6 +30095,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -27478,6 +30113,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -27870,6 +30509,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -27880,6 +30527,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -28268,6 +30919,14 @@
               }
             ]
           },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
           "MentionKind": {
             "oneOf": [
               {
@@ -28278,6 +30937,10 @@
               },
               {
                 "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
                 "type": "string"
               }
             ]
@@ -29928,6 +32591,10 @@
           },
           {
             "const": "file",
+            "type": "string"
+          },
+          {
+            "const": "model",
             "type": "string"
           }
         ]

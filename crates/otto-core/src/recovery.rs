@@ -129,6 +129,17 @@ pub(crate) fn recover(store: &mut Store) -> Result<Vec<Orphan>> {
             }
             stopped(store, &session.id, job, command)?;
         }
+        // So do media generations (`generate_*` with `background`, or detached); they don't outlive the server.
+        for call in calls.iter().filter(|c| c.name.starts_with("generate_") && c.status == ToolStatus::Done) {
+            let Some(metadata) = call.output.as_ref().map(|o| &o["metadata"]) else { continue };
+            let (Some(job), Some(kind)) = (metadata["job_id"].as_str(), metadata["kind"].as_str()) else { continue };
+            if reported.iter().any(|t| t.starts_with(&format!("Background media {job} "))) {
+                continue;
+            }
+            let text = format!("Background media {job} ({kind}) was stopped (the otto server restarted).");
+            let item = Item::new(crate::id(), Role::System, vec![Part::System { text }]);
+            store.append(&session.id, record(&Event::ItemDone { item: item.clone() }, 0, 0)?, Projection::PutItem(item))?;
+        }
         if matches!(session.status.as_str(), "busy" | "waiting_approval") {
             store.append_with_session(
                 &session.id,

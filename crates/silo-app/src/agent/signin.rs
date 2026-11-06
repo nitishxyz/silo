@@ -31,10 +31,10 @@ use crate::{
 
 const WIDTH: f32 = 360.0;
 /// Every row action (`API key`, `Sign in`) has this width, so rows line up.
-const ROW_BUTTON: f32 = 84.0;
+pub(super) const ROW_BUTTON: f32 = 84.0;
 const DIALOG_BUTTON: f32 = 88.0;
 /// Provider logos in the row's icon column.
-const LOGO: f32 = 18.0;
+pub(super) const LOGO: f32 = 18.0;
 const DIALOG_ENTER: Duration = Duration::from_millis(200);
 const DIALOG_EXIT: Duration = Duration::from_millis(160);
 /// A row settling into its Connected state.
@@ -57,7 +57,7 @@ pub(super) struct SignIn {
     /// Rows that just turned Connected, for their fade-in.
     connected: HashMap<String, Instant>,
     /// Bumped on every start and cancel; stale results are dropped.
-    attempt: u64,
+    pub(super) attempt: u64,
     /// Focus the composer once it appears (after the first connection).
     pub(super) focus_composer: bool,
 }
@@ -132,9 +132,21 @@ fn disconnect_prompt(status: &AuthStatus) -> String {
     }
 }
 
+/// What the API-key dialog saves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum KeyFor {
+    Chat,
+    /// A media provider's key (`media.set_key`); once saved it answers the setup card's `question`.
+    Media {
+        name: String,
+        question: Option<String>,
+    },
+}
+
 struct Dialog {
     provider: String,
     step: Step,
+    key_for: KeyFor,
     error: Option<String>,
     busy: bool,
     /// The login behind `step` failed or expired: the primary action restarts it.
@@ -422,7 +434,7 @@ fn logo(provider: &str) -> &'static str {
 }
 
 /// One line, no trailing period, at most ~100 characters.
-fn short(error: &str) -> String {
+pub(super) fn short(error: &str) -> String {
     let line = error.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Sign-in failed");
     let line = line.trim_end_matches('.');
     // `Auth: …`, `Timeout: …`: the error class adds nothing here.
@@ -458,8 +470,8 @@ pub(super) enum Kind {
 /// A button's state: `loading` keeps its width and swaps the label for a spinner.
 #[derive(Clone, Copy)]
 pub(super) struct State {
-    enabled: bool,
-    loading: bool,
+    pub(super) enabled: bool,
+    pub(super) loading: bool,
 }
 
 pub(super) const READY: State = State { enabled: true, loading: false };
@@ -595,6 +607,8 @@ impl AgentPane {
             // Swallowed even while the logout runs (it can't be called back).
             self.signin.disarm();
             cx.notify();
+        } else if self.media_keys.disarm() {
+            cx.notify();
         } else {
             return self.otto_settings_escape(window, cx);
         }
@@ -616,7 +630,7 @@ impl AgentPane {
         cx.notify();
     }
 
-    fn dialog_open(&self) -> bool {
+    pub(super) fn dialog_open(&self) -> bool {
         self.signin.dialog.as_ref().is_some_and(|d| d.closing.is_none())
     }
 
@@ -652,6 +666,7 @@ impl AgentPane {
         self.signin.dialog = Some(Dialog {
             provider,
             step,
+            key_for: KeyFor::Chat,
             error: None,
             busy: false,
             spent: false,
@@ -666,7 +681,22 @@ impl AgentPane {
         cx.notify();
     }
 
-    fn close_dialog(&mut self, cx: &mut Context<Self>) {
+    /// The key dialog for media provider `provider` (`name` as the user knows it).
+    pub(super) fn open_media_key(&mut self, provider: String, name: String, question: Option<String>, cx: &mut Context<Self>) {
+        self.signin.error = None;
+        self.signin.confirm = None;
+        let (p, placeholder) = (provider.clone(), super::media_setup::key_placeholder(&provider));
+        self.open_dialog(provider, Step::ApiKey, cx);
+        self.key_field.update(cx, |i, cx| {
+            i.set_placeholder(placeholder, cx);
+            i.set_validate(Some(Rc::new(move |key: &str| super::media_setup::key_valid(&p, key))), cx);
+        });
+        if let Some(dialog) = self.signin.dialog.as_mut() {
+            dialog.key_for = KeyFor::Media { name, question };
+        }
+    }
+
+    pub(super) fn close_dialog(&mut self, cx: &mut Context<Self>) {
         self.release_forward(Release::Cancelled);
         if let Some(dialog) = self.signin.dialog.as_mut().filter(|d| d.closing.is_none()) {
             dialog.closing = Some(Instant::now());
@@ -775,8 +805,12 @@ impl AgentPane {
             }
             (Step::ApiKey, _) => {
                 let Some(key) = value else { return };
+                let key_for = dialog.key_for.clone();
                 self.set_dialog_busy(true);
-                self.save_key(provider, key, cx);
+                match key_for {
+                    KeyFor::Chat => self.save_key(provider, key, cx),
+                    KeyFor::Media { name, question } => self.save_media_key(provider, name, key, question, cx),
+                }
             }
             (Step::Warning, _) => self.sign_in(provider, Some(true), cx),
             (Step::Login { login_id, flow: Flow::Code | Flow::Paste, .. }, false) => {
@@ -799,7 +833,7 @@ impl AgentPane {
         }
     }
 
-    fn dialog_error(&mut self, error: String, spent: bool, cx: &mut Context<Self>) {
+    pub(super) fn dialog_error(&mut self, error: String, spent: bool, cx: &mut Context<Self>) {
         if let Some(dialog) = self.signin.dialog.as_mut().filter(|d| d.closing.is_none()) {
             dialog.busy = false;
             dialog.spent = spent;
@@ -1274,12 +1308,18 @@ impl AgentPane {
         }
         let muted = theme::muted();
         let provider = dialog.provider.clone();
-        let name = super::view::provider_name(&provider);
+        let media = match &dialog.key_for {
+            KeyFor::Media { name, .. } => Some(name.clone()),
+            KeyFor::Chat => None,
+        };
+        let name = media.clone().unwrap_or_else(|| super::view::provider_name(&provider));
+        let logo = if media.is_some() { super::media_setup::logo(&provider) } else { logo(&provider) };
         let (busy, spent, copied) = (dialog.busy, dialog.spent, dialog.copied);
         let error = dialog.error.clone();
         let focus = dialog.focus.clone();
         let step = dialog.step.clone();
         let (title, line, primary) = match &step {
+            Step::ApiKey if media.is_some() => (format!("{name} API key"), super::media_setup::key_hint(&provider).to_owned(), "Save"),
             Step::ApiKey => (format!("{name} API key"), key_hint(&provider), "Save"),
             Step::Endpoint if provider == "custom" => (format!("Connect {name}"), "Any OpenAI-compatible server".to_owned(), "Save"),
             Step::Endpoint => (format!("Connect {name}"), format!("Where {name} runs; no key needed"), "Save"),
@@ -1459,7 +1499,7 @@ impl AgentPane {
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .child(icon(logo(&provider), 18.0, theme::foreground()))
+                    .child(icon(logo, 18.0, theme::foreground()))
                     .child(div().flex_1().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).child(title))
                     .child(close.mr(px(-6.0))),
             )

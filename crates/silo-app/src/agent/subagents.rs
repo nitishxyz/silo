@@ -90,6 +90,8 @@ pub(super) struct ChildWait {
     pub title: String,
     pub questions: Vec<PendingQuestion>,
     pub approvals: Vec<PendingApproval>,
+    /// Its running calls' tool names by call id (a question's asking tool).
+    pub tools: HashMap<String, String>,
 }
 
 /// Running, waiting, or holding its report: it has not returned yet.
@@ -212,7 +214,8 @@ impl AgentPane {
                 let mut waits = Vec::new();
                 for (id, title) in waiting {
                     let view = c.session_view(&id).await?;
-                    waits.push(ChildWait { id, title, questions: view.pending_questions, approvals: view.pending_approvals });
+                    let tools = view.running_tool_calls.into_iter().map(|t| (t.call_id, t.name)).collect();
+                    waits.push(ChildWait { id, title, questions: view.pending_questions, approvals: view.pending_approvals, tools });
                 }
                 Ok(waits)
             },

@@ -1,0 +1,89 @@
+{
+ "models": [
+  {
+   "endpoint_id": "fal-ai/kling-video/v3/pro/image-to-video",
+   "metadata": {
+    "display_name": "Kling Video v3 Image to Video [Pro]",
+    "category": "image-to-video",
+    "description": "Kling 3.0 Pro: Top-tier image-to-video with cinematic visuals, fluid motion, and native audio generation, with custom element support.",
+    "status": "active",
+    "group": {
+     "key": "kling-v3",
+     "label": "Image to Video (pro)"
+    },
+    "kind": "inference"
+   }
+  },
+  {
+   "endpoint_id": "minimax/h3-max/image-to-video",
+   "metadata": {
+    "display_name": "H3 Max Image to Video",
+    "category": "image-to-video",
+    "description": "fal's H3 Max is a post-trained variant of MiniMax H3, tuned for stronger prompt adherence and better aesthetics while co-optimized with our custom inference stack for higher throughput with no compromises on output quality",
+    "status": "active",
+    "group": {
+     "key": "hailuo-03-new-turbo",
+     "label": "Image to Video"
+    },
+    "kind": "inference"
+   }
+  },
+  {
+   "endpoint_id": "minimax/h3-max-turbo/image-to-video",
+   "metadata": {
+    "display_name": "H3 Max Turbo Image to Video",
+    "category": "image-to-video",
+    "description": "fal's H3 Max Turbo is a post-trained variant of MiniMax H3, tuned for stronger prompt adherence and better aesthetics while co-optimized with our custom inference stack for higher throughput with no compromises on output quality",
+    "status": "active",
+    "group": {
+     "key": "hailuo-03-new-max-turbo",
+     "label": "Image to Video Max Turbo"
+    },
+    "kind": "inference"
+   }
+  },
+  {
+   "endpoint_id": "fal-ai/kling-video/v2.5-turbo/pro/image-to-video",
+   "metadata": {
+    "display_name": "Kling Video",
+    "category": "image-to-video",
+    "description": "Kling 2.5 Turbo Pro: Top-tier image-to-video generation with unparalleled motion fluidity, cinematic visuals, and exceptional prompt precision.",
+    "status": "active",
+    "group": {
+     "key": "kling-video-v25",
+     "label": "2.5 Turbo (Image to Video) Pro"
+    },
+    "kind": "inference"
+   }
+  },
+  {
+   "endpoint_id": "minimax/h3-max/reference-to-video",
+   "metadata": {
+    "display_name": "H3 Max Reference to Video",
+    "category": "image-to-video",
+    "description": "fal's H3 Max is a post-trained variant of MiniMax H3, tuned for stronger prompt adherence and better aesthetics while co-optimized with our custom inference stack for higher throughput with no compromises on output quality",
+    "status": "active",
+    "group": {
+     "key": "hailuo-03-new-turbo",
+     "label": "Reference to Video"
+    },
+    "kind": "inference"
+   }
+  },
+  {
+   "endpoint_id": "kling/v4/image-to-video",
+   "metadata": {
+    "display_name": "Kling 4.0 Image to Video",
+    "category": "image-to-video",
+    "description": "Kling 4.0 animates a starting image into a 3 to 30-second video at 720p or 1080p, with optional ending frames and per-shot prompts.  ",
+    "status": "active",
+    "group": {
+     "key": "kling-v4",
+     "label": "Image to Video"
+    },
+    "kind": "inference"
+   }
+  }
+ ],
+ "has_more": false
+}

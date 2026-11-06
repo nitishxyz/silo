@@ -1,0 +1,27 @@
+[package]
+name = "otto-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+otto-tools.workspace = true
+otto-llm.workspace = true
+otto-proto.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+futures.workspace = true
+jsonschema = { version = "0.59", default-features = false }
+reqwest = { workspace = true, features = ["multipart"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "bmp"] }
+
+[dev-dependencies]
+tempfile.workspace = true

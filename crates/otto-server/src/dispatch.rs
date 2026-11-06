@@ -180,6 +180,9 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             let bytes = otto_core::attachments::decode(&data_base64).map_err(RpcError::bad_request)?;
             Ok(json!(runtime.attachment_put(&session_id, &name, &mime, bytes, append_to.as_deref()).await.map_err(core_error)?))
         }
+        Method::AttachmentGet { session_id, attachment_id, offset, length } => {
+            Ok(json!(runtime.attachment_get(&session_id, &attachment_id, offset, length).await.map_err(core_error)?))
+        }
         Method::SessionQueueRemove { session_id, input_id } => {
             runtime.queue_remove(&session_id, &input_id).await.map_err(core_error)?;
             Ok(json!({}))
@@ -201,10 +204,10 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             Ok(json!({}))
         }
         Method::ShellDetach { session_id, call_id } => {
-            runtime.detach_shell(&session_id, &call_id).await.map_err(core_error)?;
+            runtime.detach_call(&session_id, &call_id).await.map_err(core_error)?;
             Ok(json!({}))
         }
-        Method::JobList { session_id } => Ok(json!(runtime.shell_jobs(&session_id).await.map_err(core_error)?)),
+        Method::JobList { session_id } => Ok(json!(runtime.list_jobs(&session_id).await.map_err(core_error)?)),
         Method::JobKill { session_id, job_id } => {
             runtime.kill_job(&session_id, &job_id).await.map_err(core_error)?;
             Ok(json!({}))
@@ -297,6 +300,27 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
         Method::TextPolish { text, vocabulary, style } => {
             Ok(json!(otto_proto::PolishedText { text: runtime.polish(&text, &vocabulary, style).await.map_err(core_error)? }))
         }
+        Method::MediaStatus {} => {
+            let media = ready.services.media.clone();
+            blocking(move || Ok(json!(media.status()))).await
+        }
+        Method::MediaSetKey { provider, api_key } => {
+            let media = ready.services.media.clone();
+            blocking(move || media.set_key(&provider, api_key).map(|info| json!(info)).map_err(media_error)).await
+        }
+        Method::MediaSetDefault { kind, provider, model } => {
+            let media = ready.services.media.clone();
+            blocking(move || media.set_default(kind, provider, model).map(|status| json!(status)).map_err(media_error)).await
+        }
+    }
+}
+async fn blocking(f: impl FnOnce() -> Result<Value, RpcError> + Send + 'static) -> Result<Value, RpcError> {
+    tokio::task::spawn_blocking(f).await.map_err(RpcError::internal)?
+}
+fn media_error(error: otto_media::MediaError) -> RpcError {
+    match error.kind {
+        otto_media::MediaErrorKind::Invalid => RpcError::bad_request(error.message),
+        _ => RpcError::internal(error.message),
     }
 }
 pub(crate) fn defaults(value: &Value) -> Result<otto_core::SessionDefaults, RpcError> {

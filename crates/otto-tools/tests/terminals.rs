@@ -2,7 +2,8 @@
 
 use otto_tools::{
     Mailbox, Tool, ToolCx, ToolError,
-    builtin::shell::{Finished, Host, Jobs, Shell, Terminal, Terminals},
+    builtin::shell::{Finished, Host, Shell, Terminal, Terminals},
+    jobs::Jobs,
 };
 use serde_json::json;
 use std::{
@@ -189,6 +190,7 @@ async fn a_detached_pipe_command_reports_and_is_listed_until_killed() {
     assert!(out.joined_text().starts_with(&format!("Started {id}: the user detached")));
     let listed = jobs.list("ses").await;
     assert_eq!((listed.len(), listed[0].job_id.as_str(), listed[0].call_id.as_str(), listed[0].completed), (1, id.as_str(), "t", false));
+    assert_eq!((listed[0].kind, listed[0].progress.as_deref()), (otto_tools::jobs::JobKind::Shell, None), "a shell, without progress");
     assert!(jobs.list("other").await.is_empty());
     while progress.try_recv().is_ok() {}
     // It ran on: its whole output arrives, and the returned call gets no more progress.

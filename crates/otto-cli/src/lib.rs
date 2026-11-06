@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 mod ask;
 mod auth;
 mod daemon;
+mod media;
 mod script;
 mod services;
 mod sessions;
@@ -54,6 +55,11 @@ enum Command {
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
+    },
+    /// Media providers' keys (images, later video and audio).
+    Media {
+        #[command(subcommand)]
+        command: media::MediaCommand,
     },
     /// List available model capabilities and pricing.
     Models {
@@ -219,7 +225,7 @@ async fn main_async(cli: Cli) -> u8 {
 
 async fn run(cli: Cli, cancel: CancellationToken) -> Result<()> {
     let home = otto_proto::paths::home();
-    let providers = Providers::new(otto_proto::paths::auth_dir(&home), home)?;
+    let providers = Providers::new(otto_proto::paths::auth_dir(&home), home.clone())?;
     match cli.command {
         Command::Server(args) => daemon::run(args).await,
         Command::Run(args) => sessions::run(args).await,
@@ -229,6 +235,7 @@ async fn run(cli: Cli, cancel: CancellationToken) -> Result<()> {
         Command::Cancel { id } => sessions::cancel(&id).await,
         Command::HandBack { id } => sessions::hand_back(&id).await,
         Command::Auth { command } => auth::run(command, &providers).await,
+        Command::Media { command } => media::run(command, &providers, home).await,
         Command::CatalogRefresh => {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), providers.refresh_catalog()).await;
             Ok(())

@@ -144,6 +144,12 @@ impl Fixture {
             models: self.models.clone(),
             auth: Arc::new(NoAuth),
             mcp: otto_mcp::Mcp::new(self.dir.path().join("mcp-user"), self.dir.path().join("mcp-tokens")),
+            media: otto_media::Media::with(
+                otto_llm::auth::CredentialStore::open(self.dir.path().join("auth")).unwrap(),
+                self.dir.path().into(),
+                otto_media::providers::all(),
+                Arc::new(|_: &str| None),
+            ),
         }
     }
     /// Started and ready.
@@ -542,7 +548,7 @@ async fn a_detached_shell_call_returns_and_its_job_reports_later() {
     let client = f.connect().await;
     let session = f.session(&client).await;
     let follower = SessionFollower::new(client.clone(), &session.id).await.unwrap();
-    assert!(client.detach_shell(&session.id, "call1").await.unwrap_err().to_string().contains("no running shell command"));
+    assert!(client.detach_shell(&session.id, "call1").await.unwrap_err().to_string().contains("no running call call1 to detach"));
     prompt(&client, &session.id).await;
     // Detach it once it runs: the call returns `Started <job>` and the turn goes on.
     tokio::time::timeout(Duration::from_secs(5), async {

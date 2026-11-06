@@ -287,3 +287,58 @@ async fn mentions_are_noted_for_the_model_and_kept_on_the_user_item() {
     }
     r.shutdown().await.unwrap();
 }
+
+struct Catalog;
+impl MentionModels for Catalog {
+    fn resolve(&self, handle: &str) -> Option<MentionedModel> {
+        let model = |provider: &str, model: &str, name: &str, kind| MentionedModel {
+            handle: handle.into(),
+            provider: provider.into(),
+            model: model.into(),
+            name: name.into(),
+            kind,
+        };
+        match handle {
+            "gpt-image-2.6-flare" => Some(model("openai", "gpt-image-2.6-flare", "GPT Image 2.6 Flare", otto_proto::MediaKind::Image)),
+            "kling-3.0-pro" => Some(model("higgsfield", "kling-video/v3.0/pro/text-to-video", "Kling 3.0 Pro", otto_proto::MediaKind::Video)),
+            _ => None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn model_mentions_resolve_through_the_media_catalog() {
+    let (_dir, r, s, model) = setup(false).await;
+    model.scripts.lock().unwrap().extend([text("ok"), text("ok"), text("ok")]);
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    let mention = |target: &str| InputPart::Mention { kind: MentionKind::Model, target: target.into() };
+    let words = |text: &str| InputPart::Text { text: text.into() };
+    let mut send = async |input: Vec<InputPart>| {
+        r.prompt(&s.id, input, Delivery::Queue).await.unwrap();
+        finish(&mut live).await;
+        let request = model.requests.lock().unwrap().last().unwrap().clone();
+        request.items.last().unwrap().parts.clone()
+    };
+    // No catalog: missing, no note.
+    assert_eq!(send(vec![words("draw with "), mention("gpt-image-2.6-flare")]).await, [Part::text("draw with @gpt-image-2.6-flare")]);
+    r.set_mention_models(Arc::new(Catalog));
+    let one = send(vec![words("draw with "), mention("gpt-image-2.6-flare")]).await;
+    assert_eq!(
+        one[1],
+        Part::text(
+            "Mentioned models: GPT Image 2.6 Flare (image) → generate_media {model: \"gpt-image-2.6-flare\"}. Use them for the matching generation; don't ask which model. Call media_model_schema first if the request needs more than a prompt."
+        )
+    );
+    let several =
+        send(vec![mention("kling-3.0-pro"), words(" "), mention("nope"), words(" "), mention("gpt-image-2.6-flare"), mention("kling-3.0-pro")]).await;
+    assert_eq!(
+        several[1],
+        Part::text(
+            "Mentioned models: Kling 3.0 Pro (video) → generate_media {model: \"kling-3.0-pro\"}; GPT Image 2.6 Flare (image) → generate_media {model: \"gpt-image-2.6-flare\"}. Use them for the matching generation; don't ask which model. Call media_model_schema first if the request needs more than a prompt."
+        )
+    );
+    let missing: Vec<Vec<bool>> =
+        s.view().await.unwrap().items.iter().filter(|i| i.role == Role::User).map(|i| i.mentions.iter().map(|m| m.missing).collect()).collect();
+    assert_eq!(missing, [vec![true], vec![false], vec![false, true, false, false]]);
+    r.shutdown().await.unwrap();
+}

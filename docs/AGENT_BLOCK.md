@@ -431,7 +431,10 @@ Units are points.
     warning, while one waits); a row per job: spinner (or `terminal` in warning), command, `Running` / `Needs
     input`; on hover the note gives way to `↗` (its block, when it runs in one; a click on the row opens it too)
     and `■` (`job.kill`; an older otto without it: closing its block). A row leaves when its report arrives.
-  - **Detach:** a running foreground `shell` line (seen live) has a bordered `Detach` button before its `↗` / `■`
+    Background generations (`docs/MEDIA.md` §6.5) are rows too: their kind's icon (image/video/audio-lines), the
+    prompt, the job's progress from `job.list` (read every second while one runs) instead of `Running`, and `■`.
+    The bar reads `Media` (the first one's kind icon) when only generations run, `Jobs` for both.
+  - **Detach:** a running foreground `shell` or `generate_*` line (seen live) has a bordered `Detach` button before its `↗` / `■`
     (`shell.detach {session_id, call_id}`): the call returns `Started <job_id>` at once, the turn goes on, and the
     command runs on as a job (the Shells bar), reporting when it exits like a background one. Dimmed while the
     request is out; a refusal (it already ended) shows in the notice.
@@ -535,7 +538,8 @@ Units are points.
 
 - **`@` popup** (`agent/mention.rs`): `@` at a word start opens a menu built like the slash menu (↑/↓, ⏎/⇥,
   esc keeps the text and stays closed until that `@` goes). Agents first (the pane's catalog, `bot`, at most 8,
-  fuzzy on the name), then the project's files and folders from otto's `files.complete` (at most 50; ranked by
+  fuzzy on the name), then media models once a query is typed (`docs/MEDIA.md` §3.0.1; at most 6, icon by kind),
+  then the project's files and folders from otto's `files.complete` (at most 50; ranked by
   otto, basename first; `.gitignore` respected). Queries wait 60 ms of quiet; older replies are dropped. A query
   naming a folder (`src/ma`) lists inside it. Until otto's first reply the agents show with a quiet, unpickable
   `Finding files…` row (never `No matches`). Moving the caret (keys, a click) reopens, refilters or closes it as

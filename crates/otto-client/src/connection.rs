@@ -340,6 +340,10 @@ impl Connection {
     ) -> Result<AttachmentInfo> {
         self.call_typed(Method::AttachmentPut { session_id: session_id.into(), name: name.into(), mime: mime.into(), data_base64, append_to }).await
     }
+    /// Up to `length` bytes (at most `otto_proto::model::ATTACHMENT_READ`) of a session attachment from `offset`.
+    pub async fn attachment_get(&self, session_id: &str, attachment_id: &str, offset: u64, length: Option<u64>) -> Result<AttachmentData> {
+        self.call_typed(Method::AttachmentGet { session_id: session_id.into(), attachment_id: attachment_id.into(), offset, length }).await
+    }
     pub async fn cancel(&self, session_id: &str) -> Result<Empty> {
         self.call_typed(Method::SessionCancel { session_id: session_id.into() }).await
     }
@@ -458,6 +462,17 @@ impl Connection {
     /// Dictated `text` tidied by a small model, spelling `vocabulary` as given.
     pub async fn text_polish(&self, text: String, vocabulary: Vec<String>, style: TextStyle) -> Result<String> {
         Ok(self.call_typed::<PolishedText>(Method::TextPolish { text, vocabulary, style }).await?.text)
+    }
+    pub async fn media_status(&self) -> Result<MediaStatus> {
+        self.call_typed(Method::MediaStatus {}).await
+    }
+    /// Set a media provider's own key; `None` removes it.
+    pub async fn media_set_key(&self, provider: &str, api_key: Option<String>) -> Result<MediaProviderInfo> {
+        self.call_typed(Method::MediaSetKey { provider: provider.into(), api_key }).await
+    }
+    /// `kind`'s default provider and model; no provider: automatic.
+    pub async fn media_set_default(&self, kind: MediaKind, provider: Option<String>, model: Option<String>) -> Result<MediaStatus> {
+        self.call_typed(Method::MediaSetDefault { kind, provider, model }).await
     }
 }
 struct PendingGuard {

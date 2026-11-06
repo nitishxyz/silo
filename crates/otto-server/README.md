@@ -3,13 +3,13 @@
 Unix-socket daemon for `otto-core`. No provider or network client is constructed
 here. The embedding CLI supplies a recovered runtime, its model resolver, an
 `AuthService` implementation and its `otto_mcp::Mcp` (the one added to the runtime as a
-tool source; `mcp.*` methods, its events become global `mcp.status` / `mcp.changed`),
-once it has opened its store.
+tool source; `mcp.*` methods, its events become global `mcp.status` / `mcp.changed`) and its
+`otto_media::Media` (`media.*`; its tools added to the runtime), once it has opened its store.
 
 ```rust,ignore
 let handle = Server::start(ServerConfig { home, idle_exit: Some(Duration::from_secs(60)), build: String::new() }).await?;
 handle.starting(Starting { phase: StartPhase::Migrating, step: 1, steps: 6 });
-handle.ready(Services { runtime: Arc::new(runtime), models, auth, mcp }).await?;
+handle.ready(Services { runtime: Arc::new(runtime), models, auth, mcp, media }).await?;
 handle.serve_forever().await?;
 ```
 

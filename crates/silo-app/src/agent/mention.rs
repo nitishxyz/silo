@@ -1,20 +1,20 @@
-//! `@` mentions (`docs/AGENT_BLOCK.md` §4c): the composer popup's query and
-//! choices (agents, then project paths from `files.complete`), chips sent as
+//! `@` mentions (`docs/AGENT_BLOCK.md` §4g2, `docs/MEDIA.md` §3.0.1): the composer popup's query and
+//! choices (agents, media models, then project paths from `files.complete`), chips sent as
 //! `InputPart::Mention`s, and chips drawn inline over text (composer, bubbles).
 
 use std::{ops::Range, time::Duration};
 
 use gpui::{
-    AnyElement, App, Bounds, HighlightStyle, Hsla, Pixels, Point, ScrollHandle, StrikethroughStyle, StyledText, TransformationMatrix, Window, canvas,
-    div, fill, point, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, HighlightStyle, Hsla, Pixels, Point, ScrollHandle, StyledText, TransformationMatrix, Window, canvas, div, fill, point,
+    prelude::*, px, rgb,
 };
-use otto_proto::{FileMatch, InputPart, Item, MentionKind};
+use otto_proto::{FileMatch, InputPart, Item, MediaKind, MediaStatus, MentionKind};
 
-use super::view::ink;
 use crate::theme;
 
 /// Agents the popup lists at most (files: [`FILES`]).
 pub const AGENTS: usize = 8;
+pub const MODELS: usize = 6;
 pub const FILES: u32 = 50;
 /// Typing pauses this long before the popup asks otto for paths.
 pub const DEBOUNCE: Duration = Duration::from_millis(60);
@@ -24,7 +24,7 @@ pub const DEBOUNCE: Duration = Duration::from_millis(60);
 pub struct Chip {
     pub range: Range<usize>,
     pub kind: MentionKind,
-    /// An agent name, or a project path (folders end in `/`).
+    /// An agent name, a project path (folders end in `/`), or a media model handle.
     pub target: String,
     /// otto found no such agent or path (drawn struck through).
     pub missing: bool,
@@ -35,8 +35,14 @@ impl Chip {
         Self { range: at..at + 1 + target.len(), kind, target, missing: false }
     }
 
-    pub fn icon(&self) -> &'static str {
-        icon(self.kind, &self.target)
+    /// Its icon; a model's is its provider's logo, by the media status last loaded ([`ModelProviders`]).
+    pub fn icon(&self, cx: &App) -> &'static str {
+        match self.kind {
+            MentionKind::Model => {
+                super::media_setup::logo(cx.try_global::<ModelProviders>().and_then(|p| p.0.get(&self.target)).map_or("", String::as_str))
+            }
+            kind => icon(kind, &self.target),
+        }
     }
 
     /// A folder: typing right after it opens it again as a query (drilling in).
@@ -55,6 +61,18 @@ pub fn icon(kind: MentionKind, target: &str) -> &'static str {
         MentionKind::Agent => "bot",
         MentionKind::File if target.ends_with('/') => "folder",
         MentionKind::File => "file-text",
+        MentionKind::Model => "image",
+    }
+}
+
+/// Each media model handle's provider id from the last `media.status` (chips draw its logo).
+#[derive(Default)]
+pub struct ModelProviders(pub std::collections::HashMap<String, String>);
+impl gpui::Global for ModelProviders {}
+
+impl ModelProviders {
+    pub fn of(status: &MediaStatus) -> Self {
+        Self(status.providers.iter().flat_map(|p| p.models.iter().map(|m| (m.handle.clone(), p.id.clone()))).collect())
     }
 }
 
@@ -96,6 +114,16 @@ pub enum Choice {
         name: String,
         about: String,
     },
+    Model {
+        handle: String,
+        name: String,
+        /// Its provider's id (`higgsfield`, its logo) and name (`Higgsfield`).
+        provider_id: String,
+        provider: String,
+        kind: MediaKind,
+        /// The provider has a key (an unconnected one is still pickable).
+        connected: bool,
+    },
     File {
         path: String,
         dir: bool,
@@ -108,6 +136,7 @@ impl Choice {
     pub fn mention(&self) -> Option<(MentionKind, String)> {
         match self {
             Self::Agent { name, .. } => Some((MentionKind::Agent, name.clone())),
+            Self::Model { handle, .. } => Some((MentionKind::Model, handle.clone())),
             Self::File { path, .. } => Some((MentionKind::File, path.clone())),
             Self::Loading => None,
         }
@@ -125,11 +154,31 @@ pub fn agent_matches<'a>(agents: &'a [(String, String)], query: &str) -> Vec<&'a
     hits.into_iter().take(AGENTS).map(|(_, _, a)| a).collect()
 }
 
-/// The popup's rows: matching agents, then otto's paths (already ranked, at most [`FILES`]), or
+/// Media models matching `query` (fuzzy on handle, name and provider, best first), at most [`MODELS`];
+/// none for an empty query or a path.
+pub fn model_matches(media: Option<&MediaStatus>, query: &str) -> Vec<Choice> {
+    if query.is_empty() || query.contains('/') {
+        return Vec::new();
+    }
+    let models = media.into_iter().flat_map(|s| &s.providers).flat_map(|p| p.models.iter().filter(|m| !m.handle.is_empty()).map(move |m| (p, m)));
+    let mut hits: Vec<(i32, usize, Choice)> = models
+        .enumerate()
+        .filter_map(|(i, (p, m))| {
+            let score = [&m.handle, &m.name, &p.name].into_iter().filter_map(|t| crate::commands::fuzzy(query, t)).map(|(s, _)| s).max()?;
+            let (handle, name, provider_id, provider) = (m.handle.clone(), m.name.clone(), p.id.clone(), p.name.clone());
+            Some((score, i, Choice::Model { handle, name, provider_id, provider, kind: m.kind, connected: p.connected }))
+        })
+        .collect();
+    hits.sort_by_key(|(score, i, _)| (std::cmp::Reverse(*score), *i));
+    hits.into_iter().take(MODELS).map(|(.., c)| c).collect()
+}
+
+/// The popup's rows: matching agents, media models, then otto's paths (already ranked, at most [`FILES`]), or
 /// [`Choice::Loading`] while there are none yet.
-pub fn choices(agents: &[(String, String)], query: &str, files: Option<&[FileMatch]>) -> Vec<Choice> {
+pub fn choices(agents: &[(String, String)], media: Option<&MediaStatus>, query: &str, files: Option<&[FileMatch]>) -> Vec<Choice> {
     let agents = agent_matches(agents, query).into_iter().map(|(name, about)| Choice::Agent { name: name.clone(), about: about.clone() });
     let mut rows: Vec<Choice> = agents.collect();
+    rows.extend(model_matches(media, query));
     match files {
         Some(files) => rows.extend(files.iter().take(FILES as usize).map(|f| Choice::File { path: f.path.clone(), dir: f.dir })),
         None => rows.push(Choice::Loading),
@@ -202,20 +251,59 @@ pub fn item_chips(item: &Item, shown: &[Option<usize>], lead: usize, len: usize)
 
 /// Paint chips behind text laid out by `pos` (byte → top-left of its glyph, window coordinates):
 /// a rounded fill under each and its icon where the (hidden) `@` is.
-pub fn paint(chips: &[Chip], pos: impl Fn(usize) -> Option<Point<Pixels>>, line_height: Pixels, window: &mut Window, cx: &App) {
-    let back: Hsla = rgb(ink(0.08)).into();
-    let tint: Hsla = rgb(theme::muted()).into();
+/// A chip's colour: its icon and text, and (faint) its pill.
+pub fn tint() -> u32 {
+    theme::accent()
+}
+
+/// The weight a chip's (hidden) text is laid out in: wider than the label painted over it, so the icon's tile
+/// and its gap fit in the same space.
+pub const LAYOUT_WEIGHT: gpui::FontWeight = gpui::FontWeight::SEMIBOLD;
+const GAP: f32 = 4.0;
+
+/// Each chip as a badge over its hidden text: a pill in [`tint`], the icon on a tile, a gap, then its target in
+/// the UI font (smaller when it would overflow); struck through and faded when missing. A chip broken across lines
+/// gets only its icon.
+pub fn paint(chips: &[Chip], pos: impl Fn(usize) -> Option<Point<Pixels>>, line_height: Pixels, window: &mut Window, cx: &mut App) {
+    let tint: Hsla = rgb(self::tint()).into();
+    let size = window.text_style().font_size.to_pixels(window.rem_size());
     for c in chips {
-        let (Some(a), Some(b), Some(glyph)) = (pos(c.range.start), pos(c.range.end), pos(c.range.start + 1)) else { continue };
-        if (b.y - a.y).abs() < px(1.0) {
-            let bounds = Bounds::from_corners(point(a.x - px(3.0), a.y + px(1.0)), point(b.x + px(3.0), a.y + line_height - px(1.0)));
-            window.paint_quad(fill(bounds, back).corner_radii(px(6.0)));
+        let (Some(a), Some(b)) = (pos(c.range.start), pos(c.range.end)) else { continue };
+        let tile = (line_height - px(7.0)).min(px(15.0)).max(px(10.0));
+        let top = a.y + (line_height - tile) / 2.0;
+        let path = format!("icons/{}.svg", c.icon(cx));
+        let glyph = tile * 0.68;
+        let icon = |x: Pixels, window: &mut Window, cx: &mut App| {
+            let at = point(x + (tile - glyph) / 2.0, top + (tile - glyph) / 2.0);
+            let _ = window.paint_svg(Bounds::new(at, gpui::size(glyph, glyph)), path.clone().into(), None, TransformationMatrix::unit(), tint, cx);
+        };
+        if (b.y - a.y).abs() >= px(1.0) {
+            icon(a.x, window, cx);
+            continue;
         }
-        let slot = if (glyph.y - a.y).abs() < px(1.0) { glyph.x - a.x } else { px(12.0) };
-        let side = px(12.0).min(line_height - px(4.0));
-        let origin = point(a.x + (slot - side) / 2.0, a.y + (line_height - side) / 2.0);
-        let path = format!("icons/{}.svg", c.icon());
-        let _ = window.paint_svg(Bounds::new(origin, size(side, side)), path.into(), None, TransformationMatrix::unit(), tint, cx);
+        let pill = Bounds::from_corners(point(a.x - px(1.0), a.y + px(1.5)), point(b.x + px(1.0), a.y + line_height - px(1.5)));
+        window.paint_quad(fill(pill, Hsla { a: 0.14, ..tint }).corner_radii(px(5.0)));
+        let x = a.x + px(2.0);
+        window.paint_quad(fill(Bounds::new(point(x, top), gpui::size(tile, tile)), Hsla { a: 0.22, ..tint }).corner_radii(px(3.5)));
+        icon(x, window, cx);
+        let start = x + tile + px(GAP);
+        let room = b.x - px(3.0) - start;
+        let color = if c.missing { Hsla { a: 0.45, ..tint } } else { tint };
+        let font = gpui::Font { family: theme::ui_font(), ..window.text_style().font() };
+        let shape = |size: Pixels, window: &Window| {
+            let run = gpui::TextRun { len: c.target.len(), font: font.clone(), color, background_color: None, underline: None, strikethrough: None };
+            window.text_system().shape_line(c.target.clone().into(), size, &[run], None)
+        };
+        let (mut label_size, mut line) = (size * 0.94, shape(size * 0.94, window));
+        while line.width > room && label_size > size * 0.72 {
+            label_size *= 0.94;
+            line = shape(label_size, window);
+        }
+        let _ = line.paint(point(start, a.y), line_height, gpui::TextAlign::Left, None, window, cx);
+        if c.missing {
+            let y = a.y + line_height / 2.0;
+            window.paint_quad(fill(Bounds::from_corners(point(start, y), point(start + line.width, y + px(1.0))), color));
+        }
     }
 }
 
@@ -227,12 +315,9 @@ pub fn inline(text: &str, chips: &[Chip], selected: Option<(Range<usize>, Hsla)>
     chips.dedup_by(|b, a| b.range.start < a.range.end);
     let mut highlights = Vec::new();
     for c in &chips {
-        highlights.push((c.range.start..c.range.start + 1, HighlightStyle { fade_out: Some(1.0), ..Default::default() }));
-        let strike = c.missing.then_some(StrikethroughStyle { thickness: px(1.0), color: None });
-        highlights.push((
-            c.range.start + 1..c.range.end,
-            HighlightStyle { strikethrough: strike, fade_out: c.missing.then_some(0.4), ..Default::default() },
-        ));
+        // Laid out wider and clear: [`paint`] draws the badge in its place.
+        let style = HighlightStyle { color: Some(gpui::transparent_black()), font_weight: Some(LAYOUT_WEIGHT), ..Default::default() };
+        highlights.push((c.range.clone(), style));
     }
     if let Some((range, bg)) = selected {
         highlights = super::select::overlay(highlights, range, bg);
@@ -291,24 +376,24 @@ mod tests {
         assert_eq!(names("dw")[0], "docs-writer");
         assert!(names("src/").is_empty());
         let files = vec![FileMatch { path: "src/".into(), dir: true }, FileMatch { path: "src/main.rs".into(), dir: false }];
-        let all = choices(&agents, "b", Some(&files));
+        let all = choices(&agents, None, "b", Some(&files));
         assert_eq!(all[0], Choice::Agent { name: "build".into(), about: String::new() });
         assert_eq!(all.last().unwrap().mention(), Some((MentionKind::File, "src/main.rs".to_owned())));
-        assert_eq!(choices(&agents, "src/", Some(&files)).len(), 2);
+        assert_eq!(choices(&agents, None, "src/", Some(&files)).len(), 2);
         assert_eq!(pickable(&all), all.len());
         // otto answered with nothing: no rows (the popup says "No matches").
-        assert!(choices(&agents, "zzz", Some(&[])).is_empty());
+        assert!(choices(&agents, None, "zzz", Some(&[])).is_empty());
     }
 
     #[test]
     fn before_the_first_reply_agents_show_with_a_loading_row() {
         let agents = vec![("build".to_owned(), "Builds".to_owned())];
-        let rows = choices(&agents, "", None);
+        let rows = choices(&agents, None, "", None);
         assert_eq!(rows, [Choice::Agent { name: "build".into(), about: "Builds".into() }, Choice::Loading]);
         assert_eq!(pickable(&rows), 1);
         assert_eq!(Choice::Loading.mention(), None);
         // No agent matches: still the loading row, never an empty popup.
-        let rows = choices(&agents, "src/", None);
+        let rows = choices(&agents, None, "src/", None);
         assert_eq!((rows.as_slice(), pickable(&rows)), ([Choice::Loading].as_slice(), 0));
     }
 
@@ -362,7 +447,7 @@ mod tests {
         let draft = "  @docs/ x ";
         let kept = within(draft, &[chip(2, MentionKind::File, "docs/")], 2, 10);
         assert_eq!(kept[0].range, 0..6);
-        assert!(kept[0].folder() && kept[0].icon() == "folder");
+        assert!(kept[0].folder() && icon(kept[0].kind, &kept[0].target) == "folder");
         assert!(within(draft, &[chip(2, MentionKind::File, "docs/")], 3, 10).is_empty());
     }
 
@@ -381,5 +466,88 @@ mod tests {
         // A mention in a hidden part, or past the shown text, is dropped.
         assert!(item_chips(&item, &[None, None], 0, 20).is_empty());
         assert!(item_chips(&item, &[None, Some(0)], 1, 5).is_empty());
+    }
+
+    fn media() -> MediaStatus {
+        let model = |id: &str, name: &str, handle: &str, kind| otto_proto::MediaModel {
+            id: id.into(),
+            kind,
+            name: name.into(),
+            handle: handle.into(),
+            default: false,
+        };
+        let provider = |id: &str, name: &str, connected, models| otto_proto::MediaProviderInfo {
+            id: id.into(),
+            name: name.into(),
+            kinds: vec![MediaKind::Image, MediaKind::Video],
+            connected,
+            source: None,
+            models,
+        };
+        let higgsfield =
+            (0..8).map(|i| model(&format!("kling/{i}"), &format!("Kling {i}.0 Pro"), &format!("kling-{i}.0-pro"), MediaKind::Video)).collect();
+        MediaStatus {
+            providers: vec![
+                provider(
+                    "openai",
+                    "OpenAI",
+                    true,
+                    vec![model("gpt-image-2.6-flare", "GPT Image 2.6 Flare", "gpt-image-2.6-flare", MediaKind::Image)],
+                ),
+                provider("higgsfield", "Higgsfield", false, higgsfield),
+            ],
+            defaults: Default::default(),
+        }
+    }
+
+    #[test]
+    fn models_come_between_agents_and_files_for_a_typed_query() {
+        let agents = vec![("build".to_owned(), String::new()), ("klingon".to_owned(), String::new())];
+        let files = vec![FileMatch { path: "kling.md".into(), dir: false }];
+        let status = media();
+        let rows = choices(&agents, Some(&status), "kli", Some(&files));
+        assert_eq!(rows[0], Choice::Agent { name: "klingon".into(), about: String::new() });
+        let models: Vec<&Choice> = rows.iter().filter(|c| matches!(c, Choice::Model { .. })).collect();
+        assert_eq!(models.len(), MODELS, "at most six");
+        assert_eq!(
+            *models[0],
+            Choice::Model {
+                handle: "kling-0.0-pro".into(),
+                name: "Kling 0.0 Pro".into(),
+                provider_id: "higgsfield".into(),
+                provider: "Higgsfield".into(),
+                kind: MediaKind::Video,
+                connected: false
+            }
+        );
+        assert_eq!(rows.last().unwrap().mention(), Some((MentionKind::File, "kling.md".to_owned())));
+        assert_eq!(rows.len(), 1 + MODELS + 1);
+        assert_eq!(models[0].mention(), Some((MentionKind::Model, "kling-0.0-pro".to_owned())));
+        // By provider name, and by handle.
+        let first = |q: &str| model_matches(Some(&status), q).first().and_then(Choice::mention).map(|m| m.1);
+        assert_eq!(first("openai").as_deref(), Some("gpt-image-2.6-flare"));
+        assert_eq!(first("gpt-image-2.6").as_deref(), Some("gpt-image-2.6-flare"));
+        // None for an empty query, a path, or before the status loads.
+        assert!(model_matches(Some(&status), "").is_empty());
+        assert!(model_matches(Some(&status), "src/k").is_empty());
+        assert!(model_matches(None, "kli").is_empty());
+        assert_eq!(choices(&agents, Some(&status), "", None).iter().filter(|c| matches!(c, Choice::Model { .. })).count(), 0);
+        // Their providers, for the chips' logos.
+        let providers = ModelProviders::of(&status);
+        assert_eq!(super::super::media_setup::logo(&providers.0["gpt-image-2.6-flare"]), "provider-openai");
+        assert_eq!(super::super::media_setup::logo(&providers.0["kling-3.0-pro"]), "provider-higgsfield");
+    }
+
+    #[test]
+    fn model_chips_send_and_retry_as_model_mentions() {
+        let text = "draw with @gpt-image-2.6-flare";
+        let parts = input(text, &[chip(10, MentionKind::Model, "gpt-image-2.6-flare")]);
+        let mention = InputPart::Mention { kind: MentionKind::Model, target: "gpt-image-2.6-flare".into() };
+        assert_eq!(parts, [InputPart::Text { text: "draw with ".into() }, mention.clone()]);
+        let mut item = Item::user_text("u", text);
+        item.mentions = vec![otto_proto::Mention { kind: MentionKind::Model, target: "gpt-image-2.6-flare".into(), range: [10, 30], missing: false }];
+        assert_eq!(retry_input(&item), parts);
+        let chips = item_chips(&item, &[Some(0)], 0, text.len());
+        assert_eq!(chips, [Chip { range: 10..30, kind: MentionKind::Model, target: "gpt-image-2.6-flare".into(), missing: false }]);
     }
 }

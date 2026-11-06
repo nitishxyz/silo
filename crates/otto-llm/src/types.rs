@@ -103,16 +103,18 @@ pub enum MentionKind {
     Agent,
     /// A project file or folder (`target` ends in `/`).
     File,
+    /// A media model: `target` is its handle (`gpt-image-2.6-flare`).
+    Model,
 }
 
 /// An `@` mention in a user item: `@target` at `range` of [`Item::text`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Mention {
     pub kind: MentionKind,
-    /// An agent name, or a path relative to the session's folder.
+    /// An agent name, a path relative to the session's folder, or a media model handle.
     pub target: String,
     pub range: [usize; 2],
-    /// No such agent or path when it was sent (left out of the model's note).
+    /// No such agent, path or model when it was sent (left out of the model's note).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub missing: bool,
 }

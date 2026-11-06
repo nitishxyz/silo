@@ -62,6 +62,9 @@ fn result_schema(method: &Method) -> Schema {
         M::SessionSubscribe { .. } => schema_for!(Subscribed),
         M::SessionPrompt { .. } => schema_for!(PromptAccepted),
         M::AttachmentPut { .. } => schema_for!(AttachmentInfo),
+        M::AttachmentGet { .. } => schema_for!(AttachmentData),
+        M::MediaStatus {} | M::MediaSetDefault { .. } => schema_for!(MediaStatus),
+        M::MediaSetKey { .. } => schema_for!(MediaProviderInfo),
         M::ModelList { .. } => schema_for!(Vec<otto_llm::ModelInfo>),
         M::AuthStatus {} => schema_for!(Vec<AuthStatus>),
         M::AuthLogin { .. } => schema_for!(LoginResult),
@@ -154,6 +157,7 @@ pub fn examples() -> Vec<Method> {
             data_base64: "aGVsbG8K".into(),
             append_to: None,
         },
+        M::AttachmentGet { session_id: "s1".into(), attachment_id: "att_3f2a9c1b".into(), offset: 0, length: None },
         M::SessionQueueRemove { session_id: "s1".into(), input_id: "i1".into() },
         M::SessionQueueUpdate { session_id: "s1".into(), input_id: "i1".into(), delivery: Delivery::Steer },
         M::SessionCancel { session_id: "s1".into() },
@@ -220,6 +224,9 @@ pub fn examples() -> Vec<Method> {
         M::McpLoginCancel { login_id: "login1".into() },
         M::McpLogout { project_root: None, name: "github".into() },
         M::TextPolish { text: "first open the file second run auto".into(), vocabulary: vec!["otto".into()], style: TextStyle::Markdown },
+        M::MediaStatus {},
+        M::MediaSetKey { provider: "fal".into(), api_key: Some("fal-example-key".into()) },
+        M::MediaSetDefault { kind: MediaKind::Image, provider: Some("openai".into()), model: Some("gpt-image-2.5-flare".into()) },
     ]
 }
 

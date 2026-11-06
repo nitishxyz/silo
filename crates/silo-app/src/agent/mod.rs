@@ -7,6 +7,8 @@
 //! ⌘J (with focus in the pane) opens the session switcher.
 
 mod attach;
+mod audio;
+mod av;
 mod branch;
 pub(crate) mod client;
 pub(crate) mod editor;
@@ -14,10 +16,13 @@ mod header;
 mod jobs;
 mod markdown;
 mod markdown_view;
+mod media;
+mod media_setup;
 pub(crate) mod mention;
 mod partial_json;
 mod pill_input;
 mod plan;
+mod player;
 mod relocate;
 mod rename;
 mod reveal;
@@ -30,9 +35,11 @@ mod settings_agents;
 mod settings_mcp;
 mod signin;
 mod subagents;
+mod svg;
 mod transcript;
 mod usage;
 mod view;
+mod viewer;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -440,6 +447,8 @@ pub struct AgentPane {
     /// title or history button) doesn't open it again.
     pressed_out: Option<(Overlay, Instant)>,
     signin: SignIn,
+    /// Media providers' status and the Media rows (`media_setup.rs`).
+    media_keys: media_setup::Setup,
     /// The otto settings, shown instead of the chat (`settings.rs`).
     otto_settings: Option<settings::OttoSettings>,
     status: Option<AgentStatus>,
@@ -471,6 +480,11 @@ pub struct AgentPane {
     chip_row: (crate::motion::Glide, std::rc::Rc<std::cell::Cell<f32>>),
     /// Thumbnails of the transcript's images by `item#part` (`None` while made).
     thumbs: HashMap<String, Option<std::sync::Arc<gpui::Image>>>,
+    /// Generated media fetched for the transcript and the viewer (`media.rs`), and the open viewer (`viewer.rs`).
+    media: media::Cache,
+    viewer: Option<viewer::Viewer>,
+    /// The generated audio playing, or paused where it was (`audio.rs`).
+    audio: Option<audio::Playing>,
     /// Bars above the composer by key: expanded motion, and when each appeared.
     bars: HashMap<&'static str, crate::motion::Toggle>,
     bar_shown: HashMap<&'static str, Instant>,
@@ -652,6 +666,7 @@ impl AgentPane {
             reveal_pick: false,
             pressed_out: None,
             signin: SignIn::default(),
+            media_keys: media_setup::Setup::default(),
             otto_settings: None,
             status: None,
             title: String::new(),
@@ -670,6 +685,9 @@ impl AgentPane {
             attachments: Vec::new(),
             chip_row: (crate::motion::Glide::new(crate::motion::UI), std::rc::Rc::default()),
             thumbs: HashMap::new(),
+            media: media::Cache::default(),
+            viewer: None,
+            audio: None,
             bars: HashMap::new(),
             bar_shown: HashMap::new(),
             subagent_calls: 0,
@@ -1031,9 +1049,13 @@ impl AgentPane {
         self.run(
             cx,
             |c| async move { client::catalog(&c).await },
-            |this, result, _| {
+            |this, result, cx| {
                 if let Ok(catalog) = result {
                     this.catalog = Some(catalog);
+                }
+                // A chat key can be a media provider's key too.
+                if this.media_loaded() {
+                    this.refresh_media(cx);
                 }
             },
         );
@@ -1226,6 +1248,11 @@ impl AgentPane {
         self.times.record(&m.items, &m.part_times);
         self.times.observe(&m.items, &m.tools, running, waiting.collect(), now);
         let cwd = if m.info.cwd.is_empty() { self.cwd.clone() } else { Some(m.info.cwd.clone()) };
+        // `generate_media` lines name their model from the media catalog.
+        let any = |name: &str| name == media::ANY_TOOL;
+        if m.tools.values().any(|t| any(&t.name)) || m.items.iter().flat_map(otto_llm::Item::tool_calls).any(|(_, name, _)| any(name)) {
+            self.want_media(None, cx);
+        }
         let rows = transcript::build(&transcript::Input {
             items: &m.items,
             tools: &m.tools,
@@ -1239,6 +1266,7 @@ impl AgentPane {
             now,
             older: m.has_older,
             turns: &m.turns,
+            media: self.media_keys.status.as_ref(),
         });
         let mut todos = transcript::todos(&m.items, &m.tools, &self.times, m.todos.as_ref());
         for todo in &mut todos {
@@ -1317,7 +1345,7 @@ impl AgentPane {
         // A live group taking the activity row's place keeps its header where the row was: it doesn't
         // enter, the row hides at once and only the group's lines ease in below it.
         let handoff = (primed && self.activity.on())
-            .then(|| match self.rows.last() {
+            .then(|| match transcript::last(&self.rows) {
                 Some(Row::Group(g)) if g.live && !old.iter().any(|o| o.key() == g.key) => Some(g.key.clone()),
                 _ => None,
             })
@@ -1355,7 +1383,13 @@ impl AgentPane {
                 Row::Compaction(c) if c.running() => {
                     self.reveals.entry(c.key.clone()).or_insert_with(|| reveal::Reveal::new(!primed, now));
                 }
-                Row::Text { .. } | Row::User { .. } | Row::Compaction(_) | Row::Report { .. } | Row::Earlier | Row::Changes { .. } => {}
+                Row::Text { .. }
+                | Row::User { .. }
+                | Row::Compaction(_)
+                | Row::Report { .. }
+                | Row::Earlier
+                | Row::Changes { .. }
+                | Row::Media(_) => {}
             }
         }
         // Only the last row reveals: one with rows after it settles at once (full height, all shown), so its
@@ -1427,6 +1461,8 @@ impl AgentPane {
                     self.set_overlay(None, cx);
                 } else if self.overlay.is_some() {
                     self.close_overlay(window, cx);
+                } else if self.escape_setup(cx) {
+                    // Declined the setup card: `Not now`.
                 } else if self.mirror().is_some_and(|m| !m.pending_approvals.is_empty()) {
                     self.answer_approval(ApprovalDecision::Deny, cx);
                 } else if self.running && self.editor.read(cx).text().trim().is_empty() && self.attachments.is_empty() {
@@ -1512,6 +1548,8 @@ impl AgentPane {
                 self.mention.at = Some((range, query.clone()));
                 if self.overlay != Some(Overlay::Mention) {
                     self.set_overlay(Some(Overlay::Mention), cx);
+                    // Its media models.
+                    self.want_media(None, cx);
                 }
                 if fresh {
                     self.selected = 0;
@@ -1566,7 +1604,11 @@ impl AgentPane {
     }
 
     fn mention_choices(&self) -> Vec<mention::Choice> {
-        self.mention.at.as_ref().map(|(_, query)| mention::choices(&self.agent_choices(), query, self.mention.files.as_deref())).unwrap_or_default()
+        self.mention
+            .at
+            .as_ref()
+            .map(|(_, query)| mention::choices(&self.agent_choices(), self.media_status(), query, self.mention.files.as_deref()))
+            .unwrap_or_default()
     }
 
     fn slash_choices(&self, cx: &gpui::App) -> Vec<&'static SlashCommand> {

@@ -313,7 +313,10 @@ impl AgentPane {
             );
         }
         let body = match tab {
-            Tab::Providers => self.provider_list(cx),
+            Tab::Providers => {
+                let chat = self.provider_list(cx);
+                div().w_full().flex().flex_col().child(chat).child(self.media_section(cx)).into_any_element()
+            }
             Tab::Models | Tab::Search => {
                 defaults.update(cx, |d, _| d.page = tab);
                 defaults.into_any_element()

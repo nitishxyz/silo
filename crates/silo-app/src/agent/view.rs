@@ -28,7 +28,7 @@ use crate::{
 /// Most height of a compaction's summary while it streams (it follows its newest lines).
 const COMPACTION_H: f32 = 160.0;
 /// Width of the reading column.
-const COLUMN: f32 = 760.0;
+pub(super) const COLUMN: f32 = 760.0;
 const LINE_H: f32 = 24.0;
 /// The fade above the composer column, where the transcript scrolls out under it.
 /// How often a running turn redraws (shimmers, timers): about 30 fps.
@@ -109,7 +109,7 @@ fn line_starts(layout: &gpui::TextLayout) -> Vec<usize> {
 }
 
 /// Tabular figures: ticking durations keep their width.
-fn tabular() -> gpui::FontFeatures {
+pub(super) fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
 }
 
@@ -592,11 +592,13 @@ impl AgentPane {
         self.running
             || self.awaiting()
             || self.rows.iter().any(|r| matches!(r, Row::Group(g) if g.live) || matches!(r, Row::Compaction(c) if c.running()))
+            || self.audio_playing()
     }
 
     pub(super) fn render_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let now = Instant::now();
         self.settle_focus(window, cx);
+        self.audio_check();
         let header = Some(self.header_title());
         if self.header_seen != header {
             self.header_seen = header;
@@ -781,6 +783,7 @@ impl AgentPane {
             .children(self.popover(Overlay::Sessions, window, cx))
             .children(self.popover(Overlay::Projects, window, cx))
             .children(self.render_signin_dialog(window, cx))
+            .children(self.render_viewer(window, cx))
             .into_any_element();
         keep_moving(window);
         pane
@@ -1004,12 +1007,14 @@ impl AgentPane {
         }
         let gap = match self.rows.last() {
             Some(Row::User { .. }) => 20.0,
-            Some(Row::Compaction(_) | Row::Report { .. } | Row::Earlier | Row::Changes { .. }) => 12.0,
+            Some(Row::Compaction(_) | Row::Report { .. } | Row::Earlier | Row::Changes { .. } | Row::Media(_)) => 12.0,
             // The gaps a live group would have in its place, so the handoff doesn't shift.
             Some(Row::Group(_) | Row::Text { .. }) | None => 4.0,
         };
         let label = match (self.rows.last(), self.running_since) {
-            (Some(Row::Text { .. } | Row::Group(_)), Some(since)) => format!("Working for {}", transcript::dur(self.now().saturating_sub(since))),
+            (Some(Row::Text { .. } | Row::Group(_) | Row::Media(_)), Some(since)) => {
+                format!("Working for {}", transcript::dur(self.now().saturating_sub(since)))
+            }
             _ => "Thinking…".to_owned(),
         };
         let line = div()
@@ -1063,7 +1068,9 @@ impl AgentPane {
             (Some(Row::Earlier), _) => 8.0,
             (Some(Row::User { .. }), _) => 20.0,
             (Some(Row::Compaction(_) | Row::Report { .. }), _) | (Some(_), Row::Compaction(_) | Row::Report { .. } | Row::Earlier) => 12.0,
-            (_, Row::Changes { .. }) => 8.0,
+            (_, Row::Changes { .. } | Row::Media(_)) => 8.0,
+            (Some(Row::Media(_)), Row::User { .. }) => 20.0,
+            (Some(Row::Media(_)), _) => 12.0,
             (Some(Row::Changes { .. }), Row::User { .. }) => 20.0,
             (Some(Row::Changes { .. }), _) => 12.0,
             (Some(Row::Text { .. }), Row::User { .. }) => 20.0,
@@ -1080,6 +1087,7 @@ impl AgentPane {
             Row::Report { key, child, title, status, note } => Self::render_report(key, child, title, *status, note.as_deref(), cx),
             Row::Earlier => self.render_earlier(cx),
             Row::Changes { key, turn, changes } => self.render_changes(key, *turn, changes, cx),
+            Row::Media(shelf) => self.render_media(shelf, now, window, cx),
         };
         let enter = self.entered.get(row.key()).and_then(|at| eased(*at, ENTER, now, cx));
         let content = match enter {
@@ -1359,7 +1367,7 @@ impl AgentPane {
         };
         let toggle_key = key.clone();
         // The live group at the end is the activity indicator: Stop on its right.
-        let indicator = g.live && matches!(self.rows.last(), Some(Row::Group(last)) if last.key == key);
+        let indicator = g.live && matches!(transcript::last(&self.rows), Some(Row::Group(last)) if last.key == key);
         // Trace-style: the text on the column's edge, the chevron after it.
         let trigger =
             div()
@@ -1950,8 +1958,14 @@ impl AgentPane {
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("Sub-agent · {title}"))),
             )
         });
-        let body = match self.card.clone()? {
-            Card::Question(q) => {
+        // A `generate_*` tool's "needs a provider" question: the setup card (`media_setup.rs`).
+        let setup = match &self.card {
+            Some(Card::Question(q)) => self.setup_kind(q),
+            _ => None,
+        };
+        let body = match (self.card.clone()?, setup) {
+            (Card::Question(q), Some(kind)) => self.render_setup(card, &q, kind, active, cx),
+            (Card::Question(q), None) => {
                 let options: Vec<AnyElement> = q
                     .options
                     .iter()
@@ -1993,7 +2007,7 @@ impl AgentPane {
                 .when(!options.is_empty(), |el| el.child(div().flex().flex_wrap().gap(px(6.0)).children(options)))
                 .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child("Or type an answer below"))
             }
-            Card::Approval(a, more) => {
+            (Card::Approval(a, more), _) => {
                 // `shell: cd <project> && …`: the command reads as on its line.
                 let summary = match a.summary.split_once(": ") {
                     Some((tool, rest)) if !tool.contains(' ') => format!("{tool}: {}", self.shown(rest)),
@@ -3141,7 +3155,7 @@ impl AgentPane {
         list.into_any_element()
     }
 
-    /// The `@` popup: agents (bot), then the project's files and folders.
+    /// The `@` popup: agents (bot), media models (by kind), then the project's files and folders.
     fn render_mention(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let choices = self.mention_choices();
         if choices.is_empty() {
@@ -3154,6 +3168,30 @@ impl AgentPane {
             let (glyph, title, about) = match choice {
                 super::mention::Choice::Agent { name, about } => ("bot", name, (!about.is_empty()).then_some(about)),
                 super::mention::Choice::File { path, dir } => (if dir { "folder" } else { "file-text" }, path, None),
+                super::mention::Choice::Model { name, provider_id, provider, kind, connected, .. } => {
+                    let kind_name = match kind {
+                        otto_proto::MediaKind::Image => "Image",
+                        otto_proto::MediaKind::Video => "Video",
+                        otto_proto::MediaKind::Audio => "Audio",
+                    };
+                    let note = (!connected)
+                        .then(|| div().flex_none().text_size(px(11.5)).text_color(rgb(theme::muted())).child("Not connected").into_any_element());
+                    let title = div().text_size(px(12.5)).child(name);
+                    let about = Some(format!("{provider} · {kind_name}").into());
+                    let row = menu::row(
+                        ("agent-mention", i),
+                        selected,
+                        Some(menu::lead(super::media_setup::logo(&provider_id), selected)),
+                        title,
+                        about,
+                        note,
+                    );
+                    list = list.child(
+                        self.pick_row(row, i, selected, cx)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
+                    );
+                    continue;
+                }
                 super::mention::Choice::Loading => {
                     list = list.child(menu::empty(("agent-mention-loading", i), "Finding files…"));
                     continue;

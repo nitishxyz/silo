@@ -30,6 +30,8 @@ otto-llm = { workspace = true, default-features = false }
 pulldown-cmark = { version = "0.13", default-features = false }
 idna = "1"
 qrcode = { version = "0.14", default-features = false }
+# Generated SVG drawn sharp at any zoom (`agent/svg.rs`): gpui's own resvg, same features.
+resvg = { version = "0.46", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 image = { version = "0.25", default-features = false, features = ["png", "tiff", "jpeg", "gif", "webp"] }
 unicode-width = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -57,13 +59,19 @@ block2 = "0.6"
 objc2-foundation = { workspace = true, features = ["NSArray", "NSBundle", "NSDictionary", "NSError", "NSGeometry", "NSURL", "NSValue", "NSTimer", "block2"] }
 # The permission helper (`permissions.rs`): its drag tile, window chrome,
 # System Settings and screens.
-objc2-app-kit = { workspace = true, features = ["NSControl", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSImage", "NSImageView", "NSPasteboard", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-app-kit = { workspace = true, features = ["NSControl", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSImage", "NSImageView", "NSCursor", "NSPasteboard", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "bitflags", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 silo-web.workspace = true
 # PDF previews in the Files block (`files/pdf.rs`): pages drawn with CoreGraphics.
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData", "CFCGTypes"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDataProvider", "CGImage", "CGPDFDocument", "CGPDFPage", "CGAffineTransform"] }
 raw-window-handle = "0.6"
+# Generated video and audio in agent blocks (`agent/av.rs`): posters, playback, and video frames as
+# IOSurface-backed pixel buffers for gpui's `surface` element.
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVAsset", "AVAssetImageGenerator", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "objc2-core-video"] }
+core-foundation.workspace = true
+core-video.workspace = true
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime"] }
 # Interface sounds (`sound.rs`): a low-latency output stream mixing
 # synthesized voices, opened on the first sound and released when idle.
 cpal = "0.16"

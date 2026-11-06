@@ -85,6 +85,9 @@ icons!(
     "provider-minimax",
     "provider-ollama",
     "provider-lmstudio",
+    "provider-higgsfield",
+    "provider-fal",
+    "provider-elevenlabs",
     "arrow-right",
     "eye-off",
     "plug",
@@ -94,7 +97,17 @@ icons!(
     "git-diff",
     "git-branch",
     "message-square",
-    "minimize"
+    "minimize",
+    "volume",
+    "volume-off",
+    "video",
+    "audio-lines",
+    "play",
+    "pause",
+    "rotate-cw",
+    "repeat",
+    "expand",
+    "shrink"
 );
 
 #[cfg(test)]

@@ -157,7 +157,7 @@ async fn a_job_whose_block_lives_on_reports_after_a_restart() {
     runtime.deliver_pending().await.unwrap();
     let view = runtime.view(&id).await.unwrap();
     assert!(texts(&view).contains("Background shell job-2 (`cargo b`) was stopped (the otto server restarted)"), "its block is gone");
-    let jobs = runtime.shell_jobs(&id).await.unwrap();
+    let jobs = runtime.list_jobs(&id).await.unwrap();
     assert_eq!((jobs[0].job_id.as_str(), jobs[0].call_id.as_str(), jobs[0].block_id.as_deref()), ("job-1", "a", Some("b1")), "listed again");
     system(&runtime, &id, |t| t == "Background shell job-1 (`cargo a`) in block b1 exited with code 0.\nbuilt").await;
     let view = runtime.view(&id).await.unwrap();

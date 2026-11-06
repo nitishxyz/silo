@@ -1,12 +1,12 @@
 use super::*;
+use crate::jobs::{Detachable, JobKind, JobState, Jobs, Report, Slot, finish};
 use crate::{OutputPart, Tool, ToolErrorKind, ToolOutput, output::Capture};
 use std::{
-    collections::{BTreeMap, HashMap},
     path::Path,
     process::Stdio,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -15,8 +15,6 @@ use tokio::{
     sync::{Mutex, mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
-const MAX_JOBS: usize = 64;
-const JOB_TTL: Duration = Duration::from_secs(300);
 /// What every command gets: no pager waits, and a marker that otto runs it.
 const ENV: [(&str, &str); 3] = [("PAGER", "cat"), ("GIT_PAGER", "cat"), ("OTTO_SILO", "1")];
 
@@ -62,149 +60,6 @@ pub enum Finished {
     Closed,
 }
 
-async fn expire(registry: std::sync::Weak<Jobs>, id: String, ttl: Duration) {
-    tokio::time::sleep(ttl).await;
-    if let Some(registry) = registry.upgrade() {
-        registry.jobs.lock().await.remove(&id);
-    }
-}
-pub struct Jobs {
-    /// Start time, in job ids: ids stay unique across restarts.
-    epoch: u64,
-    next: AtomicU64,
-    jobs: Mutex<BTreeMap<String, Arc<Mutex<JobState>>>>,
-    /// Foreground calls the user can detach (`detach`), by session and call id.
-    calls: std::sync::Mutex<HashMap<(String, String), CancellationToken>>,
-}
-impl Default for Jobs {
-    fn default() -> Self {
-        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() & 0xff_ffff);
-        Self { epoch, next: AtomicU64::new(0), jobs: Mutex::default(), calls: std::sync::Mutex::default() }
-    }
-}
-/// A job as clients list it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JobInfo {
-    pub job_id: String,
-    pub command: String,
-    /// The call that started it.
-    pub call_id: String,
-    /// Its terminal block, when it runs in one.
-    pub block_id: Option<String>,
-    /// Unix milliseconds.
-    pub started_at: i64,
-    /// It ended (its report was delivered); kept until it expires or its output is read.
-    pub completed: bool,
-}
-impl Jobs {
-    /// Stop every running job of `session` (it closed).
-    pub async fn stop_session(&self, session: &str) {
-        for job in self.jobs.lock().await.values() {
-            let job = job.lock().await;
-            if job.session.as_deref() == Some(session) {
-                job.cancel.cancel();
-            }
-        }
-    }
-    /// Detach `session`'s running foreground shell call `call_id`: the call
-    /// returns at once and the command runs on as a background job. `false`
-    /// when no such call runs (it ended, or is not a shell call).
-    pub fn detach(&self, session: &str, call_id: &str) -> bool {
-        let calls = self.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        calls.get(&(session.to_owned(), call_id.to_owned())).inspect(|t| t.cancel()).is_some()
-    }
-    /// `session`'s jobs, oldest first.
-    pub async fn list(&self, session: &str) -> Vec<JobInfo> {
-        let jobs: Vec<(String, Arc<Mutex<JobState>>)> = self.jobs.lock().await.iter().map(|(id, j)| (id.clone(), j.clone())).collect();
-        let mut listed = Vec::new();
-        for (id, job) in jobs {
-            let job = job.lock().await;
-            if job.session.as_deref() == Some(session) {
-                listed.push(JobInfo {
-                    job_id: id,
-                    command: job.command.clone(),
-                    call_id: job.call_id.clone(),
-                    block_id: job.block.clone(),
-                    started_at: job.started_at,
-                    completed: job.result.is_some(),
-                });
-            }
-        }
-        listed.sort_by_key(|j| j.started_at);
-        listed
-    }
-    /// Stop `session`'s job `job_id` (its report says it was stopped); `false` when it has no such job.
-    pub async fn kill(&self, session: &str, job_id: &str) -> bool {
-        let mut jobs = self.jobs.lock().await;
-        let Some(job) = jobs.get(job_id).cloned() else { return false };
-        let job = job.lock().await;
-        if job.session.as_deref() != Some(session) {
-            return false;
-        }
-        job.cancel.cancel();
-        jobs.remove(job_id);
-        true
-    }
-    fn next_id(&self) -> String {
-        // Unique across restarts too: a client matches a job's report to its call by id.
-        format!("job-{:06x}{}", self.epoch, self.next.fetch_add(1, Ordering::Relaxed))
-    }
-    /// Register `state` as job `id`, refused when the registry is full.
-    async fn insert(&self, id: &str, state: Arc<Mutex<JobState>>) -> Result<(), ToolError> {
-        let mut jobs = self.jobs.lock().await;
-        if jobs.len() >= MAX_JOBS {
-            return Err(ToolError::failed("Job limit reached; read completed job output or kill a job"));
-        }
-        jobs.insert(id.to_owned(), state);
-        Ok(())
-    }
-}
-/// A foreground call while it can be detached: registered in `Jobs::calls` until dropped.
-struct Detachable {
-    jobs: Arc<Jobs>,
-    key: (String, String),
-    token: CancellationToken,
-}
-impl Detachable {
-    fn new(jobs: &Arc<Jobs>, cx: &ToolCx) -> Self {
-        let key = (cx.sessions.first().cloned().unwrap_or_default(), cx.call_id.clone());
-        let token = CancellationToken::new();
-        jobs.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key.clone(), token.clone());
-        Self { jobs: jobs.clone(), key, token }
-    }
-}
-impl Drop for Detachable {
-    fn drop(&mut self) {
-        self.jobs.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.key);
-    }
-}
-struct JobState {
-    cancel: CancellationToken,
-    output: ToolOutput,
-    result: Option<Result<ToolOutput, ToolError>>,
-    /// The session that started it.
-    session: Option<String>,
-    command: String,
-    call_id: String,
-    block: Option<String>,
-    started_at: i64,
-}
-impl JobState {
-    fn new(cancel: CancellationToken, command: &str, cx: &ToolCx, block: Option<String>) -> Self {
-        let started_at =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-        Self {
-            cancel,
-            output: ToolOutput::default(),
-            result: None,
-            session: cx.sessions.first().cloned(),
-            command: command.to_owned(),
-            call_id: cx.call_id.clone(),
-            block,
-            started_at,
-        }
-    }
-}
 /// What shells share: background jobs, and the terminal host commands run
 /// in when there is one.
 #[derive(Clone, Default)]
@@ -246,7 +101,7 @@ impl Job {
             jobs,
             spec: spec(
                 "job",
-                "Inspect or stop a background shell job (its result also arrives as a message when it exits). status reports completion; output returns bounded output plus a full spill path; kill stops it. Completed jobs expire after five minutes and are removed when output is read. At most 64 jobs are retained.",
+                "Inspect or stop a background job: a shell command or a media generation (its result also arrives as a message when it ends). status reports completion (and a generation's progress) reports completion; output returns bounded output plus a full spill path; kill stops it. Completed jobs expire after five minutes and are removed when output is read. At most 64 jobs are retained.",
                 json!({"job_id":{"type":"string"},"operation":{"type":"string","enum":["status","output","kill"]}}),
                 &["job_id", "operation"],
                 Effects::PROCESS,
@@ -379,6 +234,10 @@ impl Shell {
         Ok(id)
     }
 }
+/// A shell job's report ([`report`]).
+fn reporter(command: String, block: Option<String>) -> Report {
+    Box::new(move |id, result| report(id, &command, block.as_deref(), result))
+}
 /// A terminal job started before a restart (from its call: id, block and host in its metadata).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resumed {
@@ -418,23 +277,9 @@ impl Host {
         F: FnOnce(ToolCx, Arc<Mutex<JobState>>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<ToolOutput, ToolError>> + Send + 'static,
     {
-        // A job outlives the turn: only `job kill` or its session closing stop it.
-        let cancel = CancellationToken::new();
         let block = terminal.as_deref().map(|t| t.id().to_owned());
-        let mut job = JobState::new(cancel.clone(), &command, &cx, block.clone());
-        job.started_at = started_at.unwrap_or(job.started_at);
-        let state = Arc::new(Mutex::new(job));
-        self.jobs.insert(&id, state.clone()).await?;
-        let mut cx = cx;
-        cx.cancel = cancel;
-        cx.progress = None;
-        let mailbox = cx.mailbox.clone();
-        let registry = Arc::downgrade(&self.jobs);
-        tokio::spawn(async move {
-            let result = work(cx, state.clone()).await;
-            finish(registry, id, &command, block.as_deref(), mailbox.as_deref(), state, result).await;
-        });
-        Ok(())
+        let report = reporter(command.clone(), block.clone());
+        self.jobs.spawn(id, started_at, &command, JobKind::Shell, block, cx, work, report).await
     }
 }
 /// `output` with the host its terminal runs in (`metadata.host`), when one can re-attach.
@@ -454,7 +299,7 @@ impl Shell {
         let stop = CancellationToken::new();
         let expired = CancellationToken::new();
         let quiet = Arc::new(AtomicBool::new(false));
-        let state = Arc::new(Mutex::new(JobState::new(stop.clone(), &command, &cx, None)));
+        let state = Arc::new(Mutex::new(JobState::new(stop.clone(), &command, JobKind::Shell, &cx, None)));
         let (tx, mut rx) = oneshot::channel();
         // The job id once detached; until then the result goes back to the call.
         let slot: Arc<std::sync::Mutex<Slot>> = Arc::new(std::sync::Mutex::new(Slot { job: None, tx: Some(tx) }));
@@ -477,7 +322,7 @@ impl Shell {
                     }
                 }
             };
-            finish(registry, id, &task_command, None, mailbox.as_deref(), task_state, result).await;
+            finish(registry, id, mailbox.as_deref(), task_state, result, reporter(task_command, None)).await;
         });
         // The call dropped (its turn ended) before it returned: the command stops too.
         let guard = stop.clone().drop_guard();
@@ -510,7 +355,7 @@ impl Shell {
                 if let Err(error) = self.host.jobs.insert(&id, state.clone()).await {
                     // No room: it stays in the foreground.
                     cx.progress(None, Some(format!("\n[not detached: {}]\n", error.message)));
-                    detach.jobs.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&detach.key);
+                    detach.forget();
                     let result = tokio::select! {
                         result = &mut rx => result,
                         () = cx.cancel.cancelled() => { stop.cancel(); rx.await }
@@ -542,11 +387,6 @@ impl Shell {
     }
 }
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
-/// Where a foreground command's result goes: back to its call, or (detached) to job `job`.
-struct Slot {
-    job: Option<String>,
-    tx: Option<oneshot::Sender<Result<ToolOutput, ToolError>>>,
-}
 /// What a detached call returns.
 fn detached(id: &str, block: Option<&str>) -> ToolOutput {
     let place = block.map(|b| format!(" in block {b}")).unwrap_or_default();
@@ -558,27 +398,6 @@ fn detached(id: &str, block: Option<&str>) -> ToolOutput {
         metadata["block_id"] = json!(block);
     }
     ToolOutput::text(text).with_metadata(metadata)
-}
-/// A job ended: deliver its report, keep its result until it expires.
-async fn finish(
-    registry: std::sync::Weak<Jobs>,
-    id: String,
-    command: &str,
-    block: Option<&str>,
-    mailbox: Option<&dyn crate::Mailbox>,
-    job: Arc<Mutex<JobState>>,
-    result: Result<ToolOutput, ToolError>,
-) {
-    if let Some(mailbox) = mailbox {
-        mailbox.deliver(report(&id, command, block, &result));
-    }
-    {
-        let mut state = job.lock().await;
-        state.output = ToolOutput::default();
-        state.result = Some(result);
-    }
-    drop(job);
-    expire(registry, id, JOB_TTL).await;
 }
 /// The message a finished job delivers.
 fn report(id: &str, command: &str, block: Option<&str>, result: &Result<ToolOutput, ToolError>) -> String {
@@ -687,14 +506,33 @@ impl Tool for Job {
         let id = string(&input, "job_id")?;
         let state = self.jobs.jobs.lock().await.get(id).cloned().ok_or_else(|| ToolError::new(ToolErrorKind::NotFound, "Unknown job_id"))?;
         let state = state.lock().await;
-        match string(&input,"operation")? {
-            "kill" => { state.cancel.cancel(); drop(state); self.jobs.jobs.lock().await.remove(id); Ok(ToolOutput::text("Cancellation requested")) },
+        match string(&input, "operation")? {
+            "kill" => {
+                state.cancel.cancel();
+                drop(state);
+                self.jobs.jobs.lock().await.remove(id);
+                Ok(ToolOutput::text("Cancellation requested"))
+            }
             "output" => {
                 let completed = state.result.is_some();
-                let output = state.result.clone().unwrap_or_else(|| Ok(state.output.clone())); drop(state);
-                if completed { self.jobs.jobs.lock().await.remove(id); } output
-            },
-            "status" => Ok(ToolOutput::text(if state.result.is_some(){"completed"}else{"running"}).with_metadata(json!({"job_id":id,"completed":state.result.is_some(),"result":state.result.as_ref().map(|r|match r{Ok(o)=>json!({"is_error":o.is_error,"metadata":o.metadata}),Err(e)=>json!({"error":e})})}))),
+                let output = state.result.clone().unwrap_or_else(|| Ok(state.output.clone()));
+                drop(state);
+                if completed {
+                    self.jobs.jobs.lock().await.remove(id);
+                }
+                output
+            }
+            "status" => {
+                let progress = state.progress().filter(|_| state.result.is_none());
+                let text = progress
+                    .as_ref()
+                    .map_or_else(|| (if state.result.is_some() { "completed" } else { "running" }).to_owned(), |p| format!("running: {p}"));
+                let mut metadata = json!({"job_id":id,"completed":state.result.is_some(),"result":state.result.as_ref().map(|r|match r{Ok(o)=>json!({"is_error":o.is_error,"metadata":o.metadata}),Err(e)=>json!({"error":e})})});
+                if let Some(progress) = progress {
+                    metadata["progress"] = json!(progress);
+                }
+                Ok(ToolOutput::text(text).with_metadata(metadata))
+            }
             _ => Err(ToolError::invalid("operation must be status, output, or kill")),
         }
     }
@@ -860,15 +698,17 @@ async fn run(input: Value, cx: ToolCx, job: Option<Arc<Mutex<JobState>>>, opts: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jobs::{MAX_JOBS, expire};
     #[tokio::test]
     async fn job_cap_expiration_and_kill_removal() {
         let jobs = Arc::new(Jobs::default());
         for i in 0..MAX_JOBS {
             jobs.jobs.lock().await.insert(
                 format!("retained-{i}"),
-                Arc::new(Mutex::new(JobState {
-                    result: Some(Ok(ToolOutput::text("done"))),
-                    ..JobState::new(CancellationToken::new(), "true", &ToolCx::new("c", "."), None)
+                Arc::new(Mutex::new({
+                    let mut state = JobState::new(CancellationToken::new(), "true", JobKind::Shell, &ToolCx::new("c", "."), None);
+                    state.result = Some(Ok(ToolOutput::text("done")));
+                    state
                 })),
             );
         }

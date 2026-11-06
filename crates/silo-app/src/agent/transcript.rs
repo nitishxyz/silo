@@ -42,6 +42,10 @@ pub enum Kind {
     Ask,
     Todos,
     Subagent,
+    /// Generated media (`generate_image`, `generate_video`, `generate_audio`).
+    Media,
+    Video,
+    Audio,
     Error,
     /// A passing note from otto (a retry wait): not a step, not counted.
     Notice,
@@ -63,6 +67,9 @@ impl Kind {
             Kind::Ask => "question",
             Kind::Todos => "list-todo",
             Kind::Subagent => "bot",
+            Kind::Media => "image",
+            Kind::Video => "video",
+            Kind::Audio => "audio-lines",
             Kind::Error => "x-circle",
             Kind::Notice => "clock",
             Kind::Other => "circle",
@@ -70,15 +77,17 @@ impl Kind {
     }
 }
 
-/// A shell call's running background job.
+/// A shell call's or a generation's running background job.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobRef {
     pub id: String,
-    /// As shown (clipped, `~` for home).
+    /// As shown (clipped, `~` for home); a generation's prompt.
     pub command: String,
     pub block: Option<String>,
     /// It waits for input in its block.
     pub waiting: bool,
+    /// What a generation makes (`None`: a shell command).
+    pub media: Option<otto_proto::MediaKind>,
 }
 
 /// Inline detail under a line, shown by its `›`.
@@ -104,7 +113,7 @@ pub struct Line {
     pub reveal: Option<String>,
     /// A running command's block: closing it stops the command.
     pub stop: Option<String>,
-    /// A running foreground `shell` call (its call id): the user can detach it (`shell.detach`).
+    /// A running foreground `shell` or `generate_*` call (its call id): the user can detach it (`shell.detach`).
     pub detach: Option<String>,
     /// The background job this shell call runs on as, while it runs (the Shells bar).
     pub job: Option<JobRef>,
@@ -171,6 +180,8 @@ pub enum Row {
         turn: i64,
         changes: otto_proto::TurnChanges,
     },
+    /// A `generate_image` call's images, right after its group (a folded group never hides them).
+    Media(super::media::Shelf),
 }
 
 /// The key of [`Row::Earlier`].
@@ -335,6 +346,7 @@ impl Row {
             Row::User { key, .. } | Row::Text { key, .. } | Row::Report { key, .. } | Row::Changes { key, .. } => key,
             Row::Group(g) => &g.key,
             Row::Compaction(c) => &c.key,
+            Row::Media(s) => &s.key,
             Row::Earlier => EARLIER,
         }
     }
@@ -344,7 +356,13 @@ impl Row {
 /// the end, not the activity row. There is only ever one of them.
 #[must_use]
 pub fn indicator_is_group(rows: &[Row]) -> bool {
-    matches!(rows.last(), Some(Row::Group(g)) if g.live) || matches!(rows.last(), Some(Row::Compaction(c)) if c.running())
+    matches!(last(rows), Some(Row::Group(g)) if g.live) || matches!(rows.last(), Some(Row::Compaction(c)) if c.running())
+}
+
+/// The last row past the media rows after it (they show its group's images).
+#[must_use]
+pub fn last(rows: &[Row]) -> Option<&Row> {
+    rows.iter().rev().find(|r| !matches!(r, Row::Media(_)))
 }
 
 /// A group of thinking only (its header says all its line does).
@@ -656,6 +674,8 @@ pub struct Input<'a> {
     pub older: bool,
     /// Finished turns that changed files (`SessionMirror::turns`): a [`Row::Changes`] under each one's reply.
     pub turns: &'a [otto_proto::TurnSummary],
+    /// The media catalog (`media.status`), when loaded: `generate_media` calls' kinds and model names.
+    pub media: Option<&'a otto_proto::MediaStatus>,
 }
 
 struct Ctx<'a> {
@@ -666,27 +686,40 @@ struct Ctx<'a> {
     running: bool,
     /// The latest turn was stopped by the user: calls left without a result were stopped.
     stopped: bool,
-    /// Background shell jobs that reported, by job id.
+    /// Background jobs that reported, by job id.
     jobs: &'a HashMap<String, (JobEnd, String)>,
     /// Attachment names by id (`attachment_names`).
     files: &'a HashMap<String, String>,
+    media: Option<&'a otto_proto::MediaStatus>,
 }
 
-/// How a shell job (background, or answered after waiting for input) ended.
+/// How a job (a background shell command, one answered after waiting for input, a generation) ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum JobEnd {
+pub(super) enum JobEnd {
     Exit(i64),
+    /// A generation finished.
+    Done,
     Stopped,
     Failed,
 }
 
-/// Job reports delivered as system items (`Background shell <id> (…) exited
-/// with code N.` then its output): how each ended and the output.
-fn job_reports(items: &[Item]) -> HashMap<String, (JobEnd, String)> {
+/// Job reports delivered as system items (`Background shell <id> (…) exited with code N.` then its output;
+/// `Background media <id> (video) finished.` then its result, or `… failed: <reason>`): how each ended, and the
+/// output, result or reason.
+pub(super) fn job_reports(items: &[Item]) -> HashMap<String, (JobEnd, String)> {
     let mut jobs = HashMap::new();
     for part in items.iter().filter(|i| i.role == Role::System).flat_map(|i| &i.parts) {
         let Part::System { text } = part else { continue };
         let (first, body) = text.split_once('\n').unwrap_or((text, ""));
+        if let Some(id) = first.strip_prefix("Background media ").and_then(|r| r.split_whitespace().next()) {
+            let end = match first.split_once(") failed: ") {
+                Some((_, reason)) => (JobEnd::Failed, reason.to_owned()),
+                None if first.ends_with(" finished.") => (JobEnd::Done, body.to_owned()),
+                None => (JobEnd::Stopped, String::new()),
+            };
+            jobs.insert(id.to_owned(), end);
+            continue;
+        }
         let Some(id) = first.strip_prefix("Background shell ").and_then(|r| r.split_whitespace().next()) else { continue };
         let end = match first.rfind(" exited with code ") {
             Some(at) => first[at + 18..].trim_end_matches('.').parse().map_or(JobEnd::Failed, JobEnd::Exit),
@@ -763,7 +796,17 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     let jobs = job_reports(input.items);
     let files = attachment_names(input.items);
     let stopped = input.turn == Some(TurnStatus::Cancelled);
-    let cx = Ctx { cwd: input.cwd, home: input.home, times: input.times, now: input.now, running, stopped, jobs: &jobs, files: &files };
+    let cx = Ctx {
+        cwd: input.cwd,
+        home: input.home,
+        times: input.times,
+        now: input.now,
+        running,
+        stopped,
+        jobs: &jobs,
+        files: &files,
+        media: input.media,
+    };
     let results = results(input.items);
     let mut pending = pending_tools(input.items, input.tools);
     let any_pending = !pending.is_empty();
@@ -903,6 +946,7 @@ pub fn build(input: &Input<'_>) -> Vec<Row> {
     {
         *streaming = true;
     }
+    super::media::place(&mut rows, input.items, input.tools, &jobs, input.media);
     rows
 }
 
@@ -1001,6 +1045,10 @@ pub fn summary(lines: &[Line], duration: Option<u64>, stopped: bool) -> String {
     add(n, plural(n, "browser step", "browser steps"));
     let n = done(Kind::Ask);
     add(n, format!("asked {}", plural(n, "question", "questions")));
+    let made = |k: Kind| lines.iter().filter(|l| l.kind == k && l.status == Status::Done).map(|l| l.files.len().max(1)).sum::<usize>();
+    let made = [(made(Kind::Media), "image", "images"), (made(Kind::Video), "video", "videos"), (made(Kind::Audio), "audio clip", "audio clips")];
+    let made: Vec<String> = made.into_iter().filter(|(n, ..)| *n > 0).map(|(n, one, many)| plural(n, one, many)).collect();
+    add(made.len(), format!("generated {}", made.join(", ")));
     let n = count(Kind::Subagent);
     add(n, plural(n, "subagent step", "subagent steps"));
     let n = done(Kind::Todos);
@@ -1091,8 +1139,21 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
         (None, _) => Status::Error,
     };
     let elapsed = cx.times.elapsed(call_id, cx.now);
-    let text = out.as_ref().map_or("", |o| o.text.as_str());
+    let mut text = out.as_ref().map_or("", |o| o.text.as_str());
     let meta = out.as_ref().map_or(&Value::Null, |o| &o.meta);
+    // A generation that ran on as a job (§6.5): running until its report comes, which then is its result.
+    let media = super::media::call_kind(name, input, text, cx.media);
+    let mut media_job = None;
+    if let Some(kind) = media.filter(|_| status == Status::Done)
+        && let Some(id) = super::media::job_id(text)
+    {
+        match cx.jobs.get(id) {
+            Some((JobEnd::Done | JobEnd::Exit(_), result)) => text = result,
+            Some((JobEnd::Stopped, _)) => status = Status::Stopped,
+            Some((JobEnd::Failed, reason)) => (status, text) = (Status::Error, reason),
+            None => (status, media_job) = (Status::Running, Some((id.to_owned(), kind))),
+        }
+    }
     let mut line = Line::new(call_id, Kind::Other);
     let mut failed = None;
     // No detail from the result text (it only says where the result goes).
@@ -1147,13 +1208,13 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
                 // It ran on and reported (a background command, or one that waited for input).
                 (Some(_), Some((end, body))) => {
                     status = match end {
-                        JobEnd::Exit(0) => Status::Done,
+                        JobEnd::Exit(0) | JobEnd::Done => Status::Done,
                         JobEnd::Stopped => Status::Stopped,
                         _ => Status::Error,
                     };
                     line.desc = match end {
                         JobEnd::Exit(code) => Some(format!("exit {code}")),
-                        JobEnd::Stopped => None,
+                        JobEnd::Stopped | JobEnd::Done => None,
                         JobEnd::Failed => Some("failed".into()),
                     };
                     quiet = true;
@@ -1168,7 +1229,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
                     line.detail = (job.waiting && !screen.trim().is_empty()).then(|| Detail::Mono(tail(screen)));
                     line.reveal.clone_from(&job.block);
                     line.stop.clone_from(&job.block);
-                    line.job = Some(JobRef { id: job.id, command: cmd.clone(), block: job.block, waiting: job.waiting });
+                    line.job = Some(JobRef { id: job.id, command: cmd.clone(), block: job.block, waiting: job.waiting, media: None });
                 }
                 (None, _) => {
                     // Stopped by the user (its block closed, or the turn stopped) or by its timeout.
@@ -1288,6 +1349,55 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
             (Kind::Todos, "Updating todos", "Updated todos", String::new())
         }
         "skill" => (Kind::Other, "Loading skill", "Loaded skill", clip(str_at(input, "name").unwrap_or(""), 60)),
+        super::media::TOOL => {
+            // The images show in their own row; the fold counts them.
+            line.files = super::media::parse(text).into_iter().map(|m| m.name).collect();
+            let n = if status == Status::Done { line.files.len() } else { input["n"].as_u64().map_or(1, |n| usize::try_from(n).unwrap_or(1)) };
+            let reason = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("it failed").trim_start_matches("Error: ");
+            failed = out.is_some().then(|| format!("Couldn't generate the image: {}", clip(reason, 100)));
+            quiet = status != Status::Error;
+            let (run, done) = if n > 1 { ("Generating images", "Generated images") } else { ("Generating image", "Generated image") };
+            (Kind::Media, run, done, clip(&plain(str_at(input, "prompt").unwrap_or("")), 80))
+        }
+        super::media::ANY_TOOL => {
+            // Like the others: the files show in their own row; the line names the model and mode.
+            line.files = super::media::parse(text).into_iter().map(|m| m.name).collect();
+            let reason = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("it failed").trim_start_matches("Error: ");
+            quiet = status != Status::Error;
+            let (kind, noun) = match media {
+                Some(otto_proto::MediaKind::Image) if line.files.len() > 1 => (Kind::Media, "images"),
+                Some(otto_proto::MediaKind::Image) => (Kind::Media, "image"),
+                Some(otto_proto::MediaKind::Audio) => (Kind::Audio, "audio"),
+                _ => (Kind::Video, "video"),
+            };
+            failed = out.is_some().then(|| format!("Couldn't generate the {noun}: {}", clip(reason, 100)));
+            let (run, done) = match noun {
+                "images" => ("Generating images", "Generated images"),
+                "image" => ("Generating image", "Generated image"),
+                "audio" => ("Generating audio", "Generated audio"),
+                _ => ("Generating video", "Generated video"),
+            };
+            let subject = super::media::any_subject(input, cx.media);
+            (kind, run, done, if subject.is_empty() { subject } else { format!("· {subject}") })
+        }
+        super::media::VIDEO_TOOL | super::media::AUDIO_TOOL => {
+            // The file shows in its own row; the fold counts it.
+            line.files = super::media::parse(text).into_iter().map(|m| m.name).collect();
+            let reason = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("it failed").trim_start_matches("Error: ");
+            quiet = status != Status::Error;
+            if name == super::media::VIDEO_TOOL {
+                failed = out.is_some().then(|| format!("Couldn't generate the video: {}", clip(reason, 100)));
+                (Kind::Video, "Generating video", "Generated video", clip(&plain(str_at(input, "prompt").unwrap_or("")), 80))
+            } else {
+                failed = out.is_some().then(|| format!("Couldn't generate the audio: {}", clip(reason, 100)));
+                let (run, done) = match str_at(input, "type") {
+                    Some("sound") => ("Generating sound", "Generated sound"),
+                    Some("music") => ("Generating music", "Generated music"),
+                    _ => ("Generating speech", "Generated speech"),
+                };
+                (Kind::Audio, run, done, clip(&plain(str_at(input, "text").unwrap_or("")), 80))
+            }
+        }
         "subagent" => match str_at(input, "action").unwrap_or("delegate") {
             "delegate" => {
                 line.desc = str_at(input, "agent").map(str::to_owned);
@@ -1328,6 +1438,13 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
         line.session = str_at(input, "session_id").map(str::to_owned).or_else(|| json_of(text)["session_id"].as_str().map(str::to_owned));
     }
     line.kind = kind;
+    if let Some((id, kind)) = media_job {
+        line.desc = Some("background".into());
+        line.job = Some(JobRef { id, command: clip(subject.trim_start_matches("· "), 80), block: None, waiting: false, media: Some(kind) });
+    } else if media.is_some() && status == Status::Running && live.is_some() {
+        // Seen running live: otto can detach it.
+        line.detach = Some(call_id.to_owned());
+    }
     // Ended by the user: a call the stopped turn cut off, or one that says it was cancelled.
     if status == Status::Error && ((out.is_none() && cx.stopped) || text.trim_start().starts_with("cancelled")) {
         status = Status::Stopped;
@@ -1884,7 +2001,7 @@ mod tests {
     #[test]
     fn kind_icons_exist() {
         use Kind::*;
-        for kind in [Reasoning, Read, List, Search, Shell, Edit, Fetch, Terminal, Browser, Ask, Todos, Subagent, Error, Other] {
+        for kind in [Reasoning, Read, List, Search, Shell, Edit, Fetch, Terminal, Browser, Ask, Todos, Subagent, Media, Video, Audio, Error, Other] {
             assert!(crate::assets::has_icon(kind.icon()), "{kind:?}: {}", kind.icon());
         }
     }
@@ -1919,6 +2036,7 @@ mod tests {
             now,
             older: false,
             turns: &[],
+            media: None,
         })
     }
 
@@ -1958,6 +2076,7 @@ mod tests {
             now: 0,
             older: false,
             turns: &[],
+            media: None,
         })
     }
 
@@ -2277,6 +2396,7 @@ mod tests {
             stopped: false,
             jobs: &HashMap::new(),
             files: &HashMap::new(),
+            media: None,
         };
         let live = |name: &str, error: bool, text: &str, meta: Value| ToolState {
             name: name.into(),
@@ -2400,6 +2520,7 @@ mod tests {
             stopped: false,
             jobs: &HashMap::new(),
             files: &HashMap::new(),
+            media: None,
         };
         let ok = |text: &str| (text.to_owned(), false);
         let line = tool("s", "search", &json!({"pattern": "frozen-lockfile"}), None, Some(&ok("a.rs:1: x\nb.rs:2: y\n\n")), &cx);
@@ -2458,8 +2579,17 @@ mod tests {
     fn shell_lines_report_exit_and_duration() {
         let mut times = Times::default();
         span(&mut times, "c", 0, Some(1_234));
-        let cx =
-            Ctx { cwd: None, home: None, times: &times, now: 5_000, running: true, stopped: false, jobs: &HashMap::new(), files: &HashMap::new() };
+        let cx = Ctx {
+            cwd: None,
+            home: None,
+            times: &times,
+            now: 5_000,
+            running: true,
+            stopped: false,
+            jobs: &HashMap::new(),
+            files: &HashMap::new(),
+            media: None,
+        };
         let live = ToolState {
             name: "shell".into(),
             status: ToolStatus::Error,
@@ -2487,6 +2617,7 @@ mod tests {
             stopped: false,
             jobs: &HashMap::new(),
             files: &HashMap::new(),
+            media: None,
         };
         let out = (r#"{"block_id":"b42","url":"http://localhost:3000/"}"#.to_owned(), false);
         let line = tool("b", "browser_open", &json!({"url": "http://localhost:3000/"}), None, Some(&out), &cx);
@@ -2505,7 +2636,17 @@ mod tests {
     fn command_block_shells_open_wait_and_report() {
         let reports = |text: &str| job_reports(&[Item::new("s", Role::System, vec![Part::System { text: text.into() }])]);
         let jobs = reports("Background shell job-a1 (`cargo test`) in block b9 exited with code 101.\nFAILED");
-        let cx = Ctx { cwd: None, home: None, times: &Times::default(), now: 0, running: false, stopped: false, jobs: &jobs, files: &HashMap::new() };
+        let cx = Ctx {
+            cwd: None,
+            home: None,
+            times: &Times::default(),
+            now: 0,
+            running: false,
+            stopped: false,
+            jobs: &jobs,
+            files: &HashMap::new(),
+            media: None,
+        };
         // Running in its block: open and stop it.
         let live = ToolState { name: "shell".into(), status: ToolStatus::Running, messages: vec!["block:b3".into()], ..ToolState::default() };
         let none = HashMap::new();
@@ -2518,7 +2659,10 @@ mod tests {
         let detached = "Started job-d1 in block b3: the user detached this command and it runs on in the background.";
         let line = tool("r", "shell", &json!({"command": "cargo build"}), None, Some(&(detached.into(), false)), &cx_live);
         assert_eq!((line.status, line.desc.as_deref(), line.detach.as_deref()), (Status::Running, Some("background"), None));
-        assert_eq!(line.job, Some(JobRef { id: "job-d1".into(), command: "cargo build".into(), block: Some("b3".into()), waiting: false }));
+        assert_eq!(
+            line.job,
+            Some(JobRef { id: "job-d1".into(), command: "cargo build".into(), block: Some("b3".into()), waiting: false, media: None })
+        );
         let piped = "Started job-d2: the user detached this command and it runs on in the background.";
         let line = tool("p", "shell", &json!({"command": "gh run watch"}), None, Some(&(piped.into(), false)), &cx_live);
         assert_eq!(line.job.map(|j| (j.id, j.block)), Some(("job-d2".into(), None)));
@@ -2587,6 +2731,7 @@ mod tests {
             stopped: false,
             jobs: &HashMap::new(),
             files: &HashMap::new(),
+            media: None,
         };
         let live = ToolState {
             name: "edit".into(),
@@ -2650,6 +2795,7 @@ mod tests {
             now: 0,
             older: false,
             turns: &[],
+            media: None,
         });
         let g = group_of(&rows[1]);
         assert_eq!((g.lines[1].title.as_str(), g.lines[1].kind), ("rate limited", Kind::Error));
@@ -2676,6 +2822,7 @@ mod tests {
             now: 0,
             older: false,
             turns: &[],
+            media: None,
         };
         let rows = build(&input);
         let g = group_of(&rows[1]);
@@ -2713,6 +2860,7 @@ mod tests {
             now: 1_000,
             older: false,
             turns: &[],
+            media: None,
         };
         let rows = build(&input(TurnStatus::Running));
         let g = group_of(&rows[1]);
@@ -2921,6 +3069,7 @@ mod tests {
                 stopped: false,
                 jobs: &HashMap::new(),
                 files: &HashMap::new(),
+                media: None,
             },
         );
         assert_eq!((line.title.as_str(), line.desc.as_deref()), ("Updated todos", Some("1/3 done")));
@@ -3032,6 +3181,7 @@ mod tests {
             stopped: false,
             jobs: &HashMap::new(),
             files: &HashMap::new(),
+            media: None,
         };
         let input = json!({"attachment_id": "att_3f2a9c1b", "path": "/w/assets/shot.png"});
         let line = tool("c", "copy_attachment", &input, None, Some(&("Copied shot.png to /w/assets/shot.png (812 KB)".into(), false)), &cx);
@@ -3107,6 +3257,7 @@ mod tests {
             now: 0,
             older: m.has_older,
             turns: &m.turns,
+            media: None,
         };
         build(&input)
     }

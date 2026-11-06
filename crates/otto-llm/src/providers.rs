@@ -195,6 +195,12 @@ impl Providers {
         })
     }
 
+    /// The credential store (`auth.json`), shared with media keys (`media:<id>`).
+    #[must_use]
+    pub fn credentials(&self) -> &CredentialStore {
+        &self.store
+    }
+
     /// The endpoint configured for a local or custom provider (`settings.json`
     /// in the state dir), else its environment override or default.
     #[must_use]

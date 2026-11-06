@@ -176,6 +176,7 @@ fn text_run(cx: &Context, run: Vec<InputPart>, parts: &mut Vec<Part>, mentions: 
     }
     let base: usize = parts.iter().map(|p| if let Part::Text { text, .. } = p { text.len() } else { 0 }).sum();
     let agents: Vec<String> = crate::agents::discover(&cx.root(), user).into_iter().map(|a| a.name).collect();
+    let models = cx.runtime.mention_models();
     let mut text = String::new();
     for part in run {
         match part {
@@ -187,6 +188,7 @@ fn text_run(cx: &Context, run: Vec<InputPart>, parts: &mut Vec<Part>, mentions: 
                 let found = match kind {
                     MentionKind::Agent => agents.contains(&target),
                     MentionKind::File => project_path(&cx.cwd(), &target),
+                    MentionKind::Model => models.as_ref().is_some_and(|m| m.resolve(&target).is_some()),
                 };
                 mentions.push(Mention { kind, range: [start, base + text.len()], missing: !found, target });
             }
@@ -202,8 +204,9 @@ fn project_path(cwd: &str, target: &str) -> bool {
     let inside = !target.is_empty() && relative.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir));
     inside && std::fs::metadata(std::path::Path::new(cwd).join(relative)).is_ok_and(|m| !target.ends_with('/') || m.is_dir())
 }
-/// The model's note on a user item's mentions (those found): which agents to delegate to, which paths to read.
-pub(crate) fn mention_note(mentions: &[Mention]) -> Option<String> {
+/// The model's note on a user item's mentions (those found): which agents to delegate to, which paths to read,
+/// which media models to generate with (resolved through `models`).
+pub(crate) fn mention_note(mentions: &[Mention], models: Option<&dyn crate::MentionModels>) -> Option<String> {
     let named = |kind: MentionKind| {
         let mut names: Vec<&str> = Vec::new();
         for m in mentions.iter().filter(|m| m.kind == kind && !m.missing) {
@@ -223,12 +226,30 @@ pub(crate) fn mention_note(mentions: &[Mention]) -> Option<String> {
     if !files.is_empty() {
         lines.push(format!("Mentioned files: {} (paths relative to the project; read them as needed).", files.join(", ")));
     }
+    let media: Vec<String> = named(MentionKind::Model)
+        .into_iter()
+        .filter_map(|handle| models?.resolve(handle))
+        .map(|m| {
+            let kind = match m.kind {
+                otto_proto::MediaKind::Image => "image",
+                otto_proto::MediaKind::Video => "video",
+                otto_proto::MediaKind::Audio => "audio",
+            };
+            format!("{} ({kind}) → generate_media {{model: \"{}\"}}", m.name, m.handle)
+        })
+        .collect();
+    if !media.is_empty() {
+        lines.push(format!(
+            "Mentioned models: {}. Use them for the matching generation; don't ask which model. Call media_model_schema first if the request needs more than a prompt.",
+            media.join("; ")
+        ));
+    }
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 /// User items with mentions get their note after the text, for the model only.
-pub(crate) fn noted(mut items: Vec<Item>) -> Vec<Item> {
+pub(crate) fn noted(models: Option<&dyn crate::MentionModels>, mut items: Vec<Item>) -> Vec<Item> {
     for item in &mut items {
-        if let Some(note) = mention_note(&item.mentions) {
+        if let Some(note) = mention_note(&item.mentions, models) {
             item.parts.push(Part::text(note));
         }
     }
@@ -365,7 +386,7 @@ async fn hand_off(cx: &Context, session: &dyn ModelSession, built: &mut std::col
             Ok((parts, mentions)) => {
                 let mut item = Item::new(next.id.clone(), Role::User, parts);
                 item.mentions = mentions;
-                let shown = noted(vec![item.clone()]).remove(0).parts;
+                let shown = noted(cx.runtime.mention_models().as_deref(), vec![item.clone()]).remove(0).parts;
                 match session.steer(&next.id, shown).await {
                     Ok(true) => {
                         built.insert(next.id.clone(), item);
@@ -527,7 +548,10 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         for queued in steer {
             input(&cx, queued, turn, step).await?;
         }
-        let items = visible(noted(crate::compaction::trim(cx.items().await?, live.model.info().caps.context_window)), live.model.info().caps.vision);
+        let items = visible(
+            noted(cx.runtime.mention_models().as_deref(), crate::compaction::trim(cx.items().await?, live.model.info().caps.context_window)),
+            live.model.info().caps.vision,
+        );
         let items = tokio::task::spawn_blocking(move || fitted(items)).await.map_err(|e| Error::Invalid(e.to_string()))?;
         let compaction = crate::compaction::threshold(&live, &items);
         let mut provider = ProviderOptions::default();
@@ -835,6 +859,7 @@ async fn execute(
     tcx.sessions = crate::mailbox::lineage(&cx.runtime, &cx.row.id).await?;
     tcx.mailbox = Some(Arc::new(crate::mailbox::Mailbox { runtime: cx.runtime.clone(), session: cx.row.id.clone() }));
     tcx.undo = Some(Arc::new(crate::undo::Undo(cx.runtime.clone())));
+    tcx.jobs = Some(cx.runtime.jobs());
     let tool = lookup.get(&name).cloned();
     let mut effective = original.clone();
     let mut prepared = None;

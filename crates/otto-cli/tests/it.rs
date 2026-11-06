@@ -2,3 +2,4 @@
 
 mod cli;
 mod daemon;
+mod media;

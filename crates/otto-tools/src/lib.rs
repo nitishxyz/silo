@@ -6,6 +6,7 @@ pub mod builtin;
 pub mod complete;
 pub mod html;
 pub mod images;
+pub mod jobs;
 pub mod output;
 pub mod policy;
 pub mod registry;

@@ -596,26 +596,36 @@ impl IntoElement for EditorElement {
     }
 }
 
-/// Runs of `text`: the marked (IME) range underlined, the bytes at `hidden` (chips' `@`, drawn as icons) clear.
-fn runs(text: &str, marked: Option<&Range<usize>>, hidden: &[usize], font: gpui::Font, color: Hsla) -> Vec<TextRun> {
+/// Runs of `text`: the marked (IME) range underlined; each chip clear and laid out in the UI font at
+/// [`super::mention::LAYOUT_WEIGHT`] (the badge painted over it needs the room).
+fn runs(text: &str, marked: Option<&Range<usize>>, chips: &[Range<usize>], font: gpui::Font, color: Hsla) -> Vec<TextRun> {
     let run = TextRun { len: text.len(), font, color, background_color: None, underline: None, strikethrough: None };
     let marked = marked.filter(|m| m.end <= text.len());
+    let chips: Vec<&Range<usize>> = chips.iter().filter(|c| c.end <= text.len() && c.start < c.end).collect();
     let mut cuts = vec![0, text.len()];
     cuts.extend(marked.iter().flat_map(|m| [m.start, m.end]));
-    cuts.extend(hidden.iter().filter(|h| **h < text.len()).flat_map(|h| [*h, h + 1]));
+    cuts.extend(chips.iter().flat_map(|c| [c.start, c.end]));
     cuts.sort_unstable();
     cuts.dedup();
     let runs: Vec<TextRun> = cuts
         .windows(2)
-        .map(|w| TextRun {
-            len: w[1] - w[0],
-            color: if hidden.contains(&w[0]) && w[1] == w[0] + 1 { Hsla { a: 0.0, ..color } } else { color },
-            underline: marked.filter(|m| m.start <= w[0] && w[1] <= m.end).map(|_| UnderlineStyle {
-                color: Some(color),
-                thickness: px(1.0),
-                wavy: false,
-            }),
-            ..run.clone()
+        .map(|w| {
+            let chip = chips.iter().any(|c| c.start <= w[0] && w[1] <= c.end);
+            let mut r = TextRun {
+                len: w[1] - w[0],
+                color: if chip { Hsla { a: 0.0, ..color } } else { color },
+                underline: marked.filter(|m| m.start <= w[0] && w[1] <= m.end).map(|_| UnderlineStyle {
+                    color: Some(color),
+                    thickness: px(1.0),
+                    wavy: false,
+                }),
+                ..run.clone()
+            };
+            if chip {
+                r.font.family = crate::theme::ui_font();
+                r.font.weight = super::mention::LAYOUT_WEIGHT;
+            }
+            r
         })
         .filter(|r| r.len > 0)
         .collect();
@@ -729,8 +739,8 @@ impl Element for EditorElement {
         let color = if empty { self.colors.placeholder } else { self.colors.text };
         let font_size = window.text_style().font_size.to_pixels(window.rem_size());
         let text = if empty { fitted(&text, &window.text_style().font(), color, font_size, bounds.size.width, window) } else { text };
-        let hidden: Vec<usize> = chips.iter().map(|c| c.range.start).collect();
-        let runs = runs(&text, marked.as_ref(), &hidden, window.text_style().font(), color);
+        let ranges: Vec<Range<usize>> = chips.iter().map(|c| c.range.clone()).collect();
+        let runs = runs(&text, marked.as_ref(), &ranges, window.text_style().font(), color);
         let wrap = (!single && !empty).then_some(bounds.size.width);
         let lines = shape(&text, &runs, font_size, wrap, window);
         let line_height = window.line_height();

@@ -30,6 +30,7 @@ otto-store.workspace = true
 otto-silo-tools.workspace = true
 silo-proto.workspace = true
 otto-mcp.workspace = true
+otto-media.workspace = true
 uuid.workspace = true
 serde.workspace = true
 rustix.workspace = true

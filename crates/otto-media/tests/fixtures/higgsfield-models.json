@@ -1,0 +1,2533 @@
+{
+ "total": 32,
+ "items": [
+  {
+   "slug": "bytedance/seedance-2.5/image-to-video",
+   "title": "Seedance 2.5",
+   "description": "Seedance 2.5 Image to Video generates videos from a single image URL with optional prompts, customizable duration, resolution, and output format. It supports adding an end image and generating audio to enhance the video output.",
+   "operation_type": [
+    "image2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "seedance_2_5",
+   "input_schema": {
+    "type": "object",
+    "required": [
+     "image_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Write your prompt here"
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 30,
+      "minimum": 4
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri"
+     },
+     "resolution": {
+      "enum": [
+       "480p",
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "default": "720p"
+     },
+     "bitrate_mode": {
+      "enum": [
+       "standard",
+       "high"
+      ],
+      "type": "string",
+      "default": "high"
+     },
+     "end_image_url": {
+      "type": "string",
+      "format": "uri"
+     },
+     "generate_audio": {
+      "type": "boolean",
+      "default": true
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "bytedance/seedance-2.5/reference-to-video",
+   "title": "Seedance 2.5",
+   "description": "Seedance 2.5 Reference to Video generates videos from images, videos, or audio inputs with customizable duration, resolution, aspect ratio, and output format. It supports image-to-video and video-to-video transformations, allowing creative control through prompts and audio integration.",
+   "operation_type": [
+    "image2video",
+    "video2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "seedance_2_5",
+   "input_schema": {
+    "if": {
+     "required": [
+      "image_urls"
+     ]
+    },
+    "else": {
+     "if": {
+      "required": [
+       "video_urls"
+      ]
+     },
+     "else": {
+      "required": [
+       "audio_urls"
+      ]
+     }
+    },
+    "type": "object",
+    "required": [],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Write your prompt here"
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 30,
+      "minimum": 4
+     },
+     "audio_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "maxItems": 10,
+      "minItems": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "maxItems": 30,
+      "minItems": 1
+     },
+     "resolution": {
+      "enum": [
+       "480p",
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "default": "720p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "maxItems": 10,
+      "minItems": 1
+     },
+     "aspect_ratio": {
+      "enum": [
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16",
+       "21:9"
+      ],
+      "type": "string",
+      "default": "16:9"
+     },
+     "bitrate_mode": {
+      "enum": [
+       "standard",
+       "high"
+      ],
+      "type": "string",
+      "default": "high"
+     },
+     "generate_audio": {
+      "type": "boolean",
+      "default": true
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "bytedance/seedance-2.5/text-to-video",
+   "title": "Seedance 2.5",
+   "description": "Generates videos up to 30 seconds from text, image, video, or audio.",
+   "operation_type": [
+    "text2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "seedance_2_0",
+   "input_schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Write your prompt here"
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 30,
+      "minimum": 4
+     },
+     "resolution": {
+      "enum": [
+       "480p",
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "default": "720p"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16",
+       "21:9"
+      ],
+      "type": "string",
+      "default": "16:9"
+     },
+     "bitrate_mode": {
+      "enum": [
+       "standard",
+       "high"
+      ],
+      "type": "string",
+      "default": "high"
+     },
+     "output_format": {
+      "enum": [
+       "mp4",
+       "mov"
+      ],
+      "type": "string",
+      "default": "mp4"
+     },
+     "generate_audio": {
+      "type": "boolean",
+      "default": true
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "bytedance/seedance-2.5/video-edit",
+   "title": "Seedance 2.5",
+   "description": "Generate videos from text, images, video, and audio references, with clips up to 30 seconds.\nAnimate images, edit or extend existing footage, and generate audio alongside your video.",
+   "operation_type": [
+    "video2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "seedance_2_5",
+   "input_schema": {
+    "type": "object",
+    "required": [
+     "prompt",
+     "video_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Write your prompt here"
+     },
+     "video_url": {
+      "type": "string",
+      "format": "uri"
+     },
+     "audio_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "maxItems": 10,
+      "minItems": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "maxItems": 30,
+      "minItems": 1
+     },
+     "resolution": {
+      "enum": [
+       "480p",
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "default": "720p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "maxItems": 10,
+      "minItems": 1
+     },
+     "bitrate_mode": {
+      "enum": [
+       "standard",
+       "high"
+      ],
+      "type": "string",
+      "default": "high"
+     },
+     "generate_audio": {
+      "type": "boolean",
+      "default": true
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "bytedance/seedance-2.5/video-extend",
+   "title": "Seedance 2.5",
+   "description": "Seedance 2.5 Video Extend generates extended video content from an input video URL and text prompt, supporting up to 30 seconds duration and optional audio or image inputs. It outputs videos in 480p or 720p resolution with mp4 or mov format, allowing control over audio generation and multiple media inputs.",
+   "operation_type": [
+    "video2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "seedance_2_5",
+   "input_schema": {
+    "type": "object",
+    "required": [
+     "prompt",
+     "video_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Write your prompt here"
+     },
+     "duration": {
+      "type": "integer",
+      "default": 5,
+      "maximum": 30,
+      "minimum": 4
+     },
+     "video_url": {
+      "type": "string",
+      "format": "uri"
+     },
+     "audio_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "maxItems": 10,
+      "minItems": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "maxItems": 30,
+      "minItems": 1
+     },
+     "resolution": {
+      "enum": [
+       "480p",
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "default": "720p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "maxItems": 10,
+      "minItems": 1
+     },
+     "bitrate_mode": {
+      "enum": [
+       "standard",
+       "high"
+      ],
+      "type": "string",
+      "default": "high"
+     },
+     "generate_audio": {
+      "type": "boolean",
+      "default": true
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "higgsfield-ai/soul/standard",
+   "title": "Soul Standard",
+   "description": "Generates fashion and lifestyle photos from text, with style presets for editorial and social content.",
+   "operation_type": [
+    "text2image"
+   ],
+   "output_type": "image",
+   "base_credits": "1.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "type": "object",
+    "title": "Soul Playground",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "seed": {
+      "type": "integer",
+      "title": "Seed",
+      "default": null,
+      "maximum": 1000000,
+      "minimum": 1
+     },
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "description": "Write your prompt here"
+     },
+     "style_id": {
+      "type": "string",
+      "title": "Soul Style",
+      "format": "uuid",
+      "default": null
+     },
+     "batch_size": {
+      "enum": [
+       1,
+       4
+      ],
+      "type": "integer",
+      "title": "Result images",
+      "default": 1
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "720p"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "9:16",
+       "16:9",
+       "4:3",
+       "3:4",
+       "1:1",
+       "2:3",
+       "3:2"
+      ],
+      "type": "string",
+      "title": "Aspect Ratio",
+      "default": "4:3"
+     },
+     "enhance_prompt": {
+      "type": "boolean",
+      "title": "Enhance Prompt",
+      "default": true
+     },
+     "style_strength": {
+      "type": "number",
+      "title": "Style strength",
+      "format": "float",
+      "default": 1,
+      "maximum": 1,
+      "minimum": 0
+     }
+    }
+   }
+  },
+  {
+   "slug": "higgsfield-ai/soul/v2/image-to-image",
+   "title": "Soul 2",
+   "description": "Generate images from a reference image with Soul 2.",
+   "operation_type": [
+    "image_edit"
+   ],
+   "output_type": "image",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "type": "object",
+    "title": "Soul V2 Image to Image",
+    "required": [
+     "prompt",
+     "image_url"
+    ],
+    "properties": {
+     "seed": {
+      "type": "integer",
+      "title": "Seed",
+      "default": null,
+      "maximum": 1000000,
+      "minimum": 1
+     },
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "description": "Write your prompt here"
+     },
+     "style_id": {
+      "type": "string",
+      "title": "Soul Style",
+      "format": "uuid"
+     },
+     "image_url": {
+      "type": "string",
+      "title": "Reference image",
+      "format": "uri",
+      "minLength": 1
+     },
+     "batch_size": {
+      "enum": [
+       1,
+       4
+      ],
+      "type": "integer",
+      "title": "Result images",
+      "default": 1
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "720p"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "9:16",
+       "16:9",
+       "4:3",
+       "3:4",
+       "1:1",
+       "2:3",
+       "3:2"
+      ],
+      "type": "string",
+      "title": "Aspect Ratio",
+      "default": "4:3"
+     },
+     "enhance_prompt": {
+      "type": "boolean",
+      "title": "Enhance Prompt",
+      "default": true
+     },
+     "custom_reference_id": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "title": "Soul ID",
+      "format": "uuid",
+      "default": null,
+      "description": "ID of a completed Soul ID trained with model_version v2 in your API account. Create one using POST /v1/custom-references."
+     },
+     "custom_reference_strength": {
+      "type": "number",
+      "title": "Soul ID strength",
+      "default": 1.0,
+      "maximum": 1,
+      "minimum": 0,
+      "description": "Strength of the custom reference, from 0 to 1. Used when custom_reference_id is provided."
+     }
+    }
+   }
+  },
+  {
+   "slug": "higgsfield-ai/soul/v2/standard",
+   "title": "Soul 2",
+   "description": "Generates realistic portraits and fashion images, with natural textures and curated editorial styles.",
+   "operation_type": [
+    "text2image"
+   ],
+   "output_type": "image",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "type": "object",
+    "title": "Soul V2 Playground",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "seed": {
+      "type": "integer",
+      "title": "Seed",
+      "default": null,
+      "maximum": 1000000,
+      "minimum": 1
+     },
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "description": "Write your prompt here"
+     },
+     "style_id": {
+      "type": "string",
+      "title": "Soul Style",
+      "format": "uuid"
+     },
+     "batch_size": {
+      "enum": [
+       1,
+       4
+      ],
+      "type": "integer",
+      "title": "Result images",
+      "default": 1
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "720p"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "9:16",
+       "16:9",
+       "4:3",
+       "3:4",
+       "1:1",
+       "2:3",
+       "3:2"
+      ],
+      "type": "string",
+      "title": "Aspect Ratio",
+      "default": "4:3"
+     },
+     "enhance_prompt": {
+      "type": "boolean",
+      "title": "Enhance Prompt",
+      "default": true
+     },
+     "custom_reference_id": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "title": "Soul ID",
+      "format": "uuid",
+      "default": null,
+      "description": "ID of a completed Soul ID trained with model_version v2 in your API account. Create one using POST /v1/custom-references."
+     },
+     "custom_reference_strength": {
+      "type": "number",
+      "title": "Soul ID strength",
+      "default": 1.0,
+      "maximum": 1,
+      "minimum": 0,
+      "description": "Strength of the custom reference, from 0 to 1. Used when custom_reference_id is provided."
+     }
+    }
+   }
+  },
+  {
+   "slug": "higgsfield/genjutsu-light/motion-transfer/v1.0",
+   "title": "Genjutsu Light",
+   "description": "Transfer motion to reference characters and scenes. Uses the first 15 seconds of the source video and preserves source audio.",
+   "operation_type": [
+    "video2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "type": "object",
+    "title": "MotionTransferParams",
+    "required": [
+     "video_url",
+     "image_urls"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "default": "",
+      "maxLength": 10000
+     },
+     "video_url": {
+      "type": "string",
+      "title": "Video Url",
+      "format": "uri",
+      "maxLength": 2083,
+      "minLength": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "maxLength": 2083,
+       "minLength": 1
+      },
+      "title": "Image Urls",
+      "maxItems": 8,
+      "minItems": 1
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "480p",
+       "1080p"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "720p"
+     }
+    },
+    "additionalProperties": true
+   }
+  },
+  {
+   "slug": "higgsfield/genjutsu-light/object-swap/v1.0",
+   "title": "Genjutsu Light",
+   "description": "Replace objects, characters or clothes using reference images. Uses the first 15 seconds of the source video and preserves source audio.",
+   "operation_type": [
+    "video2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "type": "object",
+    "title": "ObjectSwapParams",
+    "required": [
+     "video_url",
+     "image_urls"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "default": "",
+      "maxLength": 10000
+     },
+     "video_url": {
+      "type": "string",
+      "title": "Video Url",
+      "format": "uri",
+      "maxLength": 2083,
+      "minLength": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "maxLength": 2083,
+       "minLength": 1
+      },
+      "title": "Image Urls",
+      "maxItems": 8,
+      "minItems": 1
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "480p",
+       "1080p"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "720p"
+     }
+    },
+    "additionalProperties": true
+   }
+  },
+  {
+   "slug": "higgsfield/genjutsu/motion-transfer/v1.0",
+   "title": "Genjutsu",
+   "description": "Swaps characters, locations, and styles in a video, keeping its motion.",
+   "operation_type": [
+    "video2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "type": "object",
+    "title": "MotionTransferParams",
+    "required": [
+     "video_url",
+     "image_urls"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "default": "",
+      "maxLength": 10000
+     },
+     "video_url": {
+      "type": "string",
+      "title": "Video Url",
+      "format": "uri",
+      "maxLength": 2083,
+      "minLength": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "maxLength": 2083,
+       "minLength": 1
+      },
+      "title": "Image Urls",
+      "maxItems": 8,
+      "minItems": 1
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "480p",
+       "1080p"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "720p"
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "higgsfield/genjutsu/object-swap/v1.0",
+   "title": "Genjutsu",
+   "description": "One video. Endless ways to reimagine it.",
+   "operation_type": [
+    "video2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "type": "object",
+    "title": "ObjectSwapParams",
+    "required": [
+     "video_url",
+     "image_urls"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "default": "",
+      "maxLength": 10000
+     },
+     "video_url": {
+      "type": "string",
+      "title": "Video Url",
+      "format": "uri",
+      "maxLength": 2083,
+      "minLength": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "maxLength": 2083,
+       "minLength": 1
+      },
+      "title": "Image Urls",
+      "maxItems": 8,
+      "minItems": 1
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "480p",
+       "1080p"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "720p"
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "higgsfield/genjutsu/restyle/v1.0",
+   "title": "Genjutsu",
+   "description": "Restyle a video with a selected visual preset while preserving its motion and source audio.",
+   "operation_type": [
+    "video2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "type": "object",
+    "title": "Genjutsu Restyle",
+    "required": [
+     "video_url",
+     "preset_id"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "default": "",
+      "maxLength": 10000
+     },
+     "preset_id": {
+      "type": "string",
+      "title": "Style preset",
+      "format": "uuid"
+     },
+     "video_url": {
+      "type": "string",
+      "title": "Source video",
+      "format": "uri",
+      "minLength": 1,
+      "description": "Source video, 4\u201330 seconds. Longer videos are trimmed to 30 seconds."
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "title": "Character images",
+      "default": [],
+      "maxItems": 5,
+      "description": "Optional character references. Leave empty to restyle the source frame."
+     },
+     "resolution": {
+      "enum": [
+       "480p",
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "720p"
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "kling-video/v3.0/pro/image-to-video",
+   "title": "Kling 3.0 Pro",
+   "description": "Kling 3.0 Image to Video (Pro) generates videos from a single image URL with optional sound and customizable duration up to 15 seconds. It supports multi-shot sequences with multiple prompts and fine-tuning via CFG scale for creative video outputs.",
+   "operation_type": [
+    "image2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "kling3_0",
+   "input_schema": {
+    "type": "object",
+    "title": "Kling 3.0 Playground",
+    "required": [
+     "image_url"
+    ],
+    "properties": {
+     "sound": {
+      "enum": [
+       "on",
+       "off"
+      ],
+      "type": "string",
+      "title": "Generate sound",
+      "default": "on"
+     },
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "description": "Write your prompt here"
+     },
+     "duration": {
+      "type": "integer",
+      "title": "Duration",
+      "default": 5,
+      "maximum": 15,
+      "minimum": 3
+     },
+     "elements": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "cfg_scale": {
+      "type": "number",
+      "title": "CFG Scale",
+      "default": 0.5,
+      "maximum": 1,
+      "minimum": 0,
+      "multipleOf": 0.01
+     },
+     "image_url": {
+      "type": "string",
+      "title": "Image URL",
+      "format": "uri"
+     },
+     "multi_shots": {
+      "type": "boolean",
+      "default": false
+     },
+     "multi_prompt": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "prompt": {
+         "type": "string",
+         "maxLength": 512
+        },
+        "duration": {
+         "type": "integer",
+         "maximum": 15,
+         "minimum": 1
+        }
+       }
+      },
+      "maxItems": 6,
+      "minItems": 0
+     },
+     "last_image_url": {
+      "type": "string",
+      "title": "Image URL",
+      "format": "uri"
+     }
+    }
+   }
+  },
+  {
+   "slug": "kling-video/v3.0/pro/text-to-video",
+   "title": "Kling 3.0 Pro",
+   "description": "Kling 3.0 Text to Video (Pro) generates videos from text prompts with customizable duration, aspect ratio, and sound options. It supports multi-shot sequences and fine-tuning via CFG scale for creative video outputs.",
+   "operation_type": [
+    "text2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "kling3_0",
+   "input_schema": {
+    "type": "object",
+    "title": "Kling 3.0 Playground",
+    "properties": {
+     "sound": {
+      "enum": [
+       "on",
+       "off"
+      ],
+      "type": "string",
+      "title": "Generate sound",
+      "default": "on"
+     },
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "description": "Write your prompt here"
+     },
+     "duration": {
+      "type": "integer",
+      "title": "Duration",
+      "default": 5,
+      "maximum": 15,
+      "minimum": 3
+     },
+     "elements": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "cfg_scale": {
+      "type": "number",
+      "title": "CFG Scale",
+      "default": 0.5,
+      "maximum": 1,
+      "minimum": 0,
+      "multipleOf": 0.01
+     },
+     "multi_shots": {
+      "type": "boolean",
+      "default": false
+     },
+     "aspect_ratio": {
+      "enum": [
+       "16:9",
+       "9:16",
+       "1:1"
+      ],
+      "type": "string",
+      "title": "Aspect ratio",
+      "default": "16:9"
+     },
+     "multi_prompt": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "prompt": {
+         "type": "string",
+         "maxLength": 512
+        },
+        "duration": {
+         "type": "integer",
+         "maximum": 15,
+         "minimum": 1
+        }
+       }
+      },
+      "maxItems": 6,
+      "minItems": 0
+     }
+    }
+   }
+  },
+  {
+   "slug": "kling-video/v3/motion-control/pro",
+   "title": "Kling 3.0",
+   "description": "Kling 3.0 Motion Control (Pro) generates videos by animating a source image according to the motion in a provided video. Users can control character orientation and choose to retain the original video's sound for customized motion-driven video creation.",
+   "operation_type": [
+    "image2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "kling3_0_motion_control",
+   "input_schema": {
+    "type": "object",
+    "title": "Kling V3 Motion Control Playground",
+    "required": [
+     "image_url",
+     "video_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "default": "",
+      "description": "Write your prompt here"
+     },
+     "image_url": {
+      "type": "string",
+      "title": "Image URL",
+      "format": "uri"
+     },
+     "video_url": {
+      "type": "string",
+      "title": "Video URL",
+      "format": "uri"
+     },
+     "keep_original_sound": {
+      "enum": [
+       "yes",
+       "no"
+      ],
+      "type": "string",
+      "title": "Keep original sound",
+      "default": "yes"
+     },
+     "character_orientation": {
+      "enum": [
+       "image",
+       "video"
+      ],
+      "type": "string",
+      "title": "Character orientation",
+      "default": "video",
+      "description": "Generate the orientation of the characters in the video, which can be selected to match the image or the video"
+     }
+    }
+   }
+  },
+  {
+   "slug": "kling-video/v3/motion-control/std",
+   "title": "Kling 3.0",
+   "description": "Kling 3.0 Motion Control (Standard) generates videos by animating a source image according to the motion in a provided video. Users can control character orientation and choose to retain the original video's sound for customized video creation.",
+   "operation_type": [
+    "image2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "kling3_0_motion_control",
+   "input_schema": {
+    "type": "object",
+    "title": "Kling V3 Motion Control Playground",
+    "required": [
+     "image_url",
+     "video_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "default": "",
+      "description": "Write your prompt here"
+     },
+     "image_url": {
+      "type": "string",
+      "title": "Image URL",
+      "format": "uri"
+     },
+     "video_url": {
+      "type": "string",
+      "title": "Video URL",
+      "format": "uri"
+     },
+     "keep_original_sound": {
+      "enum": [
+       "yes",
+       "no"
+      ],
+      "type": "string",
+      "title": "Keep original sound",
+      "default": "yes"
+     },
+     "character_orientation": {
+      "enum": [
+       "image",
+       "video"
+      ],
+      "type": "string",
+      "title": "Character orientation",
+      "default": "video",
+      "description": "Generate the orientation of the characters in the video, which can be selected to match the image or the video"
+     }
+    }
+   }
+  },
+  {
+   "slug": "kling-video/v4.0-flash/image-to-video",
+   "title": "Kling 4.0 Flash",
+   "description": "Animate one image as the first frame of a 720p video with Kling 4.0 Flash. Add an optional prompt and choose a duration from 3 to 20 seconds. Output dimensions follow the input image.",
+   "operation_type": [
+    "image2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "kling_4_0_flash",
+   "input_schema": {
+    "type": "object",
+    "required": [
+     "image_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "default": ""
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 20,
+      "minimum": 3,
+      "description": "Requested output duration in seconds, from 3 to 20."
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+     },
+     "resolution": {
+      "enum": [
+       "720p"
+      ],
+      "type": "string",
+      "default": "720p"
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "kling-video/v4.0-flash/reference-to-video",
+   "title": "Kling 4.0 Flash",
+   "description": "Generate 720p videos with Kling 4.0 Flash using image or video references and a text prompt. Choose an output duration from 3 to 20 seconds. Combined input video duration must be 3 to 20 seconds.",
+   "operation_type": [
+    "image2video",
+    "video2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "kling_4_0_flash",
+   "input_schema": {
+    "not": {
+     "properties": {
+      "image_url": false,
+      "image_urls": {
+       "maxItems": 0
+      },
+      "video_urls": {
+       "maxItems": 0
+      }
+     }
+    },
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 20,
+      "minimum": 3,
+      "description": "Requested output duration in seconds, from 3 to 20."
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 10
+     },
+     "resolution": {
+      "enum": [
+       "720p"
+      ],
+      "type": "string",
+      "default": "720p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 5
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1",
+       "adaptive"
+      ],
+      "type": "string",
+      "default": "16:9"
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "kling-video/v4.0-flash/text-to-video",
+   "title": "Kling 4.0 Flash",
+   "description": "Generate 720p videos from text prompts with Kling 4.0 Flash. Choose a duration from 3 to 20 seconds and an aspect ratio of 21:9, 16:9, 9:16, or 1:1.",
+   "operation_type": [
+    "text2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "kling_4_0_flash",
+   "input_schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 20,
+      "minimum": 3,
+      "description": "Requested output duration in seconds, from 3 to 20."
+     },
+     "resolution": {
+      "enum": [
+       "720p"
+      ],
+      "type": "string",
+      "default": "720p"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1"
+      ],
+      "type": "string",
+      "default": "16:9"
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "kling-video/v4.0-flash/video-edit",
+   "title": "Kling 4.0 Flash",
+   "description": "Edit a base video with Kling 4.0 Flash using a text prompt and optional image or video references. Generate 720p output from 3 to 20 seconds. Combined input video duration must be 3 to 20 seconds.",
+   "operation_type": [
+    "video2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "kling_4_0_flash",
+   "input_schema": {
+    "type": "object",
+    "required": [
+     "prompt",
+     "video_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 20,
+      "minimum": 3,
+      "description": "Requested output duration in seconds, from 3 to 20."
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+     },
+     "video_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 10
+     },
+     "resolution": {
+      "enum": [
+       "720p"
+      ],
+      "type": "string",
+      "default": "720p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 5
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1",
+       "adaptive"
+      ],
+      "type": "string",
+      "default": "16:9"
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "kling-video/v4.0/image-to-video",
+   "title": "Kling 4.0",
+   "description": "Animate images with Kling 4.0. Guide the video with a starting image, reference images, or an ending frame, and generate clips up to 30 seconds long in 720p or 1080p.",
+   "operation_type": [
+    "image2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "type": "object",
+    "required": [
+     "image_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string"
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 30,
+      "minimum": 3
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "title": "Middle frames",
+      "maxItems": 8,
+      "description": "Intermediate frames between the first and end frames. Up to 8 images."
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "default": "1080p"
+     },
+     "end_image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+     }
+    },
+    "additionalProperties": true
+   }
+  },
+  {
+   "slug": "kling-video/v4.0/reference-to-video",
+   "title": "Kling 4.0",
+   "description": "Create videos with Kling 4.0 using image and video references. Combine a text prompt with reference images, videos, or elements to guide clips up to 30 seconds long in 720p or 1080p.",
+   "operation_type": [
+    "image2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "if": {
+     "required": [
+      "image_url"
+     ]
+    },
+    "else": {
+     "if": {
+      "required": [
+       "image_urls"
+      ],
+      "properties": {
+       "image_urls": {
+        "minItems": 1
+       }
+      }
+     },
+     "else": {
+      "if": {
+       "required": [
+        "end_image_url"
+       ]
+      },
+      "else": {
+       "if": {
+        "required": [
+         "video_urls"
+        ],
+        "properties": {
+         "video_urls": {
+          "minItems": 1
+         }
+        }
+       },
+       "else": {
+        "required": [
+         "elements"
+        ],
+        "properties": {
+         "elements": {
+          "minItems": 1
+         }
+        }
+       }
+      }
+     }
+    },
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 30,
+      "minimum": 3
+     },
+     "elements": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "maxItems": 7
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 10
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "default": "1080p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 5
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1",
+       "adaptive"
+      ],
+      "type": "string",
+      "default": "adaptive"
+     },
+     "end_image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+     }
+    },
+    "additionalProperties": true
+   }
+  },
+  {
+   "slug": "kling-video/v4.0/text-to-video",
+   "title": "Kling 4.0",
+   "description": "Create videos with Kling 4.0 from text, images, and video references. Generate up to 30-second clips in 1080p, guide keyframes, and edit existing videos.",
+   "operation_type": [
+    "image2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "type": "object",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 30,
+      "minimum": 3
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "default": "1080p"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1"
+      ],
+      "type": "string",
+      "default": "16:9"
+     }
+    },
+    "additionalProperties": true
+   }
+  },
+  {
+   "slug": "kling-video/v4.0/video-edit",
+   "title": "Kling 4.0",
+   "description": "",
+   "operation_type": [
+    "image2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": null,
+   "input_schema": {
+    "type": "object",
+    "required": [
+     "prompt",
+     "video_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "minLength": 1
+     },
+     "duration": {
+      "type": "integer",
+      "default": 10,
+      "maximum": 30,
+      "minimum": 3
+     },
+     "elements": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "maxItems": 7
+     },
+     "image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+     },
+     "video_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 10
+     },
+     "resolution": {
+      "enum": [
+       "720p",
+       "1080p"
+      ],
+      "type": "string",
+      "default": "1080p"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri",
+       "minLength": 1
+      },
+      "maxItems": 5
+     },
+     "aspect_ratio": {
+      "enum": [
+       "21:9",
+       "16:9",
+       "9:16",
+       "1:1",
+       "adaptive"
+      ],
+      "type": "string",
+      "default": "adaptive"
+     },
+     "end_image_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+     }
+    },
+    "additionalProperties": true
+   }
+  },
+  {
+   "slug": "marketing-studio/image",
+   "title": "Marketing Studio Image",
+   "description": "Creates and edits campaign images up to 4K from text or images.",
+   "operation_type": [
+    "image_edit",
+    "text2image"
+   ],
+   "output_type": "image",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "generic_image",
+   "input_schema": {
+    "type": "object",
+    "allOf": [
+     {
+      "if": {
+       "required": [
+        "enhance_prompt"
+       ],
+       "properties": {
+        "enhance_prompt": {
+         "const": true
+        }
+       }
+      },
+      "then": {
+       "required": [
+        "preset_id",
+        "image_urls"
+       ],
+       "properties": {
+        "quality": {
+         "const": "high"
+        },
+        "image_urls": {
+         "maxItems": 2,
+         "minItems": 1
+        }
+       }
+      }
+     }
+    ],
+    "title": "Marketing Studio Image",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "maxLength": 5000,
+      "minLength": 1,
+      "description": "Write your prompt here"
+     },
+     "quality": {
+      "enum": [
+       "low",
+       "medium",
+       "high"
+      ],
+      "type": "string",
+      "default": "high"
+     },
+     "preset_id": {
+      "type": "string",
+      "title": "Preset ID",
+      "format": "uuid"
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "title": "Image URLs",
+      "maxItems": 16,
+      "minItems": 0
+     },
+     "moderation": {
+      "enum": [
+       "auto",
+       "low"
+      ],
+      "type": "string",
+      "default": "auto"
+     },
+     "resolution": {
+      "enum": [
+       "1k",
+       "2k",
+       "4k"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "2k"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "1:1",
+       "3:2",
+       "2:3",
+       "4:3",
+       "3:4",
+       "16:9",
+       "9:16",
+       "21:9"
+      ],
+      "type": "string",
+      "title": "Aspect Ratio",
+      "default": "auto"
+     },
+     "enhance_prompt": {
+      "type": "boolean",
+      "title": "Enhance prompt",
+      "default": false
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "marketing-studio/image/flare",
+   "title": "Marketing Studio Image",
+   "description": "Generate and edit Marketing Studio images with GPT Image 2.5 Flare.",
+   "operation_type": [
+    "image_edit",
+    "text2image"
+   ],
+   "output_type": "image",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "generic_image",
+   "input_schema": {
+    "type": "object",
+    "allOf": [
+     {
+      "if": {
+       "required": [
+        "enhance_prompt"
+       ],
+       "properties": {
+        "enhance_prompt": {
+         "const": true
+        }
+       }
+      },
+      "then": {
+       "required": [
+        "preset_id",
+        "image_urls"
+       ],
+       "properties": {
+        "image_urls": {
+         "maxItems": 2,
+         "minItems": 1
+        }
+       }
+      }
+     }
+    ],
+    "title": "GPT Image 2.5 Flare",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "maxLength": 5000,
+      "minLength": 1,
+      "description": "Write your prompt here"
+     },
+     "quality": {
+      "enum": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "type": "string",
+      "title": "Quality",
+      "default": "high"
+     },
+     "preset_id": {
+      "type": "string",
+      "title": "Preset ID",
+      "format": "uuid"
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "title": "Image URLs",
+      "maxItems": 16,
+      "minItems": 0
+     },
+     "moderation": {
+      "enum": [
+       "auto",
+       "low"
+      ],
+      "type": "string",
+      "default": "auto"
+     },
+     "resolution": {
+      "enum": [
+       "1k",
+       "2k",
+       "4k"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "2k"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "1:1",
+       "3:2",
+       "2:3",
+       "4:3",
+       "3:4",
+       "16:9",
+       "9:16",
+       "21:9"
+      ],
+      "type": "string",
+      "title": "Aspect Ratio",
+      "default": "auto"
+     },
+     "enhance_prompt": {
+      "type": "boolean",
+      "title": "Enhance prompt",
+      "default": false
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "marketing-studio/image/sunburst",
+   "title": "Marketing Studio Image",
+   "description": "Generate and edit Marketing Studio images with GPT Image 2.5 Sunburst.",
+   "operation_type": [
+    "image_edit",
+    "text2image"
+   ],
+   "output_type": "image",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "generic_image",
+   "input_schema": {
+    "type": "object",
+    "allOf": [
+     {
+      "if": {
+       "required": [
+        "enhance_prompt"
+       ],
+       "properties": {
+        "enhance_prompt": {
+         "const": true
+        }
+       }
+      },
+      "then": {
+       "required": [
+        "preset_id",
+        "image_urls"
+       ],
+       "properties": {
+        "image_urls": {
+         "maxItems": 2,
+         "minItems": 1
+        }
+       }
+      }
+     }
+    ],
+    "title": "GPT Image 2.5 Sunburst",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "maxLength": 5000,
+      "minLength": 1,
+      "description": "Write your prompt here"
+     },
+     "quality": {
+      "enum": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "type": "string",
+      "title": "Quality",
+      "default": "high"
+     },
+     "preset_id": {
+      "type": "string",
+      "title": "Preset ID",
+      "format": "uuid"
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "title": "Image URLs",
+      "maxItems": 16,
+      "minItems": 0
+     },
+     "moderation": {
+      "enum": [
+       "auto",
+       "low"
+      ],
+      "type": "string",
+      "default": "auto"
+     },
+     "resolution": {
+      "enum": [
+       "1k",
+       "2k",
+       "4k"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "2k"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "1:1",
+       "3:2",
+       "2:3",
+       "4:3",
+       "3:4",
+       "16:9",
+       "9:16",
+       "21:9"
+      ],
+      "type": "string",
+      "title": "Aspect Ratio",
+      "default": "auto"
+     },
+     "enhance_prompt": {
+      "type": "boolean",
+      "title": "Enhance prompt",
+      "default": false
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "minimax/h3/image-to-video",
+   "title": "MiniMax H3",
+   "description": "MiniMax H3 / Hailuo-03 preview integration using Video Generation V2.",
+   "operation_type": [
+    "image2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "minimax_h3",
+   "input_schema": {
+    "type": "object",
+    "title": "MiniMax H3 Image to Video Playground",
+    "required": [
+     "prompt",
+     "image_url"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "minLength": 1,
+      "description": "Write your prompt here"
+     },
+     "duration": {
+      "type": "integer",
+      "title": "Duration",
+      "default": 5,
+      "maximum": 15,
+      "minimum": 5
+     },
+     "image_url": {
+      "type": "string",
+      "title": "First frame URL",
+      "format": "uri"
+     },
+     "resolution": {
+      "enum": [
+       "2K"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "2K"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "adaptive",
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "title": "Aspect ratio",
+      "default": "auto"
+     },
+     "end_image_url": {
+      "type": "string",
+      "title": "Last frame URL",
+      "format": "uri"
+     },
+     "aigc_watermark": {
+      "type": "boolean",
+      "title": "AIGC watermark",
+      "default": false
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "minimax/h3/reference-to-video",
+   "title": "MiniMax H3",
+   "description": "MiniMax H3 generates videos from reference images or videos using Video Generation V2. Users provide prompts, reference media URLs, and optional audio to create videos up to 15 seconds with customizable resolution and aspect ratio.",
+   "operation_type": [
+    "image2video",
+    "video2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "minimax_h3",
+   "input_schema": {
+    "if": {
+     "required": [
+      "image_urls"
+     ]
+    },
+    "else": {
+     "required": [
+      "video_urls"
+     ]
+    },
+    "type": "object",
+    "title": "MiniMax H3 Reference to Video Playground",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "minLength": 1,
+      "description": "Write your prompt here"
+     },
+     "duration": {
+      "type": "integer",
+      "title": "Duration",
+      "default": 5,
+      "maximum": 15,
+      "minimum": 5
+     },
+     "audio_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "title": "Reference audio URLs",
+      "maxItems": 3,
+      "minItems": 0
+     },
+     "image_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "title": "Reference image URLs",
+      "maxItems": 9,
+      "minItems": 1
+     },
+     "resolution": {
+      "enum": [
+       "2K"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "2K"
+     },
+     "video_urls": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "format": "uri"
+      },
+      "title": "Reference video URLs",
+      "maxItems": 3,
+      "minItems": 1
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "adaptive",
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "title": "Aspect ratio",
+      "default": "auto"
+     },
+     "aigc_watermark": {
+      "type": "boolean",
+      "title": "AIGC watermark",
+      "default": false
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "minimax/h3/text-to-video",
+   "title": "MiniMax H3",
+   "description": "Generates 2K videos up to 15 seconds using text, image, video, and optional audio reference files.",
+   "operation_type": [
+    "text2video"
+   ],
+   "output_type": "video",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "minimax_h3",
+   "input_schema": {
+    "type": "object",
+    "title": "MiniMax H3 Text to Video Playground",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "title": "Prompt",
+      "minLength": 1,
+      "description": "Write your prompt here"
+     },
+     "duration": {
+      "type": "integer",
+      "title": "Duration",
+      "default": 5,
+      "maximum": 15,
+      "minimum": 5
+     },
+     "resolution": {
+      "enum": [
+       "2K"
+      ],
+      "type": "string",
+      "title": "Resolution",
+      "default": "2K"
+     },
+     "aspect_ratio": {
+      "enum": [
+       "auto",
+       "adaptive",
+       "21:9",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16"
+      ],
+      "type": "string",
+      "title": "Aspect ratio",
+      "default": "auto"
+     },
+     "aigc_watermark": {
+      "type": "boolean",
+      "title": "AIGC watermark",
+      "default": false
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "slug": "z-image/turbo",
+   "title": "Z-Image Turbo",
+   "description": "Generates images quickly with clear Chinese and English text rendering and PNG output up to 2K.",
+   "operation_type": [
+    "text2image"
+   ],
+   "output_type": "image",
+   "base_credits": "0.0000",
+   "is_workflow": false,
+   "fnf_job_set_type": "text2image",
+   "input_schema": {
+    "type": "object",
+    "title": "Z-Image Turbo",
+    "required": [
+     "prompt"
+    ],
+    "properties": {
+     "seed": {
+      "type": "integer",
+      "maximum": 2147483647,
+      "minimum": 0,
+      "description": "Optional random seed for similar, reproducible results."
+     },
+     "prompt": {
+      "type": "string",
+      "maxLength": 800,
+      "minLength": 1,
+      "description": "Positive prompt describing the desired content, style, and composition."
+     },
+     "resolution": {
+      "enum": [
+       "1k",
+       "2k"
+      ],
+      "type": "string",
+      "default": "1k",
+      "description": "Output resolution tier. Both tiers produce PNG images."
+     },
+     "aspect_ratio": {
+      "enum": [
+       "1:1",
+       "2:3",
+       "3:2",
+       "3:4",
+       "4:3",
+       "7:9",
+       "9:7",
+       "9:16",
+       "16:9",
+       "21:9"
+      ],
+      "type": "string",
+      "default": "1:1",
+      "description": "Output aspect ratio. Exact provider-recommended dimensions are selected automatically."
+     },
+     "prompt_extend": {
+      "type": "boolean",
+      "default": false,
+      "description": "Rewrite and reason over the prompt before generation; this uses the enhanced price tier."
+     }
+    },
+    "additionalProperties": false
+   }
+  }
+ ]
+}

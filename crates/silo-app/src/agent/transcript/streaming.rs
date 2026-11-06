@@ -68,6 +68,7 @@ impl Session {
             now: 0,
             older: false,
             turns: &[],
+            media: None,
         })
     }
 

@@ -168,7 +168,7 @@ async fn shell_output_exit_timeout_cancellation_and_jobs() {
     context.cancel.cancel();
     let out = shell.call(json!({"command":"sleep 10"}), context).await.unwrap();
     assert_eq!(out.metadata["termination"], "cancelled");
-    let jobs = Arc::new(shell::Jobs::default());
+    let jobs = Arc::new(otto_tools::jobs::Jobs::default());
     let shell = shell::Shell::new(jobs.clone());
     let job = shell::Job::new(jobs);
     let id = call(&shell, json!({"command":"printf background","background":true}), d.path()).await.metadata["job_id"].clone();

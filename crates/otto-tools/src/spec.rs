@@ -177,6 +177,8 @@ pub struct ToolCx {
     pub vision: bool,
     /// Where the session's edit history persists (`undo_edit`); in memory when `None`.
     pub undo: Option<Arc<dyn crate::builtin::undo_edit::UndoLog>>,
+    /// The session's background jobs (`generate_*` run there); none: such work runs in the call.
+    pub jobs: Option<Arc<crate::jobs::Jobs>>,
 }
 
 /// Text for a session after its call returned: injected at its next step,
@@ -202,6 +204,7 @@ impl ToolCx {
             mailbox: None,
             vision: true,
             undo: None,
+            jobs: None,
         }
     }
     pub fn progress(&self, message: Option<String>, output: Option<String>) {

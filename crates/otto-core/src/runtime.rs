@@ -115,6 +115,22 @@ impl LiveEvents {
         }
     }
 }
+/// A media model an `@` mention names (docs/MEDIA.md §3.0.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MentionedModel {
+    /// Its `@` handle, as `generate_media` takes it.
+    pub handle: String,
+    pub provider: String,
+    /// Its id, as the generation tools take it.
+    pub model: String,
+    /// As people say it (`Kling 3.0 Pro`).
+    pub name: String,
+    pub kind: otto_proto::MediaKind,
+}
+/// Looks up `@` model mention handles (`gpt-image-2.6-flare`).
+pub trait MentionModels: Send + Sync {
+    fn resolve(&self, handle: &str) -> Option<MentionedModel>;
+}
 #[derive(Clone)]
 pub struct Runtime(pub(crate) Arc<Inner>);
 pub(crate) struct Inner {
@@ -132,6 +148,8 @@ pub(crate) struct Inner {
     shell: Mutex<otto_tools::builtin::shell::Host>,
     /// Loads pages for `web_fetch` and `web_search` (silo's off-screen browser).
     renderer: Mutex<Option<Arc<dyn otto_tools::builtin::render::Renderer>>>,
+    /// Resolves `@` media model mentions (`set_mention_models`).
+    mention_models: Mutex<Option<Arc<dyn MentionModels>>>,
     /// Set by shutdown: no actor starts afterwards.
     closing: std::sync::atomic::AtomicBool,
     /// Name untitled sessions after their first turn (`set_auto_title`).
@@ -157,6 +175,7 @@ impl Runtime {
             sources: Mutex::new(Vec::new()),
             shell: Mutex::new(otto_tools::builtin::shell::Host::default()),
             renderer: Mutex::new(None),
+            mention_models: Mutex::new(None),
             closing: std::sync::atomic::AtomicBool::new(false),
             auto_title: std::sync::atomic::AtomicBool::new(false),
             plans: Mutex::new(plans),
@@ -285,6 +304,13 @@ impl Runtime {
     /// off-screen browser); plain HTTP otherwise.
     pub fn set_renderer(&self, renderer: Arc<dyn otto_tools::builtin::render::Renderer>) {
         *self.0.renderer.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(renderer);
+    }
+    /// Resolve `@` model mentions through `models` (the media catalog); without it they are missing.
+    pub fn set_mention_models(&self, models: Arc<dyn MentionModels>) {
+        *self.0.mention_models.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(models);
+    }
+    pub(crate) fn mention_models(&self) -> Option<Arc<dyn MentionModels>> {
+        self.0.mention_models.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
     /// The built-ins for `family`, sharing this runtime's jobs, terminals and renderer.
     pub(crate) fn builtins(&self, family: &str) -> Vec<Arc<dyn otto_tools::Tool>> {
@@ -779,6 +805,33 @@ impl Runtime {
         .map_err(|e| if e.kind() == std::io::ErrorKind::InvalidInput { Error::Invalid(e.to_string()) } else { e.into() })?;
         Ok(otto_proto::AttachmentInfo { id: stored.id, name: stored.name, mime: stored.mime, size: stored.size })
     }
+    /// `length` bytes (at most `otto_proto::model::ATTACHMENT_READ`) of the session's attachment `attachment`
+    /// from `offset` (`attachment.get`): user files and generated media alike.
+    pub async fn attachment_get(&self, id: &str, attachment: &str, offset: u64, length: Option<u64>) -> Result<otto_proto::AttachmentData> {
+        self.session(id).await?;
+        let dir = otto_tools::attachments::dir(&self.attachments_root(), id);
+        let attachment = attachment.to_owned();
+        let length = length.unwrap_or(otto_proto::model::ATTACHMENT_READ).min(otto_proto::model::ATTACHMENT_READ);
+        tokio::task::spawn_blocking(move || -> Result<otto_proto::AttachmentData> {
+            use std::io::{Read, Seek};
+            let (found, path) = otto_tools::attachments::get(&dir, &attachment)?;
+            let mut file = std::fs::File::open(path)?;
+            let size = file.metadata()?.len();
+            file.seek(std::io::SeekFrom::Start(offset.min(size)))?;
+            let mut bytes = Vec::new();
+            file.take(length).read_to_end(&mut bytes)?;
+            Ok(otto_proto::AttachmentData {
+                id: found.id,
+                name: found.name,
+                mime: found.mime,
+                size,
+                offset: offset.min(size),
+                data_base64: otto_tools::attachments::encode(&bytes),
+            })
+        })
+        .await
+        .map_err(|e| Error::Invalid(e.to_string()))?
+    }
     /// Input from a parent session to its child.
     pub(crate) async fn prompt_child(&self, id: &str, input: Vec<InputPart>, delivery: Delivery) -> Result<String> {
         self.session(id).await?.submit(input, delivery, false).await
@@ -807,16 +860,17 @@ impl Runtime {
     pub async fn compact(&self, id: &str) -> Result<()> {
         self.session(id).await?.compact().await
     }
-    fn jobs(&self) -> Arc<otto_tools::builtin::shell::Jobs> {
+    /// Every session's background jobs (shell commands, media generations).
+    pub(crate) fn jobs(&self) -> Arc<otto_tools::jobs::Jobs> {
         self.0.shell.lock().unwrap_or_else(std::sync::PoisonError::into_inner).jobs.clone()
     }
-    /// The user detaches session `id`'s running shell call `call_id` (`shell.detach`).
-    pub async fn detach_shell(&self, id: &str, call_id: &str) -> Result<()> {
+    /// The user detaches session `id`'s running shell or generation call `call_id` (`shell.detach`).
+    pub async fn detach_call(&self, id: &str, call_id: &str) -> Result<()> {
         self.session(id).await?;
-        if self.jobs().detach(id, call_id) { Ok(()) } else { Err(Error::Invalid(format!("no running shell command {call_id}"))) }
+        if self.jobs().detach(id, call_id) { Ok(()) } else { Err(Error::Invalid(format!("no running call {call_id} to detach"))) }
     }
-    /// Session `id`'s background shell jobs (`job.list`).
-    pub async fn shell_jobs(&self, id: &str) -> Result<Vec<otto_proto::JobInfo>> {
+    /// Session `id`'s background jobs (`job.list`).
+    pub async fn list_jobs(&self, id: &str) -> Result<Vec<otto_proto::JobInfo>> {
         self.session(id).await?;
         Ok(self
             .jobs()
@@ -825,11 +879,16 @@ impl Runtime {
             .into_iter()
             .map(|j| otto_proto::JobInfo {
                 job_id: j.job_id,
+                kind: match j.kind {
+                    otto_tools::jobs::JobKind::Shell => otto_proto::JobKind::Shell,
+                    otto_tools::jobs::JobKind::Media => otto_proto::JobKind::Media,
+                },
                 command: j.command,
                 call_id: j.call_id,
                 block_id: j.block_id,
                 started_at: j.started_at,
                 completed: j.completed,
+                progress: j.progress,
             })
             .collect())
     }
@@ -866,8 +925,7 @@ impl Runtime {
         self.update(id, SessionUpdate { archived: Some(archived), ..Default::default() }, false).await?;
         // A closed session's background commands stop with it.
         if archived {
-            let jobs = self.0.shell.lock().unwrap_or_else(std::sync::PoisonError::into_inner).jobs.clone();
-            jobs.stop_session(id).await;
+            self.jobs().stop_session(id).await;
         }
         Ok(())
     }

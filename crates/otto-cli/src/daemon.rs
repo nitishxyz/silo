@@ -74,6 +74,12 @@ pub async fn run(args: ServerArgs) -> Result<()> {
     })?;
     server.starting(phase(otto_proto::StartPhase::Loading, 0, 0));
     let providers = otto_llm::Providers::new(paths::auth_dir(&home), home.clone())?;
+    let media = otto_media::Media::new(providers.credentials().clone(), home.clone());
+    // Live media catalogs (docs/MEDIA.md §3.2) for `@` handles and listings, when stale.
+    if std::env::var_os("OTTO_SILO_OFFLINE").is_none() {
+        let media = media.clone();
+        tokio::spawn(async move { media.refresh_catalogs(false).await });
+    }
     let services = Arc::new(crate::services::Services::new(providers)?);
     let store = Arc::new(Mutex::new(store));
     let runtime = Arc::new(
@@ -96,13 +102,16 @@ pub async fn run(args: ServerArgs) -> Result<()> {
     runtime.add_source(silo.provided);
     let mcp = otto_mcp::Mcp::new(paths::user_config(), paths::auth_dir(&home).join("mcp"));
     runtime.add_source(mcp.clone());
+    runtime.add_tools(media.tools());
+    runtime.set_mention_models(Arc::new(crate::media::MentionModels(media.clone())));
     // Children that finished while their parent was closed, or before a restart.
     runtime.deliver_pending().await?;
-    server.ready(otto_server::Services { runtime, models: services.clone(), auth: services, mcp }).await?;
+    // Before clients see it ready: a SIGTERM right after must shut down cleanly, not kill it.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    server.ready(otto_server::Services { runtime, models: services.clone(), auth: services, mcp, media }).await?;
+    tracing::info!(pid = server.info.pid, "otto ready");
     // Otto's settings as tools through silo, for every agent there.
     crate::settings_tools::spawn(home.clone());
-    tracing::info!(pid = server.info.pid, "otto ready");
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let serving = server.serve_forever();
     tokio::pin!(serving);
     tokio::select! {
