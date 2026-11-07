@@ -26,6 +26,9 @@ pub enum Event {
     /// The page's colour (`theme-color`, else its opaque background) as
     /// `0x00RRGGBB`; `None` when it has none.
     ThemeColor(Option<u32>),
+    /// Whether a media element in the page plays with sound (whatever
+    /// `Browser::set_audio_muted` says).
+    Audible(bool),
     /// The page asked for a new tab (a modified link click, `window.open`,
     /// `target=_blank`): open it as a new browser tab.
     NewTab(crate::popup::NewTab),
@@ -118,6 +121,12 @@ pub(crate) struct Shared {
     pub(crate) theme_tag: String,
     /// The same for the menu script's reports and its media target (`menu.rs`).
     pub(crate) menu_tag: String,
+    /// The same for the media script's reports (`audio.rs`).
+    pub(crate) media_tag: String,
+    /// The frames playing sound.
+    pub(crate) media: Mutex<crate::audio::Frames>,
+    /// Last `Browser::set_audio_muted`; applied once CEF has made the browser.
+    pub(crate) muted: AtomicBool,
     /// The link text the menu script reported for the coming menu, and when.
     pub(crate) menu_report: Mutex<Option<(Instant, String)>>,
     /// The frame the last context menu opened in (media actions run there).
@@ -199,6 +208,9 @@ impl Shared {
             dropped: Mutex::new(None),
             theme_tag: theme_tag(),
             menu_tag: tag("menu"),
+            media_tag: tag("media"),
+            media: Mutex::default(),
+            muted: AtomicBool::new(false),
             menu_report: Mutex::new(None),
             menu_frame: Mutex::new(None),
             downloads: Mutex::default(),

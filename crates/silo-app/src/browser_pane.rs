@@ -246,6 +246,8 @@ pub enum BrowserPaneEvent {
     Activated,
     /// The page's colour changed.
     Backdrop,
+    /// It started or stopped playing sound, or was muted or unmuted.
+    Sound,
     /// The header's settings button: Settings › Browser.
     OpenSettings,
     /// Open Link in Split: a browser at this URL beside the pane.
@@ -295,6 +297,10 @@ pub struct BrowserPane {
     progress: f64,
     /// The page's colour (`theme-color` or background).
     theme_color: Option<u32>,
+    /// A media element in the page plays with sound.
+    audible: bool,
+    /// Its sound is silenced (the tab's speaker toggle).
+    muted: bool,
     /// The colours of the card behind the toolbar.
     palette: crate::adaptive::Chrome,
     /// Radii of the page's bottom corners: the card's, inside its border.
@@ -346,6 +352,10 @@ pub struct BrowserPane {
     /// In the off-screen host (`browser_host.rs`): the page opens without
     /// a layout, at the last (or a default) size.
     offscreen: bool,
+    /// An agent acts on the page before the window laid it out (a zoomed
+    /// sibling, a tab not shown yet): it opens without a layout, like the
+    /// host's, and takes the layout once it has one.
+    needed: bool,
     /// In a window, but in a tab it doesn't show: rendered slowly like the host's.
     hidden: bool,
     /// A tab opened behind (`tabs.rs`) no window has shown yet: its page is
@@ -421,6 +431,8 @@ impl BrowserPane {
             editable: false,
             progress: 1.0,
             theme_color: None,
+            audible: false,
+            muted: false,
             palette: crate::adaptive::Chrome::on(crate::theme::background()),
             corners: (0.0, 0.0),
             debounce: Debounce::default(),
@@ -447,6 +459,7 @@ impl BrowserPane {
             page_scale: 1.0,
             frames: Default::default(),
             offscreen: false,
+            needed: false,
             hidden: false,
             unseen: false,
             committed: false,
@@ -522,6 +535,12 @@ impl BrowserPane {
     /// Open the page without a layout (an agent acts on it).
     pub(crate) fn open_offscreen(&mut self, cx: &mut gpui::Context<Self>) {
         self.offscreen = true;
+        self.ensure_page(cx);
+    }
+
+    /// Open the page now, laid out or not (an agent acts on it).
+    pub(crate) fn open_needed(&mut self, cx: &mut gpui::Context<Self>) {
+        self.needed = true;
         self.ensure_page(cx);
     }
 
@@ -684,6 +703,24 @@ impl BrowserPane {
         self.theme_color.filter(|_| !self.empty)
     }
 
+    /// What the tab's speaker shows: `None` when the page is silent and
+    /// not muted, else whether it is muted.
+    pub fn sound(&self) -> Option<bool> {
+        (self.audible || self.muted).then_some(self.muted)
+    }
+
+    /// Silence the page, or let it play again.
+    pub fn set_muted(&mut self, muted: bool, cx: &mut gpui::Context<Self>) {
+        if self.muted != muted {
+            self.muted = muted;
+            if let Some(page) = &self.page {
+                page.set_audio_muted(muted);
+            }
+            cx.emit(BrowserPaneEvent::Sound);
+            cx.notify();
+        }
+    }
+
     /// The card's colours behind the toolbar, set by the workspace.
     pub fn set_palette(&mut self, palette: crate::adaptive::Chrome, cx: &mut gpui::Context<Self>) {
         if self.palette != palette {
@@ -803,7 +840,12 @@ impl BrowserPane {
 impl BrowserPane {
     /// Open the page once both the server state and the layout are known.
     fn ensure_page(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.page.is_some() || self.starting || self.error.is_some() || self.state.is_none() || (self.bounds.is_none() && !self.offscreen) {
+        if self.page.is_some()
+            || self.starting
+            || self.error.is_some()
+            || self.state.is_none()
+            || (self.bounds.is_none() && !self.offscreen && !self.needed)
+        {
             return;
         }
         self.starting = true;
@@ -855,14 +897,22 @@ impl BrowserPane {
             let dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let flag = dirty.clone();
             let notify = std::sync::Arc::new(move || flag.store(true, std::sync::atomic::Ordering::Release));
-            let options =
-                silo_web::BrowserOptions { url: &url, profile: &profile, size: self.view_size(), offscreen: self.offscreen || self.hidden, notify };
+            let options = silo_web::BrowserOptions {
+                url: &url,
+                profile: &profile,
+                size: self.view_size(),
+                offscreen: self.offscreen || self.hidden || self.bounds.is_none(),
+                notify,
+            };
             anyhow::Ok((runtime.create_browser(options)?, dirty))
         })();
         self.starting = false;
         match opened {
             Ok((page, dirty)) => {
                 let page = std::rc::Rc::new(page);
+                if self.muted {
+                    page.set_audio_muted(true);
+                }
                 if self.unseen {
                     page.set_hidden(true);
                 }
@@ -946,6 +996,12 @@ impl BrowserPane {
                         cx.emit(BrowserPaneEvent::Backdrop);
                     }
                 }
+                silo_web::Event::Audible(audible) => {
+                    if self.audible != audible {
+                        self.audible = audible;
+                        cx.emit(BrowserPaneEvent::Sound);
+                    }
+                }
                 silo_web::Event::NewTab(tab) => tabs.push(tab),
                 silo_web::Event::ContextMenu(m) => menu = Some(m),
                 silo_web::Event::DownloadAsked(request) => asked.push(request),
@@ -959,6 +1015,10 @@ impl BrowserPane {
                     self.pinch_watch = None;
                     self.actions = None;
                     self.theme_color = None;
+                    if self.audible {
+                        self.audible = false;
+                        cx.emit(BrowserPaneEvent::Sound);
+                    }
                     self.menu = None;
                     closed = by_page;
                 }
@@ -1765,11 +1825,18 @@ impl gpui::EntityInputHandler for BrowserPane {
 impl BrowserPane {
     /// Layout of the page area: open or resize the page to it.
     fn layout(&mut self, bounds: gpui::Bounds<gpui::Pixels>, scale: f32, cx: &mut gpui::Context<Self>) {
+        let first = self.bounds.is_none();
         let changed = self.bounds.is_none_or(|b| b.size != bounds.size) || self.scale != scale;
         self.bounds = Some(bounds);
         self.scale = scale;
-        if changed && let Some(page) = &self.page {
-            page.resize(self.view_size());
+        if let Some(page) = &self.page {
+            if changed {
+                page.resize(self.view_size());
+            }
+            // A page opened before its layout (`needed`) renders at full rate now.
+            if first && !self.offscreen {
+                page.set_offscreen(self.hidden);
+            }
         }
         if self.page.is_none() && !self.starting && self.error.is_none() {
             // Not during paint: creating the engine pumps the run loop.
@@ -2377,7 +2444,7 @@ impl crate::workspace::Workspace {
             let block = pane.read(cx).block_id.clone();
             match event {
                 BrowserPaneEvent::Activated => this.pane_activated(block),
-                BrowserPaneEvent::Backdrop => {}
+                BrowserPaneEvent::Backdrop | BrowserPaneEvent::Sound => {}
                 BrowserPaneEvent::OpenSettings => this.open_settings_section(crate::settings_panel::Section::Browser, window, cx),
                 BrowserPaneEvent::OpenSplit(url) => this.split_browser(block, Some(url.clone())),
             }

@@ -113,6 +113,19 @@ pub fn edge_fades(offset: f32, max: f32, room: f32) -> (bool, bool) {
     (scrolled > 0.5, scrolled < max - 0.5)
 }
 
+/// A tab's opacity under the edge fades: `start..end` is its span as GPUI's
+/// `bounds_for_item` reports it (laid out unscrolled), `offset` the strip's
+/// scroll offset (`<= 0`) and `view_start..view_end` the strip's visible
+/// span. Fully opaque unless it sits within [`FADE_WIDTH`] of a fading edge.
+#[must_use]
+pub fn edge_fade(start: f32, end: f32, offset: f32, view_start: f32, view_end: f32, fades: (bool, bool)) -> f32 {
+    let ramp = |inset: f32| 0.3 + 0.7 * (inset / FADE_WIDTH).clamp(0.0, 1.0);
+    let (start, end) = (start + offset, end + offset);
+    let lead = if fades.0 { ramp(start - view_start) } else { 1.0 };
+    let trail = if fades.1 { ramp(view_end - end) } else { 1.0 };
+    lead.min(trail)
+}
+
 /// One frame of an eased scroll from `from` toward `to`; snaps when close.
 #[must_use]
 pub fn ease_toward(from: f32, to: f32) -> f32 {
@@ -228,6 +241,45 @@ impl Workspace {
             },
             Icon::Glyph(glyph) => icon(glyph, size, color).into_any_element(),
         }
+    }
+
+    /// Tab `w`'s speaker, while a page in it plays sound or is muted: a
+    /// click mutes them all, or (all muted) lets them play again.
+    pub(crate) fn sound_toggle(&self, w: &silo_proto::model::WindowInfo, size: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pages: Vec<_> = crate::floats::window_blocks(w)
+            .iter()
+            .filter_map(|b| match self.block_pane(b)? {
+                crate::blocks::BlockPane::Browser(p) => p.read(cx).sound().map(|muted| (p, muted)),
+                _ => None,
+            })
+            .collect();
+        if pages.is_empty() {
+            return None;
+        }
+        let muted = pages.iter().all(|(_, muted)| *muted);
+        let pages: Vec<_> = pages.into_iter().map(|(p, _)| p).collect();
+        let chrome = self.chrome;
+        Some(
+            div()
+                .id(gpui::ElementId::Name(format!("sound-{}", w.id).into()))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(size + 6.0))
+                .capsule()
+                .hover(|s| s.bg(chrome.hover()))
+                .child(icon(if muted { "volume-off" } else { "volume" }, size, if muted { chrome.secondary } else { chrome.icon }))
+                .tooltip(crate::tooltip::Tooltip::text(if muted { "Unmute Tab" } else { "Mute Tab" }))
+                .map(claim_press)
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.stop_propagation();
+                    for page in &pages {
+                        page.update(cx, |page, cx| page.set_muted(!muted, cx));
+                    }
+                }))
+                .into_any_element(),
+        )
     }
 
     pub(crate) fn render_titlebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -358,17 +410,15 @@ impl Workspace {
         let mut child = 0;
         let mut active_child = None;
         let mut active_entering = false;
-        let (fade_left, fade_right) =
-            edge_fades(f32::from(self.tab_scroll.offset().x), f32::from(self.tab_scroll.max_offset().x), self.tab_room.get());
+        let offset = f32::from(self.tab_scroll.offset().x);
+        let fades = edge_fades(offset, f32::from(self.tab_scroll.max_offset().x), self.tab_room.get());
         let strip = self.tab_scroll.bounds();
         // Tabs fade out where the strip scrolls on, by their own
         // opacity (no overlay to stack on a frosted titlebar).
         let fade = |child: usize| {
             self.tab_scroll.bounds_for_item(child).map_or(1.0, |tab| {
-                let ramp = |inset: gpui::Pixels| 0.3 + 0.7 * (f32::from(inset) / FADE_WIDTH).clamp(0.0, 1.0);
-                let left = if fade_left { ramp(tab.left() - strip.left()) } else { 1.0 };
-                let right = if fade_right { ramp(strip.right() - tab.right()) } else { 1.0 };
-                left.min(right)
+                let (left, right) = (f32::from(tab.left()), f32::from(tab.right()));
+                edge_fade(left, right, offset, f32::from(strip.left()), f32::from(strip.right()), fades)
             })
         };
         // The gap before the next tab: none at the start, a full one after
@@ -616,6 +666,7 @@ impl Workspace {
                     }),
             )
             .child(div().ml(px(6.0)).min_w_0().flex_shrink(1.0).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+            .when_some(self.sound_toggle(w, 12.0, cx), |el, sound| el.child(div().flex_none().ml(px(3.0)).mr(px(-4.0)).child(sound)))
             .when_some(self.window_mark(w), |el, mark| {
                 let glyph = crate::block_status::glyph(mark, &format!("tab-{}", w.id), 10.0, chrome.surface, chrome.accent, cx);
                 el.child(div().flex_none().ml(px(6.0)).flex().items_center().child(glyph))
@@ -1224,6 +1275,16 @@ mod tests {
         assert_eq!(edge_fades(-199.8, 200.0, 0.0), (true, false), "sub-pixel rounding at the end");
         // Room left after the strip: a tab growing in or collapsing out reports a scroll range; nothing fades.
         assert_eq!(edge_fades(0.0, 64.0, 300.0), (false, false), "not overflowing");
+    }
+
+    #[test]
+    fn fades_tabs_where_they_are_shown_not_where_they_were_laid_out() {
+        // A 0..500 strip scrolled 400 on: a tab laid out at 700..850 shows at 300..450.
+        let both = (true, true);
+        assert_eq!(edge_fade(700.0, 850.0, -400.0, 0.0, 500.0, both), 1.0, "well inside: untouched");
+        assert!(edge_fade(800.0, 890.0, -400.0, 0.0, 500.0, both) < 1.0, "at the right edge: faded");
+        assert!(edge_fade(410.0, 500.0, -400.0, 0.0, 500.0, both) < 1.0, "at the left edge: faded");
+        assert_eq!(edge_fade(800.0, 890.0, -400.0, 0.0, 500.0, (true, false)), 1.0, "no fade on that side");
     }
 
     #[test]

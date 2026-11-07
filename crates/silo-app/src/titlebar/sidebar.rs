@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use gpui::{AnyElement, Context, DragMoveEvent, IntoElement, Window, canvas, div, prelude::*, px, rgb};
 
-use super::{CLOSE_GAP, CLOSE_SIZE, FADE_WIDTH, PILL_HEIGHT, TabDrag, claim_press, edge_fades};
+use super::{CLOSE_GAP, CLOSE_SIZE, PILL_HEIGHT, TabDrag, claim_press, edge_fade, edge_fades};
 use crate::layout::DraggedPane;
 use crate::theme::Continuous as _;
 use crate::{
@@ -158,14 +158,13 @@ impl Workspace {
         // As in the titlebar's strip: children are the tabs and ghosts only
         // (New Tab comes after them all), and rows fade where it scrolls on.
         let (mut child, mut active_child, mut active_entering) = (0, None, false);
-        let (fade_top, fade_bottom) = edge_fades(f32::from(scroll.offset().y), f32::from(scroll.max_offset().y), self.sidebar_room.get());
+        let offset = f32::from(scroll.offset().y);
+        let fades = edge_fades(offset, f32::from(scroll.max_offset().y), self.sidebar_room.get());
         let bounds = scroll.bounds();
         let fade = |child: usize| {
             scroll.bounds_for_item(child).map_or(1.0, |row| {
-                let ramp = |inset: gpui::Pixels| 0.3 + 0.7 * (f32::from(inset) / FADE_WIDTH).clamp(0.0, 1.0);
-                let top = if fade_top { ramp(row.top() - bounds.top()) } else { 1.0 };
-                let bottom = if fade_bottom { ramp(bounds.bottom() - row.bottom()) } else { 1.0 };
-                top.min(bottom)
+                let (top, bottom) = (f32::from(row.top()), f32::from(row.bottom()));
+                edge_fade(top, bottom, offset, f32::from(bounds.top()), f32::from(bounds.bottom()), fades)
             })
         };
         let mut gap_before = 0.0;
@@ -400,6 +399,7 @@ impl Workspace {
             .when(merging, |el| el.bg(hover).border_1().border_color(rgb(chrome.accent)))
             .child(self.block_icon_view(&w.focused, "side-tab", 13.0, if primary { chrome.accent } else { chrome.icon }, cx))
             .child(div().ml(px(8.0)).flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+            .when_some(self.sound_toggle(w, 12.0, cx), |el, sound| el.child(div().flex_none().ml(px(4.0)).child(sound)))
             .when_some(self.window_mark(w), |el, mark| {
                 let glyph = crate::block_status::glyph(mark, &format!("side-tab-{}", w.id), 10.0, chrome.surface, chrome.accent, cx);
                 el.child(div().flex_none().ml(px(6.0)).flex().items_center().child(glyph))

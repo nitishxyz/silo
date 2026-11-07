@@ -378,16 +378,7 @@ impl BrowserHost {
                 }
                 let (c, b) = (control.clone(), block.clone());
                 rt.spawn(async move { c.call_value(Method::OwnBlock { block_ids: vec![b], mode: OwnMode::Request }).await }).await??;
-                let begun = Instant::now();
-                while !pane.read_with(cx, |pane, _| pane.page_ready()) {
-                    if let Some(error) = pane.read_with(cx, |pane, _| pane.page_error().map(str::to_owned)) {
-                        anyhow::bail!("the page could not open: {error}");
-                    }
-                    if begun.elapsed() > READY {
-                        anyhow::bail!("browser is not ready");
-                    }
-                    cx.background_executor().timer(Duration::from_millis(50)).await;
-                }
+                ready(&pane, cx).await?;
                 let executor = pane.update(cx, |pane, cx| pane.executor(cx))?;
                 tokio::select! {
                     result = executor.run(&call.method, call.params) => result,
@@ -436,6 +427,24 @@ impl BrowserHost {
         })
         .detach();
     }
+}
+
+/// Wait for `pane`'s page to answer (opened by the caller), at most [`READY`].
+pub(crate) async fn ready(pane: &Entity<BrowserPane>, cx: &mut gpui::AsyncApp) -> anyhow::Result<()> {
+    let begun = Instant::now();
+    while !pane.read_with(cx, |pane, _| pane.page_ready()) {
+        if let Some(error) = pane.read_with(cx, |pane, _| pane.page_error().map(str::to_owned)) {
+            anyhow::bail!("the page could not open: {error}");
+        }
+        if begun.elapsed() > READY {
+            anyhow::bail!(
+                "browser is not ready: its page did not load within {} s; retry this block (opening another browser will not help)",
+                READY.as_secs()
+            );
+        }
+        cx.background_executor().timer(Duration::from_millis(50)).await;
+    }
+    Ok(())
 }
 
 /// Whether a window of this Mac's server has a pane for `block`.

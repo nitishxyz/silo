@@ -271,6 +271,15 @@ impl Browser {
         }
     }
 
+    /// Silences the page's sound (Chromium's tab mute; the page doesn't
+    /// see it). Kept until CEF has made the browser.
+    pub fn set_audio_muted(&self, muted: bool) {
+        self.shared.muted.store(muted, Ordering::Release);
+        if let Some(host) = self.host() {
+            host.set_audio_muted(i32::from(muted));
+        }
+    }
+
     /// Shown in a window (full rate) or kept off screen (throttled).
     pub fn set_offscreen(&self, offscreen: bool) {
         self.set_frame_rate(frame_rate(offscreen));

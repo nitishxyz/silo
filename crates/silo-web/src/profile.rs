@@ -100,6 +100,38 @@ fn apply_proxy(context: &RequestContext, port: Option<u16>) -> Result<()> {
     Ok(())
 }
 
+/// Chrome's "save this?" prompts: on a form submit they show a bubble anchored to a Chrome
+/// browser window, which a windowless page doesn't have, and the browser process crashes
+/// (`SaveCardBubbleControllerImpl::DoShowBubble`, a null deref, on a checkout form with a card
+/// number). Nothing is saved without them anyway, so autofill's card, address and payment
+/// saving, its AI entities, and the password manager are off in every profile.
+const SAVE_PROMPTS: &[&str] = &[
+    "autofill.credit_card_enabled",
+    "autofill.profile_enabled",
+    "autofill.bnpl_enabled",
+    "autofill.autofill_ai.identity_entities_enabled",
+    "autofill.autofill_ai.shopping_entities_enabled",
+    "autofill.autofill_ai.travel_entities_enabled",
+    "credentials_enable_service",
+];
+
+/// Turns [`SAVE_PROMPTS`] off in `context` (UI thread, initialized context). A pref this
+/// Chromium doesn't register is skipped; one it refuses is logged.
+pub(crate) fn disable_save_prompts(context: &RequestContext) {
+    for pref in SAVE_PROMPTS {
+        let name = CefString::from(*pref);
+        if context.has_preference(Some(&name)) == 0 {
+            continue;
+        }
+        let Some(mut value) = value_create() else { return };
+        value.set_bool(0);
+        let mut error = CefString::from("-");
+        if context.set_preference(Some(&name), Some(&mut value), Some(&mut error)) == 0 {
+            tracing::warn!(pref, %error, "silo-web: can't turn a save prompt off");
+        }
+    }
+}
+
 wrap_request_context_handler! {
     struct ProxyOnInit {
         tunnel: SharedTunnel,
@@ -108,6 +140,7 @@ wrap_request_context_handler! {
     impl RequestContextHandler {
         fn on_request_context_initialized(&self, context: Option<&mut RequestContext>) {
             let Some(context) = context else { return };
+            disable_save_prompts(context);
             let port = {
                 let mut auth = lock(&self.tunnel);
                 auth.initialized = true;

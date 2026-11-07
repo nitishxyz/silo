@@ -6,6 +6,7 @@
 
 #![cfg(target_os = "macos")]
 
+mod audio;
 mod browser;
 mod color;
 mod cr_app;

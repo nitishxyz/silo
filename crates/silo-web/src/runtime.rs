@@ -53,6 +53,13 @@ wrap_browser_process_handler! {
         fn on_schedule_message_pump_work(&self, delay_ms: i64) {
             (self.schedule)(Duration::from_millis(delay_ms.max(0) as u64));
         }
+
+        // The global context (`profiles/default`) is ready: its prefs can be set.
+        fn on_context_initialized(&self) {
+            if let Some(context) = request_context_get_global_context() {
+                crate::profile::disable_save_prompts(&context);
+            }
+        }
     }
 }
 

@@ -1,8 +1,9 @@
 //! Smoke test: init CEF windowless, load solid-colour pages, wait for accelerated paints and check
 //! the IOSurface centre pixel after input, navigation and tunnel-PAC loads. Re-execs itself inside a dev
-//! `.app` (CEF needs the bundle layout). `cargo run -p silo-web --example offscreen [-- --popups | --menus | --pinch | --perf]`
+//! `.app` (CEF needs the bundle layout). `cargo run -p silo-web --example offscreen [-- --popups | --menus | --pinch | --perf | --autofill]`
 
 mod arrows;
+mod autofill;
 mod bundle;
 mod hidden;
 mod menus;
@@ -192,6 +193,12 @@ fn run() -> Result<()> {
         runtime.shutdown(Duration::from_secs(5))?;
         return result;
     }
+    // `--autofill`: submitting a card form offers no save bubble (it crashed windowless).
+    if std::env::args().any(|arg| arg == "--autofill") {
+        let result = autofill::run(&runtime);
+        runtime.shutdown(Duration::from_secs(5))?;
+        return result;
+    }
     if std::env::args().any(|arg| arg == "--pinch") {
         let result = pinch::run(&runtime);
         runtime.shutdown(Duration::from_secs(5))?;
@@ -232,6 +239,7 @@ fn run() -> Result<()> {
         popups::run(&runtime)?;
         menus::run(&runtime)?;
         pinch::run(&runtime)?;
+        autofill::run(&runtime)?;
         pump_for(&runtime, Duration::from_secs(2));
         probe.check("after navigation")
     })();

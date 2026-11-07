@@ -85,20 +85,26 @@ impl Workspace {
             return;
         }
         let Some(control) = self.hosts.get(host).and_then(|host| host.control.clone()) else { return };
-        let Some(pane) = self.blocks.browser(block) else { return };
-        let executor = pane.update(cx, |pane, cx| {
-            if pane.unowned() {
-                pane.claim();
-                return pane.executor(cx);
-            }
-            pane.agent_executor(cx)
-        });
+        let Some(pane) = self.blocks.browser(block).cloned() else { return };
+        // A pane not laid out yet (a zoomed sibling, a tab not shown) has
+        // no page: open it now and wait, as the off-screen host does.
+        pane.update(cx, |pane, cx| pane.open_needed(cx));
         let request_id = request_id.to_owned();
         let method = call.method.clone();
         let params = call.params.clone();
         let timeout = params.get("timeout_ms").and_then(Value::as_u64).map_or(30_000, |ms| ms.saturating_add(5_000)).min(120_000);
         let rt = self.rt.clone();
         cx.spawn(async move |_, cx| {
+            let executor = match crate::browser_host::ready(&pane, cx).await {
+                Ok(()) => pane.update(cx, |pane, cx| {
+                    if pane.unowned() {
+                        pane.claim();
+                        return pane.executor(cx);
+                    }
+                    pane.agent_executor(cx)
+                }),
+                Err(error) => Err(error),
+            };
             let result = match executor {
                 Ok(executor) => {
                     tokio::select! {

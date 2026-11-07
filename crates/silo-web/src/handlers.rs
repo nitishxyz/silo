@@ -276,6 +276,12 @@ wrap_display_handler! {
                 self.shared.push(Event::ThemeColor(crate::color::parse(color)));
                 return 1;
             }
+            if let Some(report) = message.strip_prefix(self.shared.media_tag.as_str()) {
+                if let Some(audible) = lock(&self.shared.media).report(report) {
+                    self.shared.push(Event::Audible(audible));
+                }
+                return 1;
+            }
             if let Some(link_text) = message.strip_prefix(self.shared.menu_tag.as_str()) {
                 *lock(&self.shared.menu_report) = Some((std::time::Instant::now(), link_text.to_owned()));
                 return 1;
@@ -433,8 +439,14 @@ wrap_load_handler! {
             let Some(frame) = frame else { return };
             frame.execute_java_script(Some(&CefString::from(FOCUS_SCRIPT)), None, 0);
             frame.execute_java_script(Some(&CefString::from(crate::menu::menu_script(&self.shared.menu_tag).as_str())), None, 0);
+            frame.execute_java_script(Some(&CefString::from(crate::audio::media_script(&self.shared.media_tag).as_str())), None, 0);
             let main = frame.is_main() != 0;
             if main {
+                // A new document: the old one's frames (and their sound) are gone.
+                let silent = lock(&self.shared.media).clear();
+                if let Some(audible) = silent {
+                    self.shared.push(Event::Audible(audible));
+                }
                 // The old page's colour stays until the new one reports its
                 // own (or none, once loaded): clearing it here flashed the
                 // chrome to the theme's colour on every navigation.
@@ -515,6 +527,12 @@ wrap_life_span_handler! {
                 && let Some(host) = browser.as_ref().and_then(|browser| browser.host())
             {
                 host.was_hidden(1);
+            }
+            // Muted before CEF had it.
+            if self.shared.muted.load(Ordering::Acquire)
+                && let Some(host) = browser.as_ref().and_then(|browser| browser.host())
+            {
+                host.set_audio_muted(1);
             }
             let queued = lock(&self.shared.queued).take();
             if let (Some(url), Some(frame)) = (queued, browser.as_ref().and_then(|browser| browser.main_frame())) {
