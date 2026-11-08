@@ -305,6 +305,7 @@ fn main() {
         match std::env::var("SILO_OPEN").ok().and_then(|v| opens(&format!("silo://{v}"))) {
             Some(Opens::Settings) => show_settings(cx),
             Some(Opens::Permissions(focus)) => permissions::show(focus, cx),
+            Some(Opens::Updates) => check_for_updates(cx),
             None => {}
         }
         cx.spawn(async move |cx| {
@@ -318,6 +319,7 @@ fn main() {
                 match opens(&url) {
                     Some(Opens::Settings) => cx.update(show_settings),
                     Some(Opens::Permissions(focus)) => cx.update(|cx| permissions::show(focus, cx)),
+                    Some(Opens::Updates) => cx.update(check_for_updates),
                     None => tracing::info!(url, "ignoring URL"),
                 }
             }
@@ -386,6 +388,16 @@ fn reopened(visible: bool, cx: &mut App) {
 }
 
 /// Settings in the frontmost window (a new one if none is open).
+/// "Check for Updates" in the frontmost window (the menu-bar agent's).
+fn check_for_updates(cx: &mut App) {
+    let Some(handle) = frontmost(cx).or_else(|| open_window(None, cx).ok()) else { return };
+    let _ = handle.update(cx, |workspace, window, cx| {
+        window.activate_window();
+        workspace.execute(commands::Command::CheckForUpdates, window, cx);
+    });
+    cx.activate(true);
+}
+
 fn show_settings(cx: &mut App) {
     let Some(handle) = frontmost(cx).or_else(|| open_window(None, cx).ok()) else { return };
     let _ = handle.update(cx, |workspace, window, cx| {
@@ -430,9 +442,11 @@ enum Opens {
     Settings,
     /// The Permissions panel, a permission highlighted.
     Permissions(Option<silo_proto::permissions::PermissionId>),
+    /// Check for Updates.
+    Updates,
 }
 
-/// `silo://settings`, `silo://permissions` or `silo://permissions/<id>`
+/// `silo://settings`, `silo://updates`, `silo://permissions` or `silo://permissions/<id>`
 /// (any trailing slash or query).
 fn opens(url: &str) -> Option<Opens> {
     let rest = url.strip_prefix("silo://")?;
@@ -440,6 +454,7 @@ fn opens(url: &str) -> Option<Opens> {
     let mut words = path.split('/').filter(|w| !w.is_empty());
     let opened = match words.next()? {
         "settings" => Opens::Settings,
+        "updates" => Opens::Updates,
         "permissions" => Opens::Permissions(words.next().and_then(|w| w.parse().ok())),
         _ => return None,
     };
@@ -465,6 +480,7 @@ mod url_tests {
         use super::{Opens, opens};
         use silo_proto::permissions::PermissionId;
         assert_eq!(opens("silo://settings"), Some(Opens::Settings));
+        assert_eq!(opens("silo://updates"), Some(Opens::Updates));
         assert_eq!(opens("silo://settings/"), Some(Opens::Settings));
         assert_eq!(opens("silo://settings?x=1"), Some(Opens::Settings));
         assert_eq!(opens("silo://settingsx"), None);

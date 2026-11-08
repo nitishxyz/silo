@@ -1314,6 +1314,16 @@ fn canonical_home() -> anyhow::Result<PathBuf> {
 /// else (Linux, a development binary) this executable.
 fn service_exe(install: bool) -> anyhow::Result<PathBuf> {
     let exe = std::env::current_exe().and_then(|e| e.canonicalize()).context("locate silo executable")?;
+    // On a Mac the server is Silo Server.app: a bare release `silo` (copied
+    // out of a bundle, an install from before the bundle) never becomes
+    // the service (`down` and `status` still manage one). Development
+    // builds run as they are.
+    if install
+        && cfg!(target_os = "macos")
+        && let silo_client::update::Origin::Standalone(_) = silo_client::update::origin(&exe, &canonical_home()?, !cfg!(debug_assertions))
+    {
+        bail!("on macOS the server runs as Silo Server.app, not a bare `silo`; install it with\n  curl -fsSL {} | sh", silo_proto::INSTALL_URL);
+    }
     if !cfg!(target_os = "macos") || silo_client::runtime::server_bundle(&exe).is_none() {
         return Ok(exe);
     }

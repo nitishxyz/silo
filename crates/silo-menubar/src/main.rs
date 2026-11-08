@@ -1,6 +1,9 @@
 //! `silo-menubar`: a menu-bar agent (no Dock icon) for the always-on silo
-//! server. Shows its status, opens the app, its Settings (where the server
-//! controls live) or its Permissions panel, and quits Silo. One instance per state directory.
+//! server, inside Silo Server.app. Its menu: a header (the server's icon,
+//! name and status, › how it runs and its log), the app's and server's
+//! versions (copyable), Open Silo, Check for Updates, Settings and
+//! Permissions (where Silo.app is installed), and Quit Silo. One instance
+//! per state directory.
 
 mod net;
 
@@ -18,10 +21,11 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSBitmapImageRep, NSImage, NSMenu, NSMenuItem,
-    NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBitmapImageRep,
+    NSButton, NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSImageView, NSMenu, NSMenuItem, NSPasteboard,
+    NSPasteboardTypeString, NSStatusBar, NSStatusItem, NSTextField, NSVariableStatusItemLength, NSView, NSWorkspace,
 };
-use objc2_foundation::{NSData, NSSize, NSString, NSTimer};
+use objc2_foundation::{NSAttributedString, NSData, NSDictionary, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use silo_client::runtime::MENUBAR;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -111,6 +115,7 @@ impl AppLauncher {
 pub enum Page {
     Settings,
     Permissions,
+    Updates,
 }
 
 impl Page {
@@ -118,6 +123,7 @@ impl Page {
         match self {
             Self::Settings => "settings",
             Self::Permissions => "permissions",
+            Self::Updates => "updates",
         }
     }
 }
@@ -137,6 +143,8 @@ enum Action {
     Open,
     Settings,
     Permissions,
+    Updates,
+    ShowLog,
     Quit,
 }
 
@@ -168,6 +176,10 @@ define_class!(
             if generation != self.ivars().seen.get() {
                 self.ivars().seen.set(generation);
                 self.rebuild();
+                let notice = self.ivars().shared.notice.lock().ok().and_then(|mut n| n.take());
+                if let Some(notice) = notice {
+                    self.show_notice(notice);
+                }
             }
         }
 
@@ -180,11 +192,42 @@ define_class!(
                 Action::Open => self.ivars().app.open(None),
                 Action::Settings => self.ivars().app.open(Some(Page::Settings)),
                 Action::Permissions => self.ivars().app.open(Some(Page::Permissions)),
+                Action::Updates => self.check_for_updates(),
+                Action::ShowLog => {
+                    let log = silo_proto::paths::home().join("server.log");
+                    let _ = std::process::Command::new("/usr/bin/open").args(["-a", "Console"]).arg(log).spawn();
+                }
                 Action::Quit => {
                     if self.confirm_quit() {
                         let _ = self.ivars().cmds.send(Cmd::Quit);
                     }
                 }
+            }
+        }
+
+        /// Development (`SILO_MENUBAR_OPEN`): the menu, popped up at the
+        /// top right of the main screen.
+        #[unsafe(method(debugPopUp:))]
+        fn debug_pop_up(&self, _: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::from(self);
+            let menu = self.ivars().item.borrow().as_ref().and_then(|i| i.menu(mtm));
+            let frame = objc2_app_kit::NSScreen::mainScreen(mtm).map(|s| s.frame());
+            if let (Some(menu), Some(frame)) = (menu, frame) {
+                let at = NSPoint::new(frame.size.width - 420.0, frame.size.height - 34.0);
+                menu.popUpMenuPositioningItem_atLocation_inView(None, at, None);
+            }
+        }
+
+        /// The version block's copy button: versions and platform, for a bug report.
+        #[unsafe(method(copyVersions:))]
+        fn copy_versions(&self, button: &NSButton) {
+            let state = self.ivars().shared.state.lock().map(|s| s.clone()).unwrap_or_default();
+            let text = versions_text(&versions(&state, installed_app_version().as_deref()));
+            let pasteboard = NSPasteboard::generalPasteboard();
+            pasteboard.clearContents();
+            pasteboard.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
+            if let Some(done) = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str("checkmark"), Some(&NSString::from_str("Copied"))) {
+                button.setImage(Some(&done));
             }
         }
     }
@@ -203,6 +246,129 @@ impl Controller {
     fn new(mtm: MainThreadMarker, ivars: Ivars) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ivars);
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// The header's submenu: how the server runs, and its log.
+    fn server_menu(&self, state: &net::MenuState) -> Retained<NSMenu> {
+        let mtm = MainThreadMarker::from(self);
+        let menu = NSMenu::new(mtm);
+        menu.setAutoenablesItems(false);
+        if let Some(server) = &state.server {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            self.add(&menu, &format!("Started {}", ago(now.saturating_sub(server.started_at) / 1000)), None, "");
+            self.add(&menu, &format!("Process {}", server.pid), None, "");
+            let remote = match &server.remote_error {
+                None => "Remote access: on".to_owned(),
+                Some(error) => format!("Remote access: off ({})", error.chars().take(60).collect::<String>()),
+            };
+            self.add(&menu, &remote, None, "");
+        } else {
+            self.add(&menu, &state.headline().1, None, "");
+        }
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        self.add(&menu, "Show Server Log", Some(Action::ShowLog), "");
+        menu
+    }
+
+    /// Two label/value rows and a copy button, as one menu item's view.
+    fn versions_view(&self, rows: &[(String, String)]) -> Retained<NSView> {
+        let mtm = MainThreadMarker::from(self);
+        let (width, row, pad) = (300.0, 16.0, 7.0);
+        let height = row * rows.len() as f64 + pad * 2.0;
+        let view = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height)));
+        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        let font = NSFont::systemFontOfSize(11.0);
+        for (i, (label, value)) in rows.iter().enumerate() {
+            // Bottom-up coordinates: the first row on top.
+            let y = height - pad - row * (i as f64 + 1.0);
+            for (text, x, w, color) in
+                [(label, 14.0, 88.0, NSColor::tertiaryLabelColor()), (value, 102.0, width - 102.0 - 44.0, NSColor::secondaryLabelColor())]
+            {
+                let field = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+                field.setFont(Some(&font));
+                field.setTextColor(Some(&color));
+                field.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+                field.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(w, row - 1.0)));
+                view.addSubview(&field);
+            }
+        }
+        let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("doc.on.doc"),
+            Some(&NSString::from_str("Copy versions")),
+        );
+        if let Some(symbol) = symbol {
+            let button = unsafe { NSButton::buttonWithImage_target_action(&symbol, Some(self), Some(sel!(copyVersions:)), mtm) };
+            button.setBordered(false);
+            button.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+            button.setToolTip(Some(&NSString::from_str("Copy versions")));
+            button.setFrame(NSRect::new(NSPoint::new(width - 38.0, (height - 22.0) / 2.0), NSSize::new(22.0, 22.0)));
+            button.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+            view.addSubview(&button);
+        }
+        view
+    }
+
+    /// The header: the server's icon, its name over a status dot and line.
+    fn header_view(&self, name: &str, health: net::Health, headline: &str) -> Retained<NSView> {
+        let mtm = MainThreadMarker::from(self);
+        // A 44 pt icon; the name and status lines centred on it as a block.
+        let (width, height, icon) = (300.0, 62.0, 44.0);
+        let view = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height)));
+        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        if let Some(image) = server_icon() {
+            let image = NSImageView::imageViewWithImage(&image, mtm);
+            image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+            image.setFrame(NSRect::new(NSPoint::new(14.0, (height - icon) / 2.0), NSSize::new(icon, icon)));
+            view.addSubview(&image);
+        }
+        let x = 14.0 + icon + 12.0;
+        let (name_h, status_h, gap) = (19.0, 16.0, 2.0);
+        let bottom = (height - (name_h + gap + status_h)) / 2.0;
+        let (name_line, status_line) = header_lines(name, health, headline);
+        for (text, y, h) in [(status_line, bottom, status_h), (name_line, bottom + status_h + gap, name_h)] {
+            let label = NSTextField::labelWithAttributedString(&text, mtm);
+            label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+            label.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(width - x - 14.0, h)));
+            view.addSubview(&label);
+        }
+        view
+    }
+
+    /// Check for Updates: the app's own check where Silo.app is installed;
+    /// on a server-only Mac the server bundle's `silo update --check`, then
+    /// `silo update` if the user agrees (answers come back through the tick).
+    fn check_for_updates(&self) {
+        if installed_app_version().is_some() || !matches!(self.ivars().app, AppLauncher::Installed) {
+            self.ivars().app.open(Some(Page::Updates));
+            return;
+        }
+        run_update(&self.ivars().shared, false);
+    }
+
+    /// Answer a finished update check or update.
+    fn show_notice(&self, notice: net::Notice) {
+        let mtm = MainThreadMarker::from(self);
+        let alert = NSAlert::new(mtm);
+        let server = silo_proto::CHANNEL.server_name();
+        let text = notice.text.trim();
+        let available = notice.ok && !notice.update && text.contains("available");
+        let (title, info) = match (notice.update, notice.ok) {
+            (false, true) if available => (format!("A new {server} is available"), text.to_owned()),
+            (false, true) => (format!("{server} is up to date"), text.to_owned()),
+            (true, true) => (format!("{server} was updated"), text.lines().rfind(|l| !l.trim().is_empty()).unwrap_or(text).to_owned()),
+            (_, false) => ("Couldn't check for updates".to_owned(), text.to_owned()),
+        };
+        alert.setMessageText(&NSString::from_str(&title));
+        alert.setInformativeText(&NSString::from_str(&info));
+        if available {
+            alert.addButtonWithTitle(&NSString::from_str("Update"));
+            alert.addButtonWithTitle(&NSString::from_str("Later"));
+        }
+        #[allow(deprecated)]
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        if alert.runModal() == NSAlertFirstButtonReturn && available {
+            run_update(&self.ivars().shared, true);
+        }
     }
 
     /// Ask before "Quit Silo" ends running sessions; true to go ahead.
@@ -224,7 +390,7 @@ impl Controller {
         alert.runModal() == NSAlertFirstButtonReturn
     }
 
-    fn add(&self, menu: &NSMenu, title: &str, action: Option<Action>, key: &str) {
+    fn add(&self, menu: &NSMenu, title: &str, action: Option<Action>, key: &str) -> Retained<NSMenuItem> {
         let mtm = MainThreadMarker::from(self);
         let item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -244,6 +410,7 @@ impl Controller {
             None => item.setEnabled(false),
         }
         menu.addItem(&item);
+        item
     }
 
     fn rebuild(&self) {
@@ -252,18 +419,43 @@ impl Controller {
         self.ivars().actions.borrow_mut().clear();
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
-        let status = state.status();
-        self.add(&menu, &status, None, "");
+        let channel = silo_proto::CHANNEL;
+        let name = channel.app_name();
+        let app_version = installed_app_version();
+        let has_app = app_version.is_some() || !matches!(self.ivars().app, AppLauncher::Installed);
+
+        // The header: icon, "Silo Server", a dot and what it is doing; › server details.
+        let (health, headline) = state.headline();
+        let header = NSMenuItem::new(mtm);
+        header.setView(Some(&self.header_view(channel.server_name(), health, &headline)));
+        menu.addItem(&header);
         if let Some(error) = &state.error {
             let short: String = error.chars().take(80).collect();
             self.add(&menu, &format!("⚠︎ {short}"), None, "");
         }
-        let name = silo_proto::CHANNEL.app_name();
-        self.add(&menu, &format!("Open {name}"), Some(Action::Open), "o");
-        self.add(&menu, "Settings…", Some(Action::Settings), ",");
-        self.add(&menu, "Permissions…", Some(Action::Permissions), "");
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+        // Versions, with a copy button.
+        let rows = versions(&state, app_version.as_deref());
+        let block = NSMenuItem::new(mtm);
+        block.setView(Some(&self.versions_view(&rows)));
+        menu.addItem(&block);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+        if has_app {
+            self.add(&menu, &format!("Open {name}"), Some(Action::Open), "o");
+        }
+        let server = self.add(&menu, "Server", None, "");
+        server.setEnabled(true);
+        server.setSubmenu(Some(&self.server_menu(&state)));
+        self.add(&menu, "Check for Updates…", Some(Action::Updates), "");
+        if has_app {
+            self.add(&menu, "Settings…", Some(Action::Settings), ",");
+            self.add(&menu, "Permissions…", Some(Action::Permissions), "");
+        }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         self.add(&menu, &format!("Quit {name}"), Some(Action::Quit), "q");
+        let status = state.status();
         if let Some(item) = self.ivars().item.borrow().as_ref() {
             item.setMenu(Some(&menu));
             if let Some(button) = item.button(mtm) {
@@ -281,6 +473,130 @@ impl Controller {
             }
         }
     }
+}
+
+/// "2 hours ago" for `secs` seconds.
+fn ago(secs: u64) -> String {
+    let (n, unit) = match secs {
+        0..60 => return "just now".to_owned(),
+        60..3600 => (secs / 60, "minute"),
+        3600..86_400 => (secs / 3600, "hour"),
+        _ => (secs / 86_400, "day"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
+/// The header's two lines: the name in bold, then a coloured dot and what
+/// the server is doing.
+fn header_lines(name: &str, health: net::Health, headline: &str) -> (Retained<NSAttributedString>, Retained<NSAttributedString>) {
+    let dot = match health {
+        net::Health::Running => NSColor::systemGreenColor(),
+        net::Health::Busy => NSColor::systemBlueColor(),
+        net::Health::Trouble => NSColor::systemOrangeColor(),
+        net::Health::Stopped => NSColor::tertiaryLabelColor(),
+    };
+    let bold = NSFont::systemFontOfSize_weight(15.0, unsafe { objc2_app_kit::NSFontWeightSemibold });
+    let small = NSFont::systemFontOfSize(12.0);
+    let name_line = styled(&[(name, &bold, NSColor::labelColor())]);
+    let status_line = styled(&[("\u{25cf} ", &small, dot), (headline, &small, NSColor::secondaryLabelColor())]);
+    (name_line, status_line)
+}
+
+/// Runs of text, each in its font and colour.
+fn styled(parts: &[(&str, &NSFont, Retained<NSColor>)]) -> Retained<NSAttributedString> {
+    let out = NSMutableAttributedString::new();
+    for (text, font, color) in parts {
+        let keys: [&objc2_foundation::NSAttributedStringKey; 2] = unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] };
+        let values: [&AnyObject; 2] = [*font, &**color];
+        let attrs = NSDictionary::from_slices(&keys, &values);
+        let part = unsafe { NSAttributedString::new_with_attributes(&NSString::from_str(text), &attrs) };
+        out.appendAttributedString(&part);
+    }
+    Retained::into_super(out)
+}
+
+/// The server bundle's icon (the agent runs inside it), else the
+/// app's: its `Silo.icns` (a menu item draws a plain image; the asset
+/// catalog's layered icon may not), else what Finder shows.
+fn server_icon() -> Option<Retained<NSImage>> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let workspace = NSWorkspace::sharedWorkspace();
+    let bundle = match exe.ancestors().nth(6).filter(|b| b.extension().is_some_and(|e| e == "app")) {
+        Some(bundle) => bundle.to_owned(),
+        None => PathBuf::from(workspace.URLForApplicationWithBundleIdentifier(&NSString::from_str(BUNDLE_ID))?.path()?.to_string()),
+    };
+    let icns = bundle.join("Contents/Resources/Silo.icns");
+    let icon = NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(&icns.to_string_lossy()))
+        .unwrap_or_else(|| workspace.iconForFile(&NSString::from_str(&bundle.to_string_lossy())));
+    icon.setSize(NSSize::new(44.0, 44.0));
+    Some(icon)
+}
+
+/// This channel's installed Silo.app version: the app holding this agent,
+/// else the one Launch Services knows by bundle id.
+fn installed_app_version() -> Option<String> {
+    let holder = match AppLauncher::of(&std::env::current_exe().ok()?.canonicalize().ok()?) {
+        AppLauncher::Bundle(app) => Some(app),
+        _ => None,
+    };
+    let (path, held) = match holder {
+        Some(app) => (app, true),
+        None => (
+            PathBuf::from(NSWorkspace::sharedWorkspace().URLForApplicationWithBundleIdentifier(&NSString::from_str(BUNDLE_ID))?.path()?.to_string()),
+            false,
+        ),
+    };
+    let plist = std::fs::read_to_string(path.join("Contents/Info.plist")).ok()?;
+    let version = silo_client::update::plist_string(&plist, "CFBundleShortVersionString").map(str::to_owned);
+    // A dev bundle declares none: the app holding this agent is this build.
+    version.or_else(|| held.then(|| env!("CARGO_PKG_VERSION").to_owned()))
+}
+
+/// The version rows: the app (when installed) and the server.
+fn versions(state: &net::MenuState, app: Option<&str>) -> Vec<(String, String)> {
+    let channel = silo_proto::CHANNEL;
+    let mut rows = Vec::new();
+    if let Some(app) = app {
+        let kind = if channel == silo_proto::Channel::Dev { "Dev" } else { "Release" };
+        rows.push((channel.app_name().to_owned(), format!("{app} \u{b7} {kind}")));
+    }
+    let server = match (&state.server, &state.build) {
+        (Some(info), Some(build)) => format!("{} ({})", info.version, build.chars().take(8).collect::<String>()),
+        (Some(info), None) => info.version.clone(),
+        (None, _) => format!("{} ({})", env!("CARGO_PKG_VERSION"), silo_proto::BUILD.chars().take(8).collect::<String>()),
+    };
+    rows.push((channel.server_name().to_owned(), server));
+    rows
+}
+
+/// What the copy button copies: every row, and the platform.
+fn versions_text(rows: &[(String, String)]) -> String {
+    let mut lines: Vec<String> = rows.iter().map(|(k, v)| format!("{k} {v}")).collect();
+    let os = std::process::Command::new("/usr/bin/sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
+    lines.push(format!("macOS {} {}", os.unwrap_or_default(), std::env::consts::ARCH));
+    lines.join("\n")
+}
+
+/// Run the runtime server's `silo update --check` (`update`: `silo
+/// update`) off the main thread; its answer becomes [`Shared::notice`].
+fn run_update(shared: &Arc<Shared>, update: bool) {
+    let shared = shared.clone();
+    let silo = silo_client::runtime::server_exe(&silo_proto::paths::home());
+    std::thread::spawn(move || {
+        let args: &[&str] = if update { &["update"] } else { &["update", "--check"] };
+        let (ok, text) = match std::process::Command::new(&silo).args(args).stdin(std::process::Stdio::null()).output() {
+            Ok(out) => {
+                let text = if out.status.success() { out.stdout } else { [out.stdout, out.stderr].concat() };
+                (out.status.success(), String::from_utf8_lossy(&text).trim().to_owned())
+            }
+            Err(error) => (false, format!("run {}: {error}", silo.display())),
+        };
+        shared.post(net::Notice { update, ok, text });
+    });
 }
 
 /// The Silo mark as an 18 pt template image (`scripts/make-icons.sh`),
@@ -395,6 +711,12 @@ fn main() {
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     *controller.ivars().item.borrow_mut() = Some(item);
     controller.rebuild();
+    // Development: open the menu a moment after launch (screenshots, checks).
+    #[cfg(debug_assertions)]
+    if std::env::var_os("SILO_MENUBAR_OPEN").is_some() {
+        let _: () =
+            unsafe { msg_send![&*controller, performSelector: sel!(debugPopUp:), withObject: std::ptr::null::<AnyObject>(), afterDelay: 1.5f64] };
+    }
     let _timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, &controller, sel!(tick:), None, true) };
     app.run();
 }
@@ -403,7 +725,37 @@ fn main() {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{AppLauncher, quit_warning, stale_holder};
+    use super::{AppLauncher, ago, quit_warning, stale_holder, versions, versions_text};
+
+    #[test]
+    fn version_rows_and_ages() {
+        let mut state = crate::net::MenuState::default();
+        let rows = versions(&state, Some("0.1.27"));
+        assert_eq!(rows.len(), 2, "the app when installed, and the server");
+        assert_eq!(rows[0].0, silo_proto::CHANNEL.app_name());
+        assert!(rows[0].1.starts_with("0.1.27 · "), "{:?}", rows[0]);
+        assert!(rows[1].1.starts_with(env!("CARGO_PKG_VERSION")), "no server: this build's");
+        state.server = Some(silo_proto::control::ServerInfo {
+            version: "9.9.9".into(),
+            pid: 1,
+            server_id: String::new(),
+            started_at: 0,
+            endpoint_id: String::new(),
+            hostname: String::new(),
+            remote_error: None,
+            endpoint_addr: None,
+            idle_exit_secs: 0,
+        });
+        state.build = Some("2f021a5309403e44".into());
+        let rows = versions(&state, None);
+        assert_eq!(rows, [(silo_proto::CHANNEL.server_name().to_owned(), "9.9.9 (2f021a53)".to_owned())], "server-only: one row");
+        let text = versions_text(&rows);
+        assert!(text.starts_with(&format!("{} 9.9.9 (2f021a53)\nmacOS ", silo_proto::CHANNEL.server_name())), "{text}");
+        assert_eq!(ago(5), "just now");
+        assert_eq!(ago(60), "1 minute ago");
+        assert_eq!(ago(7300), "2 hours ago");
+        assert_eq!(ago(3 * 86_400), "3 days ago");
+    }
 
     #[test]
     fn opens_the_app_holding_the_helper() {

@@ -22,6 +22,8 @@ use tokio::sync::mpsc;
 #[derive(Clone, Debug, Default)]
 pub struct MenuState {
     pub server: Option<ServerInfo>,
+    /// The running server's build id.
+    pub build: Option<String>,
     pub sessions: usize,
     /// A server of a different build holds the state directory.
     pub incompatible: Option<IncompatibleServer>,
@@ -32,6 +34,26 @@ pub struct MenuState {
 }
 
 impl MenuState {
+    /// The header's status line beside its dot: what the server is doing.
+    pub fn headline(&self) -> (Health, String) {
+        if let Some(busy) = self.busy {
+            return (Health::Busy, busy.to_owned());
+        }
+        match (&self.server, &self.incompatible) {
+            (Some(_), _) => (
+                Health::Running,
+                match self.sessions {
+                    0 => "Running".to_owned(),
+                    1 => "Running · 1 session".to_owned(),
+                    n => format!("Running · {n} sessions"),
+                },
+            ),
+            (None, _) if self.unresponsive => (Health::Trouble, "Not responding".to_owned()),
+            (None, Some(_)) => (Health::Trouble, IncompatibleServer::LABEL.to_owned()),
+            (None, None) => (Health::Stopped, "Not running".to_owned()),
+        }
+    }
+
     /// The menu's status line.
     pub fn status(&self) -> String {
         let name = silo_proto::CHANNEL.app_name();
@@ -59,6 +81,15 @@ impl MenuState {
     }
 }
 
+/// The colour of the header's status dot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Health {
+    Running,
+    Busy,
+    Trouble,
+    Stopped,
+}
+
 #[derive(Default)]
 pub struct Shared {
     pub state: Mutex<MenuState>,
@@ -66,9 +97,27 @@ pub struct Shared {
     pub generation: AtomicU64,
     /// Set once "Quit Silo" has stopped the server; the agent then exits.
     pub quit: AtomicBool,
+    /// A finished update check or update, for the menu to answer.
+    pub notice: Mutex<Option<Notice>>,
+}
+
+/// What an update check (`update: false`) or update said.
+#[derive(Clone, Debug)]
+pub struct Notice {
+    pub update: bool,
+    pub ok: bool,
+    pub text: String,
 }
 
 impl Shared {
+    /// Hand `notice` to the menu (picked up at its next tick).
+    pub fn post(&self, notice: Notice) {
+        if let Ok(mut slot) = self.notice.lock() {
+            *slot = Some(notice);
+        }
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
     fn update(&self, f: impl FnOnce(&mut MenuState)) {
         if let Ok(mut state) = self.state.lock() {
             f(&mut state);
@@ -172,8 +221,10 @@ async fn serve(config: &Config, shared: &Shared, control: &Control, mut events: 
     let _ = control.subscribe().await;
     let sessions = list(control).await.len();
     let info = control.hello().server.clone();
+    let build = control.hello().build.clone();
     shared.update(|s| {
         s.server = Some(info);
+        s.build = Some(build);
         s.sessions = sessions;
         s.incompatible = None;
         s.error = None;
@@ -280,8 +331,19 @@ mod tests {
         assert_eq!(state.status(), format!("{} — Running · 1 session", silo_proto::CHANNEL.app_name()));
         state.sessions = 3;
         assert_eq!(state.status(), format!("{} — Running · 3 sessions", silo_proto::CHANNEL.app_name()));
+        assert_eq!(state.headline(), (Health::Running, "Running · 3 sessions".into()));
+        state.sessions = 0;
+        assert_eq!(state.headline(), (Health::Running, "Running".into()));
+        state.sessions = 3;
         assert_eq!(state.running_sessions(), 3);
         state.busy = Some("Quitting…");
         assert_eq!(state.status(), format!("{} — Quitting…", silo_proto::CHANNEL.app_name()));
+        assert_eq!(state.headline(), (Health::Busy, "Quitting…".into()));
+        state.busy = None;
+        state.server = None;
+        assert_eq!(state.headline(), (Health::Trouble, "Not responding".into()));
+        state.unresponsive = false;
+        state.incompatible = None;
+        assert_eq!(state.headline(), (Health::Stopped, "Not running".into()));
     }
 }
