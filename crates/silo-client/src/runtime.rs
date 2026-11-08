@@ -138,10 +138,12 @@ pub fn install(home: &Path, server_exe: &Path) -> io::Result<PathBuf> {
     remove_any(&tmp)?;
     let copied = copy_tree(bundle, &tmp).and_then(|()| replace_dir(&tmp, &dst));
     // After a swap `tmp` holds the old bundle; else a partial copy.
+    crate::launch_services::forget(&tmp);
     if let Err(error) = remove_any(&tmp) {
         tracing::warn!("runtime: remove {}: {error}", tmp.display());
     }
     copied?;
+    crate::launch_services::refresh(&dst);
     tracing::info!("runtime: installed {} from {}", dst.display(), bundle.display());
     Ok(installed)
 }
@@ -170,6 +172,8 @@ pub fn swap_in(home: &Path, staged: &Path) -> io::Result<bool> {
     let dst = server_app(home);
     let had = std::fs::symlink_metadata(&dst).is_ok();
     replace_dir(staged, &dst)?;
+    crate::launch_services::forget(staged);
+    crate::launch_services::refresh(&dst);
     tracing::info!("runtime: swapped in {}", dst.display());
     Ok(had)
 }

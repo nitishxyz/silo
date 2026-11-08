@@ -1727,6 +1727,118 @@ pub fn effective_turn(turn: Option<TurnStatus>, session: SessionStatus) -> Optio
     })
 }
 
+/// What a status report says beyond its state: a heading and a message
+/// (`block.report`'s `title` and `message`), shown in the block's status
+/// and its notification.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub title: Option<String>,
+    pub message: Option<String>,
+}
+
+/// Longest message a summary carries (notifications show a few lines).
+const SUMMARY_CHARS: usize = 240;
+
+/// The summary of `status`: the question asked (and its options), the
+/// approval wanted (tool and what it does), the error, or the start of the
+/// last reply.
+#[must_use]
+pub fn status_summary(
+    status: AgentStatus,
+    items: &[otto_llm::Item],
+    approvals: &[otto_proto::model::PendingApproval],
+    questions: &[otto_proto::model::PendingQuestion],
+    error: Option<&str>,
+) -> Summary {
+    let summary = |title: &str, message: Option<String>| Summary {
+        title: Some(title.to_owned()),
+        message: message.map(|m| excerpt(&m, SUMMARY_CHARS)).filter(|m| !m.is_empty()),
+    };
+    match status {
+        AgentStatus::Blocked { question: true } => {
+            let question = questions.first().map(|q| {
+                let options = q.options.iter().map(|o| o.trim()).filter(|o| !o.is_empty()).collect::<Vec<_>>();
+                if options.is_empty() { q.question.clone() } else { format!("{}\n{}", q.question.trim(), options.join(" · ")) }
+            });
+            summary("Asks you", question)
+        }
+        AgentStatus::Blocked { question: false } => match approvals.first() {
+            Some(a) => {
+                let what = if a.summary.trim().is_empty() { None } else { Some(a.summary.clone()) };
+                summary(&format!("Wants to use {}", tool_label(&a.tool)), what)
+            }
+            None => summary("Waiting for input", Some("A command it ran is waiting for input".into())),
+        },
+        AgentStatus::Done => summary("Finished", last_reply(items)),
+        AgentStatus::Error => summary("Stopped with an error", error.map(str::to_owned)),
+        AgentStatus::Idle | AgentStatus::Working => Summary::default(),
+    }
+}
+
+/// A tool's name for people: `generate_image` → `generate image`.
+fn tool_label(tool: &str) -> String {
+    tool.rsplit("__").next().unwrap_or(tool).replace('_', " ")
+}
+
+/// The last assistant item's text, if any.
+fn last_reply(items: &[otto_llm::Item]) -> Option<String> {
+    items.iter().rev().filter(|i| i.role == otto_llm::Role::Assistant).map(otto_llm::Item::text).find(|t| !t.trim().is_empty())
+}
+
+/// `text` as plain prose: markdown marks, code fences and links reduced to
+/// their words, whitespace collapsed, cut at `max` characters on a word.
+#[must_use]
+pub fn excerpt(text: &str, max: usize) -> String {
+    let mut lines = Vec::new();
+    let mut fenced = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || line.is_empty() || line.chars().all(|c| matches!(c, '-' | '*' | '_' | '=' | '|' | ':' | ' ')) {
+            continue;
+        }
+        let line = line.trim_start_matches(['#', '>', ' ']);
+        let line = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")).unwrap_or(line);
+        lines.push(line.to_owned());
+    }
+    let joined = lines.join(" ");
+    // [words](url) → words; drop emphasis and code marks.
+    let mut plain = String::with_capacity(joined.len());
+    let mut rest = joined.as_str();
+    while let Some(open) = rest.find('[') {
+        plain.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find("](").and_then(|mid| after[mid..].find(')').map(|close| (mid, mid + close))) {
+            Some((mid, close)) => {
+                plain.push_str(&after[..mid]);
+                rest = &after[close + 1..];
+            }
+            None => {
+                plain.push('[');
+                rest = after;
+            }
+        }
+    }
+    plain.push_str(rest);
+    let plain: String = plain.replace("**", "").replace("__", "").replace('`', "");
+    let words: Vec<&str> = plain.split_whitespace().collect();
+    let mut out = String::new();
+    for word in words {
+        if out.chars().count() + word.chars().count() + 1 > max {
+            out.push('…');
+            return out;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
 #[must_use]
 pub fn agent_status(turn: Option<TurnStatus>, session: SessionStatus, approvals: bool, questions: bool) -> AgentStatus {
     if questions {
@@ -1986,6 +2098,50 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn status_summaries_say_what_happened() {
+        let reply = Item::new(
+            "a1",
+            Role::Assistant,
+            vec![Part::text("## Done\n\nHere are **three** takes on the [logo](https://x/y):\n```\ncode\n```\n- flat\n- glass")],
+        );
+        let items = [Item::user_text("u1", "make a logo"), reply];
+        let done = status_summary(AgentStatus::Done, &items, &[], &[], None);
+        assert_eq!(done.title.as_deref(), Some("Finished"));
+        assert_eq!(done.message.as_deref(), Some("Done Here are three takes on the logo: flat glass"));
+        let question = otto_proto::model::PendingQuestion {
+            question_id: "q".into(),
+            call_id: "c".into(),
+            question: "Which model?".into(),
+            options: vec!["Kling".into(), " ".into(), "Seedance".into()],
+        };
+        let asks = status_summary(AgentStatus::Blocked { question: true }, &items, &[], &[question], None);
+        assert_eq!((asks.title.as_deref(), asks.message.as_deref()), (Some("Asks you"), Some("Which model? Kling · Seedance")));
+        let approval = otto_proto::model::PendingApproval {
+            approval_id: "a".into(),
+            call_id: "c".into(),
+            tool: "mcp__media__generate_video".into(),
+            summary: "Render 8 s with Kling".into(),
+            input: json!({}),
+            effects: Vec::new(),
+        };
+        let wants = status_summary(AgentStatus::Blocked { question: false }, &items, &[approval], &[], None);
+        assert_eq!((wants.title.as_deref(), wants.message.as_deref()), (Some("Wants to use generate video"), Some("Render 8 s with Kling")));
+        let input = status_summary(AgentStatus::Blocked { question: false }, &items, &[], &[], None);
+        assert_eq!(input.title.as_deref(), Some("Waiting for input"));
+        let failed = status_summary(AgentStatus::Error, &items, &[], &[], Some("Rate limited"));
+        assert_eq!((failed.title.as_deref(), failed.message.as_deref()), (Some("Stopped with an error"), Some("Rate limited")));
+        assert_eq!(status_summary(AgentStatus::Working, &items, &[], &[], None), Summary::default());
+        assert_eq!(status_summary(AgentStatus::Done, &[], &[], &[], None).message, None, "nothing said yet");
+    }
+
+    #[test]
+    fn excerpts_are_plain_and_short() {
+        assert_eq!(excerpt("one two three four", 9), "one two…");
+        assert_eq!(excerpt("`code` and __bold__ [x](y) [not a link", 100), "code and bold x [not a link");
+        assert_eq!(excerpt("---\n| a | b |\n|---|---|\n> quoted", 100), "| a | b | quoted");
+    }
 
     #[test]
     fn turn_errors_read_as_words() {

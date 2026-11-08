@@ -539,6 +539,11 @@ pub fn install(staged: &Path, app: &Path) -> std::io::Result<()> {
     }
     // A newer bundle for Finder, the Dock and Launch Services' caches.
     let _ = std::fs::File::open(app).and_then(|dir| dir.set_modified(std::time::SystemTime::now()));
+    // The staged copy was registered where it was checked; that folder now
+    // holds the old app and goes away. Left registered, Notification Center
+    // could resolve Silo to it and show no icon.
+    crate::launch_services::forget(staged);
+    crate::launch_services::refresh(app);
     Ok(())
 }
 

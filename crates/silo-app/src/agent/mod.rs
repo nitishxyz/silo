@@ -61,6 +61,7 @@ use client::Catalog;
 use editor::{Editor, EditorEvent, Nav};
 pub(crate) use markdown_view::MarkdownView;
 use signin::SignIn;
+pub(crate) use transcript::Summary;
 use transcript::{Row, Times, Todo};
 pub(crate) use view::provider_name;
 
@@ -95,7 +96,7 @@ pub enum AgentPaneEvent {
         session_id: String,
         title: String,
     },
-    Status(AgentStatus),
+    Status(AgentStatus, transcript::Summary),
     /// Jump to a silo block named by a tool call; a parked one is revealed as a float.
     Reveal(String),
     /// Stop a command by closing its block.
@@ -1125,7 +1126,7 @@ impl AgentPane {
         self.show_rows();
         cx.notify();
         let Some(id) = self.session_id.clone() else {
-            self.set_status(AgentStatus::Idle, cx);
+            self.set_status(AgentStatus::Idle, transcript::Summary::default(), cx);
             return;
         };
         if !matches!(self.conn, Conn::Ready) {
@@ -1213,10 +1214,10 @@ impl AgentPane {
         .detach();
     }
 
-    fn set_status(&mut self, status: AgentStatus, cx: &mut Context<Self>) {
+    fn set_status(&mut self, status: AgentStatus, summary: transcript::Summary, cx: &mut Context<Self>) {
         if self.status != Some(status) {
             self.status = Some(status);
-            cx.emit(AgentPaneEvent::Status(status));
+            cx.emit(AgentPaneEvent::Status(status, summary));
         }
     }
 
@@ -1293,7 +1294,9 @@ impl AgentPane {
         let status =
             if matches!(status, AgentStatus::Done | AgentStatus::Idle) && input() { AgentStatus::Blocked { question: false } } else { status };
         let status = if !self.primed && status == AgentStatus::Done { AgentStatus::Idle } else { status };
-        self.set_status(status, cx);
+        let summary =
+            transcript::status_summary(status, &m.items, &m.pending_approvals, &m.pending_questions, m.last_error.as_ref().map(|e| e.1.as_str()));
+        self.set_status(status, summary, cx);
         self.set_running(running, m.turn_started_at.map(Self::pane_ms));
         self.update.reconcile(&m.info);
         if !m.info.title.is_empty() && m.info.title != self.title {

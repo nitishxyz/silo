@@ -7,6 +7,7 @@ mod control;
 mod data;
 mod download;
 pub mod hosts;
+pub mod launch_services;
 mod mirror;
 pub mod mismatch;
 mod predict;

@@ -10,7 +10,7 @@ use silo_proto::{
 };
 
 use crate::{
-    agent::{AgentPane, AgentPaneEvent, AgentStatus, client::Otto, settings::Entry},
+    agent::{AgentPane, AgentPaneEvent, AgentStatus, Summary, client::Otto, settings::Entry},
     hosts::Transport,
 };
 
@@ -56,9 +56,10 @@ pub(crate) fn agents_supported(reach: Reach, features: Option<&[String]>) -> Age
     }
 }
 
-/// `block.report` for a turn state.
+/// `block.report` for a turn state, with what it says ([`Summary`]): the
+/// block's status shows it, and its notification.
 #[must_use]
-pub fn report(block_id: String, status: AgentStatus) -> Method {
+pub fn report(block_id: String, status: AgentStatus, summary: Summary) -> Method {
     let (state, kind) = match status {
         AgentStatus::Idle => (StatusState::Idle, None),
         AgentStatus::Working => (StatusState::Working, None),
@@ -74,8 +75,8 @@ pub fn report(block_id: String, status: AgentStatus) -> Method {
         kind,
         progress: None,
         app: Some("otto".into()),
-        title: None,
-        message: None,
+        title: summary.title,
+        message: summary.message,
     })
 }
 
@@ -151,8 +152,8 @@ impl crate::workspace::Workspace {
                     let (session_id, title, cwd) = (Some(session_id.clone()), Some(title.clone()), Some(cwd.clone()));
                     this.call(Method::AgentSet { block_id: block, session_id, title, cwd });
                 }
-                AgentPaneEvent::Status(status) => {
-                    this.call(report(block, *status));
+                AgentPaneEvent::Status(status, summary) => {
+                    this.call(report(block, *status, summary.clone()));
                     // A finished turn may have changed files: Changes blocks reviewing it list its turns again.
                     if matches!(status, AgentStatus::Done | AgentStatus::Error)
                         && let Some(session) = pane.read(cx).session().map(str::to_owned)
@@ -341,7 +342,7 @@ mod tests {
 
     #[test]
     fn statuses_map_to_reports() {
-        let kinds = |status| match report("b".into(), status) {
+        let kinds = |status| match report("b".into(), status, Summary::default()) {
             Method::BlockReport(p) => (p.state, p.kind),
             _ => unreachable!(),
         };
@@ -351,6 +352,9 @@ mod tests {
         assert_eq!(kinds(AgentStatus::Blocked { question: true }), (StatusState::Blocked, Some(StatusKind::Question)));
         assert_eq!(kinds(AgentStatus::Done), (StatusState::Done, None));
         assert_eq!(kinds(AgentStatus::Error), (StatusState::Error, None));
+        let summary = Summary { title: Some("Asks you".into()), message: Some("Which model?".into()) };
+        let Method::BlockReport(p) = report("b".into(), AgentStatus::Blocked { question: true }, summary) else { unreachable!() };
+        assert_eq!((p.title.as_deref(), p.message.as_deref()), (Some("Asks you"), Some("Which model?")));
     }
 
     #[test]

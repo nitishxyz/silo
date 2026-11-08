@@ -103,8 +103,18 @@ pub fn approval_identifier(host: &str, id: &str) -> String {
     format!("{host}/approval/{id}")
 }
 
-/// What a `block.attention` shows. Every program-supplied string is
-/// cleaned again; the title is trusted (host name, session, block).
+/// What a `block.attention` shows:
+///
+/// ```text
+/// Media Gen Chat: Image, Video, Audio Support      the block (trusted)
+/// Finished · silo                                  what happened · where
+/// Here are three takes on the logo: a flat…        what it says
+/// ```
+///
+/// The title is the block's title (else its session's); the subtitle the
+/// program's heading (else the reason: "Needs you", "Finished", …) and
+/// the session, with the host when it is not this Mac; the body the
+/// program's message. Program text is cleaned again.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn attention_note(
@@ -120,22 +130,31 @@ pub fn attention_note(
 ) -> Note {
     let fallback = match reason {
         AttentionReason::Blocked => "Needs you",
-        AttentionReason::Done => "Done",
+        AttentionReason::Done => "Finished",
         AttentionReason::Error => "Error",
         AttentionReason::Notification | AttentionReason::Unknown => "Notification",
     };
-    let subtitle = untrusted(title, MAX_TITLE);
-    let body = untrusted(body, MAX_BODY);
-    let (subtitle, body) = match (subtitle.is_empty(), body.is_empty()) {
-        (true, true) => (String::new(), fallback.to_owned()),
-        (true, false) => (fallback.to_owned(), body),
-        (false, _) => (subtitle, body),
+    let heading = untrusted(title, MAX_TITLE);
+    let heading = if heading.is_empty() { fallback.to_owned() } else { heading };
+    let (block, session) = (untrusted(block_title, MAX_TITLE), untrusted(session_name, MAX_TITLE));
+    let place = if host == crate::hosts::LOCAL_KEY || host_name.is_empty() {
+        session.clone()
+    } else {
+        let host_name = untrusted(host_name, MAX_TITLE);
+        if session.is_empty() { host_name } else { format!("{session} on {host_name}") }
     };
+    let (note_title, place) = match (block.is_empty(), session.is_empty()) {
+        (false, _) => (block, place),
+        // No block title: the session names it, the host stays as the place.
+        (true, false) => (session, place.split_once(" on ").map(|(_, h)| h.to_owned()).unwrap_or_default()),
+        (true, true) => ("Silo".to_owned(), place),
+    };
+    let subtitle = if place.is_empty() { heading } else { format!("{heading} · {place}") };
     Note {
         id: identifier(host, block_id, reason),
-        title: block_status::trusted_label(host_name, session_name, block_title),
+        title: note_title,
         subtitle,
-        body,
+        body: untrusted(body, MAX_BODY),
         target: Target { host: host.to_owned(), session_id: Some(session_id.to_owned()), block_id: Some(block_id.to_owned()) },
     }
 }
@@ -417,17 +436,37 @@ mod tests {
             "rm \u{1b}[31m-rf",
         );
         assert_eq!(note.id, "e1/b1/blocked");
-        assert_eq!(note.title, "mini · work · api");
-        assert_eq!(note.subtitle, "claude wants to run");
+        assert_eq!(note.title, "api", "the block names it");
+        assert_eq!(note.subtitle, "claude wants to run · work on mini", "what happened, where (another host named)");
         assert_eq!(note.body, "rm [31m-rf");
         assert_eq!(note.target, Target { host: "e1".into(), session_id: Some("s1".into()), block_id: Some("b1".into()) });
+        // This Mac goes unnamed; with nothing said, the reason says what happened.
         let bare = attention_note("This Mac", "local", "s1", "work", "b1", "zsh", AttentionReason::Done, "", "");
-        assert_eq!((bare.subtitle.as_str(), bare.body.as_str()), ("", "Done"));
+        assert_eq!((bare.title.as_str(), bare.subtitle.as_str(), bare.body.as_str()), ("zsh", "Finished · work", ""));
         let body_only = attention_note("This Mac", "local", "s1", "work", "b1", "zsh", AttentionReason::Notification, "", "build ok");
         assert_eq!(
             (body_only.subtitle.as_str(), body_only.body.as_str(), body_only.id.as_str()),
-            ("Notification", "build ok", "local/b1/notification")
+            ("Notification · work", "build ok", "local/b1/notification")
         );
+        // An agent's report: its heading and words.
+        let agent = attention_note(
+            "This Mac",
+            "local",
+            "s1",
+            "silo",
+            "b1",
+            "Media Gen Chat: Image, Video, Audio Support",
+            AttentionReason::Done,
+            "Finished",
+            "Here are three takes on the logo.",
+        );
+        assert_eq!(
+            (agent.title.as_str(), agent.subtitle.as_str(), agent.body.as_str()),
+            ("Media Gen Chat: Image, Video, Audio Support", "Finished · silo", "Here are three takes on the logo.")
+        );
+        // No block title: the session titles it, the host stays the place.
+        let untitled = attention_note("mini", "e1", "s1", "work", "b1", "", AttentionReason::Error, "", "exit 1");
+        assert_eq!((untitled.title.as_str(), untitled.subtitle.as_str()), ("work", "Error · mini"));
     }
 
     #[test]
