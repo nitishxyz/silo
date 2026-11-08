@@ -289,10 +289,21 @@ impl Workspace {
             frontmost(window, cx)
         };
         if announce {
-            if let OfferEvent::Added { host, .. } = event {
-                self.switch_host(*host, window, cx);
+            match event {
+                // A new host opens in a window of its own; this one keeps its workspace.
+                OfferEvent::Added { host, .. } => {
+                    let host = *host;
+                    cx.defer(move |cx| {
+                        let Ok(handle) = crate::open_window(None, cx) else { return };
+                        let _ = handle.update(cx, |workspace, window, cx| {
+                            window.activate_window();
+                            workspace.switch_host(host, window, cx);
+                            workspace.flash(status, cx);
+                        });
+                    });
+                }
+                OfferEvent::Failed { .. } => self.flash(status, cx),
             }
-            self.flash(status, cx);
         }
         cx.notify();
     }

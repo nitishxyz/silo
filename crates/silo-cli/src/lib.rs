@@ -294,6 +294,20 @@ where
     F: Fn() -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
 {
+    confirmed_with(control, false, call).await
+}
+
+/// [`confirmed`]; `yes` answers this terminal's confirmation itself (the
+/// user asked for this action and said so, as `silo down --yes`). An
+/// approval asked of a Silo app is still asked there.
+///
+/// # Errors
+/// As [`confirmed`].
+pub async fn confirmed_with<T, F, Fut>(control: &Control, yes: bool, call: F) -> anyhow::Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
     let first = call();
     tokio::pin!(first);
     let result = tokio::select! {
@@ -311,7 +325,12 @@ where
     let data = confirm.data.clone().unwrap_or_default();
     let id = data["approval"].as_str().unwrap_or_default().to_owned();
     let summary = data["summary"].as_str().unwrap_or(&confirm.message).to_owned();
-    let allow = ask_terminal(&format!("{summary}. Allow? [y/N] "));
+    let allow = if yes {
+        eprintln!("silo: {summary}: allowed (--yes)");
+        true
+    } else {
+        ask_terminal(&format!("{summary}. Allow? [y/N] "))
+    };
     control.call_value(Method::ApprovalAnswer { id, allow }).await?;
     if !allow {
         bail!("cancelled");

@@ -124,7 +124,14 @@ enum Command {
     },
     /// Start the server (as `up`) and offer it to the machine whose join
     /// ticket this is; it is added there.
-    Join { ticket: String },
+    Join {
+        ticket: String,
+        /// Allow the invite this machine creates for the other one without
+        /// asking on this terminal (`silo remote install` passes it: the
+        /// pairing was approved in Silo on the other machine).
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Set up other machines over SSH.
     Remote {
         #[command(subcommand)]
@@ -1003,7 +1010,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             Ok(0)
         }
         Command::Install { bin_dir } => install(bin_dir.as_deref()),
-        Command::Join { ticket } => join(&ticket).await,
+        Command::Join { ticket, yes } => join(&ticket, yes).await,
         Command::Update { check } => silo_cli::update::run(check).await,
         Command::Remote { command: RemoteCommand::Install { target, local, binary } } => {
             remote_install(&target, &silo_cli::upgrade::Source::new(local, binary)).await
@@ -1411,11 +1418,11 @@ async fn offer_over_ssh(control: &Control) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn join(ticket: &str) -> anyhow::Result<i32> {
+async fn join(ticket: &str, yes: bool) -> anyhow::Result<i32> {
     silo_client::transport::PairTicket::decode(ticket.trim()).context("invalid join ticket")?;
     let control = up().await?;
     let name = hostname();
-    link::join(&paths::home(), &control, ticket, &name, &NetOptions::default()).await?;
+    link::join(&paths::home(), &control, ticket, &name, yes, &NetOptions::default()).await?;
     println!("Offered {name} to the other machine.");
     Ok(0)
 }
@@ -2138,7 +2145,8 @@ mod tests {
         assert!(matches!(Cli::parse_from(["silo", "down"]).command, Some(Command::Down { yes: false })));
         assert!(matches!(Cli::parse_from(["silo", "down", "--yes"]).command, Some(Command::Down { yes: true })));
         assert!(matches!(Cli::parse_from(["silo", "status"]).command, Some(Command::Status)));
-        assert!(matches!(Cli::parse_from(["silo", "join", "silo1abc"]).command, Some(Command::Join { ticket }) if ticket == "silo1abc"));
+        assert!(matches!(Cli::parse_from(["silo", "join", "silo1abc"]).command, Some(Command::Join { ticket, yes: false }) if ticket == "silo1abc"));
+        assert!(matches!(Cli::parse_from(["silo", "join", "--yes", "silo1abc"]).command, Some(Command::Join { yes: true, .. })));
         assert!(Cli::try_parse_from(["silo", "join"]).is_err());
         let Some(Command::Remote { command: RemoteCommand::Install { target, binary, local: false } }) =
             Cli::parse_from(["silo", "remote", "install", "me@box", "--binary", "/tmp/silo"]).command

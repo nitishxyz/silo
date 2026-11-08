@@ -23,7 +23,15 @@ pub const INSTALL_JOIN_TTL: Duration = Duration::from_secs(1800);
 /// # Errors
 /// RPC failure; [`silo_client::Offline`] is explained.
 pub async fn invite(control: &Control, ttl: Duration, purpose: InvitePurpose) -> anyhow::Result<PairInvite> {
-    crate::confirmed(control, || control.call(Method::PairCreate { ttl_secs: ttl.as_secs(), purpose })).await.map_err(explain)
+    invite_with(control, ttl, purpose, false).await
+}
+
+/// [`invite`]; `yes` allows it without asking on this terminal.
+///
+/// # Errors
+/// As [`invite`].
+pub async fn invite_with(control: &Control, ttl: Duration, purpose: InvitePurpose, yes: bool) -> anyhow::Result<PairInvite> {
+    crate::confirmed_with(control, yes, || control.call(Method::PairCreate { ttl_secs: ttl.as_secs(), purpose })).await.map_err(explain)
 }
 
 /// Fail when `control`'s server cannot be reached remotely.
@@ -57,13 +65,14 @@ pub async fn offer(home: &Path, join: &str, offer_ticket: &str, name: &str, opti
     })
 }
 
-/// Offer `local`'s server over the join ticket `join` under `name`.
+/// Offer `local`'s server over the join ticket `join` under `name`;
+/// `yes` allows its device invite without asking on this terminal.
 ///
 /// # Errors
 /// See [`require_remote`], [`invite`] and [`offer`].
-pub async fn join(home: &Path, local: &Control, join: &str, name: &str, options: &NetOptions) -> anyhow::Result<()> {
+pub async fn join(home: &Path, local: &Control, join: &str, name: &str, yes: bool, options: &NetOptions) -> anyhow::Result<()> {
     require_remote(local).await?;
-    let invite = invite(local, JOIN_OFFER_TTL, InvitePurpose::Device).await?;
+    let invite = invite_with(local, JOIN_OFFER_TTL, InvitePurpose::Device, yes).await?;
     offer(home, join, &invite.ticket, name, options).await
 }
 
@@ -276,7 +285,8 @@ impl Install {
     /// Install the uploaded binary and join with `ticket`.
     #[must_use]
     pub fn join_uploaded(&self, ticket: &str) -> Vec<String> {
-        let script = format!("chmod 755 ~/{UPLOAD_TEMP} && mv -f ~/{UPLOAD_TEMP} ~/.local/bin/silo && ~/.local/bin/silo join {}", quote(ticket));
+        let script =
+            format!("chmod 755 ~/{UPLOAD_TEMP} && mv -f ~/{UPLOAD_TEMP} ~/.local/bin/silo && ~/.local/bin/silo join --yes {}", quote(ticket));
         self.ssh(true, &script)
     }
 
@@ -319,7 +329,7 @@ impl Install {
     #[must_use]
     pub fn join_download(&self, version: &str, ticket: &str) -> Vec<String> {
         let script = format!(
-            "curl -fsSL {} | env LC_TERMINAL= sh -s -- --version {} join {}",
+            "curl -fsSL {} | env LC_TERMINAL= sh -s -- --version {} join --yes {}",
             silo_proto::INSTALL_URL,
             quote(&format!("v{version}")),
             quote(ticket)
@@ -498,7 +508,7 @@ mod tests {
         assert_eq!(plain(install.discard()), ["ssh", "me@box", "sh -c 'rm -f ~/.local/bin/.silo.upload'"]);
         assert_eq!(plain(install.join_uploaded("silo1abc"))[..3], ["ssh", "-t", "me@box"]);
         // Single quotes inside the script survive the outer quoting.
-        assert!(plain(install.join_uploaded("silo1abc"))[3].ends_with(r"silo join '\''silo1abc'\'''"));
+        assert!(plain(install.join_uploaded("silo1abc"))[3].ends_with(r"silo join --yes '\''silo1abc'\'''"));
         // The login shell may be fish or csh: the remote command is only `sh -c '…'`.
         for argv in [
             plain(install.detect()),
@@ -554,7 +564,7 @@ mod tests {
                 "ssh".to_owned(),
                 "-t".to_owned(),
                 "me@box".to_owned(),
-                sh("chmod 755 ~/.local/bin/.silo.upload && mv -f ~/.local/bin/.silo.upload ~/.local/bin/silo && ~/.local/bin/silo join 'silo1abc'")
+                sh("chmod 755 ~/.local/bin/.silo.upload && mv -f ~/.local/bin/.silo.upload ~/.local/bin/silo && ~/.local/bin/silo join --yes 'silo1abc'")
             ]
         );
         assert_eq!(
@@ -563,7 +573,7 @@ mod tests {
                 "ssh".to_owned(),
                 "-t".to_owned(),
                 "me@box".to_owned(),
-                sh("curl -fsSL https://nitishxyz.github.io/silo/install.sh | env LC_TERMINAL= sh -s -- --version 'v0.1.0' join 'silo1abc'")
+                sh("curl -fsSL https://nitishxyz.github.io/silo/install.sh | env LC_TERMINAL= sh -s -- --version 'v0.1.0' join --yes 'silo1abc'")
             ]
         );
         assert_eq!(quote("a'b"), r"'a'\''b'");
