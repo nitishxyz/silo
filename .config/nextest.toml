@@ -1,4 +1,5 @@
 # cargo nextest: every test in a process of its own, all binaries at once.
+experimental = ["setup-scripts"]
 # Doctests do not run here: `cargo test --doc --workspace`.
 
 [profile.default]
@@ -22,3 +23,15 @@ threads-required = 2
 
 [profile.ci]
 fail-fast = false
+
+# Environment for every test (.config/scripts/test-env.sh).
+[scripts.setup.test-env]
+command = ".config/scripts/test-env.sh"
+
+[[profile.default.scripts]]
+filter = "all()"
+setup = "test-env"
+
+[[profile.ci.scripts]]
+filter = "all()"
+setup = "test-env"

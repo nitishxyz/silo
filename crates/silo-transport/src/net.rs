@@ -36,6 +36,10 @@ pub struct Net {
     router: Option<Router>,
 }
 
+/// Set to `1` (the test runner does): endpoints bind to loopback only and
+/// skip mDNS, so nothing reaches the local network.
+pub const LOOPBACK_ENV: &str = "SILO_NET_LOOPBACK";
+
 /// Endpoint options. `Default` = n0 relays, mDNS off, normal path selection.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NetOptions {
@@ -59,19 +63,29 @@ impl Net {
 
     pub async fn bind_with(identity: &Identity, opts: NetOptions) -> Result<Net> {
         let NetOptions { relay, mdns, pin_initial_path, port } = opts;
+        // Tests (`.config/nextest.toml`): this machine only, so macOS never
+        // asks whether a test build may use the local network.
+        let loopback = std::env::var_os(LOOPBACK_ENV).is_some_and(|v| v == "1");
         let builder = match relay {
             RelayConfig::Default => Endpoint::builder(presets::N0),
             RelayConfig::Custom(url) => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::custom([url])),
             RelayConfig::Disabled => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
         };
         let mut builder = builder.secret_key(identity.secret().clone());
-        if mdns {
+        if mdns && !loopback {
             builder = builder.address_lookup(MdnsAddressLookup::builder());
         }
         if pin_initial_path {
             builder = builder.path_selector(Arc::new(PinInitialPath));
         }
-        if let Some(port) = port {
+        if loopback {
+            let port = port.unwrap_or(0);
+            builder = builder
+                .bind_addr((std::net::Ipv4Addr::LOCALHOST, port))
+                .context("bind address")?
+                .bind_addr((std::net::Ipv6Addr::LOCALHOST, port))
+                .context("bind address")?;
+        } else if let Some(port) = port {
             builder = builder
                 .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, port))
                 .context("bind address")?
