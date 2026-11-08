@@ -1,4 +1,6 @@
 /target
 .DS_Store
 /dist/
-/assets/
+/assets/*
+!/assets/brand/
+/.corgi-inputs/

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<title>Silo</title>
+<defs>
+<linearGradient id="d-plate" x1="0" y1="100" x2="0" y2="924" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#222A38"/><stop offset="1" stop-color="#0A0D13"/></linearGradient>
+<radialGradient id="d-pool"><stop offset="0" stop-color="#4C6BFF" stop-opacity="0.55"/><stop offset="1" stop-color="#4C6BFF" stop-opacity="0"/></radialGradient>
+<linearGradient id="d-slats" x1="0" y1="15" x2="0" y2="68" gradientUnits="userSpaceOnUse">
+  <stop offset="0" stop-color="#FFFFFF"/><stop offset="0.55" stop-color="#C9D3FF"/><stop offset="1" stop-color="#4C6BFF"/>
+</linearGradient>
+<linearGradient id="d-slab" x1="0" y1="15" x2="0" y2="68" gradientUnits="userSpaceOnUse">
+  <stop offset="0" stop-color="#FFFFFF"/><stop offset="0.6" stop-color="#E3E8FA"/><stop offset="1" stop-color="#5D6FE8"/>
+</linearGradient>
+<linearGradient id="d-gx" x1="44" y1="0" x2="23" y2="0" gradientUnits="userSpaceOnUse">
+  <stop offset="0" stop-color="#6F8DFF" stop-opacity="1.0"/>
+  <stop offset="0.25" stop-color="#6F8DFF" stop-opacity="0.850"/>
+  <stop offset="1" stop-color="#6F8DFF" stop-opacity="0"/>
+</linearGradient>
+<linearGradient id="d-gy" x1="0" y1="15" x2="0" y2="68" gradientUnits="userSpaceOnUse">
+  <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+  <stop offset="0.12" stop-color="#fff" stop-opacity="0.55"/>
+  <stop offset="0.75" stop-color="#fff" stop-opacity="1"/>
+  <stop offset="0.97" stop-color="#fff" stop-opacity="0.35"/>
+  <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+</linearGradient>
+<clipPath id="d-hull"><path d="M40.4,15.3 L44.3,15.3 L44.3,67.4 L41.2,67.4 C36,66.4 29,64.6 24.6,63.3 C23.4,62.9 22.9,61.6 22.9,60.6 L22.9,32.2 C23.4,28.2 25.6,24.1 29,22 Z"/></clipPath>
+<mask id="d-gm" maskUnits="userSpaceOnUse" x="0" y="0" width="80" height="80">
+  <rect x="24" y="15" width="20.2" height="53" fill="url(#d-gy)"/>
+</mask>
+</defs>
+<path d="M400 100H624C876 100 924 148 924 400V624C924 876 876 924 624 924H400C148 924 100 876 100 624V400C100 148 148 100 400 100Z" fill="url(#d-plate)"/>
+<path d="M400 100H624C876 100 924 148 924 400V624C924 876 876 924 624 924H400C148 924 100 876 100 624V400C100 148 148 100 400 100Z" fill="none" stroke="#FFFFFF" stroke-opacity="0.1" stroke-width="3"/>
+<ellipse cx="512" cy="790" rx="300" ry="90" fill="url(#d-pool)"/>
+<g transform="translate(140.71 125.54) scale(9.0559)">
+<g clip-path="url(#d-hull)"><rect x="22" y="15" width="22.3" height="53" fill="url(#d-gx)" mask="url(#d-gm)"/></g>
+<path d="m44.25 15.53c-0.17-0.04-0.26 0.16-0.26 0.43l-0.13 50.98c0 0.2 0.1 0.31 0.27 0.33 0.48 0.05 1.05 0.01 1.52-0.12l12.59-3.82c0.64-0.18 1.07-0.77 1.07-1.43v-31.1c0-9.49-8.05-13.28-15.06-15.27z" fill="url(#d-slab)"/>
+<path d="m40.98 16.06c0-0.36-0.26-0.65-0.62-0.65-0.51-0.02-1.01 0.11-1.46 0.36l-10.51 5.96c-3.43 1.97-5.52 5.64-5.56 9.56-0.02 1.03 0.91 1.63 1.84 1.36l14.52-4.59c1.06-0.32 1.73-1.26 1.73-2.35l0.06-9.65z" fill="url(#d-slats)"/>
+<path d="m40.9 32.29c0.01-1.11-1.02-1.77-2.05-1.49l-14.42 4.17c-1.06 0.3-1.73 1.25-1.73 2.35l-0.03 5.62c-0.01 0.87 0.79 1.46 1.62 1.3l14.78-2.86c1.08-0.2 1.8-1.11 1.8-2.21l0.03-6.88z" fill="url(#d-slats)"/>
+<path d="m40.87 45.47c0-1.07-0.96-1.75-1.98-1.59l-14.67 2.66c-0.98 0.16-1.58 1-1.58 2v5.7c0 0.82 0.72 1.39 1.51 1.32l14.73-1.3c1.14-0.11 1.98-1.06 1.98-2.24l0.01-6.55z" fill="url(#d-slats)"/>
+<path d="m40.86 58.44c0-1.11-0.95-1.92-2.02-1.86l-14.93 0.75c-0.76 0.03-1.27 0.57-1.27 1.31v2.49c0 1.06 0.73 1.92 1.73 2.22 4.93 1.59 11.14 3.12 15.24 3.9 0.35 0.06 0.72 0.06 0.98 0.04 0.15-0.02 0.26-0.15 0.26-0.35l0.01-8.5z" fill="url(#d-slats)"/>
+</g>
+</svg>
