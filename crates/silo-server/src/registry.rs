@@ -12,8 +12,8 @@ use silo_proto::{
     access::{Rights, Scope},
     compat::feature,
     control::{
-        BrowserCommand, Capture, ChangesSetParams, ClientRole, Created, DataTicket, Dock, Event, FilesSetParams, OwnMode, Reveal, RpcError,
-        ServerMessage, SpawnSpec,
+        BrowserCommand, Capture, ChangesSetParams, ClientIds, ClientRole, Created, DataTicket, Dock, Event, FilesSetParams, OwnMode, Reveal,
+        RpcError, ServerMessage, SpawnSpec,
     },
     data::ticket_hex,
     kind,
@@ -363,6 +363,8 @@ pub struct New<'a> {
     pub url: Option<&'a str>,
     /// Agent blocks: the otto session shown from the start.
     pub agent: Option<&'a AgentState>,
+    /// Ids the client chose (feature `instant_blocks`).
+    pub ids: Option<&'a ClientIds>,
 }
 
 impl Registry {
@@ -422,7 +424,7 @@ impl Registry {
             return;
         }
         let spawn = SpawnSpec::default();
-        if let Err(error) = self.create_session(None, &New { spawn: &spawn, kind: BlockKind::Terminal, url: None, agent: None }) {
+        if let Err(error) = self.create_session(None, &New { spawn: &spawn, kind: BlockKind::Terminal, url: None, agent: None, ids: None }) {
             tracing::error!("start default session: {}", error.message);
         }
     }
@@ -465,11 +467,24 @@ impl Registry {
     fn fresh_id(&self, prefix: char) -> String {
         loop {
             let id = new_id(prefix);
-            let taken =
-                self.blocks.contains_key(&id) || self.sessions.iter().any(|s| s.id == id || s.windows.iter().any(|w| w.id == id || w.contains(&id)));
-            if !taken {
+            if !self.id_taken(&id) {
                 return id;
             }
+        }
+    }
+
+    fn id_taken(&self, id: &str) -> bool {
+        self.blocks.contains_key(id) || self.sessions.iter().any(|s| s.id == id || s.windows.iter().any(|w| w.id == id || w.contains(id)))
+    }
+
+    /// `chosen` (a client's id, feature `instant_blocks`) if well-formed
+    /// and free, else a fresh one.
+    fn chosen_id(&self, prefix: char, chosen: Option<&str>) -> Result<String, RpcError> {
+        match chosen {
+            None => Ok(self.fresh_id(prefix)),
+            Some(id) if !ClientIds::valid(id, prefix) => Err(RpcError::bad_request(format!("malformed id {id}"))),
+            Some(id) if self.id_taken(id) => Err(RpcError::new("conflict", format!("id {id} is taken"))),
+            Some(id) => Ok(id.to_owned()),
         }
     }
 
@@ -831,7 +846,7 @@ impl Registry {
         if new.kind == BlockKind::Unknown {
             return Err(RpcError::bad_request("unsupported block kind"));
         }
-        let id = self.fresh_id('b');
+        let id = self.chosen_id('b', new.ids.map(|i| i.block_id.as_str()))?;
         let spawn = new.spawn;
         let size = spawn.size.filter(|s| s.columns > 0 && s.rows > 0).unwrap_or(fallback);
         let info = BlockInfo {
@@ -924,7 +939,7 @@ impl Registry {
         self.sessions_changed();
         let si = self.sessions.len() - 1;
         self.session_changed(si);
-        Ok(Created { session_id, window_id, block_id })
+        Ok(Created { session_id, window_id, block_id, ticket: None })
     }
 
     /// A new window (tab) of one block, made active unless `background`.
@@ -938,8 +953,9 @@ impl Registry {
             let focused = session.windows.iter().find(|w| w.id == session.active_window).map(|w| w.focused.clone());
             spawn.cwd = focused.and_then(|b| self.block_info(&b)).and_then(|i| i.cwd);
         }
+        // Checked before the block starts: a taken window id spawns nothing.
+        let window_id = self.chosen_id('w', new.ids.and_then(|i| i.window_id.as_deref()))?;
         let block_id = self.spawn_block(&sid, &New { spawn: &spawn, ..*new }, fallback)?;
-        let window_id = self.fresh_id('w');
         let session = self.session_mut(&sid)?;
         session.windows.push(Window::new(window_id.clone(), &block_id));
         if !background {
@@ -948,7 +964,7 @@ impl Registry {
         let si = self.sessions.iter().position(|s| s.id == sid).unwrap_or(0);
         self.session_changed(si);
         self.sessions_changed();
-        Ok(Created { session_id: sid, window_id, block_id })
+        Ok(Created { session_id: sid, window_id, block_id, ticket: None })
     }
 
     /// Approximate full-window grid from the window's blocks.
@@ -1006,7 +1022,7 @@ impl Registry {
         window.focus(&new);
         let window_id = window.id.clone();
         self.session_changed(si);
-        Ok(Created { session_id: sid, window_id, block_id: new })
+        Ok(Created { session_id: sid, window_id, block_id: new, ticket: None })
     }
 
     /// `block.spawn`: a parked terminal block in the session of `owner`,
@@ -1048,7 +1064,7 @@ impl Registry {
         self.sessions[si].parked.push(Parked { id: id.clone(), owner: Some(owner.to_owned()) });
         self.session_changed(si);
         self.sessions_changed();
-        Ok(Created { session_id, window_id: String::new(), block_id: id })
+        Ok(Created { session_id, window_id: String::new(), block_id: id, ticket: None })
     }
 
     /// `block.spawn` with `kind: browser`: a parked browser at `url` in the
@@ -1057,7 +1073,7 @@ impl Registry {
     pub fn spawn_parked_browser(&mut self, owner: &str, url: Option<&str>) -> Result<Created, RpcError> {
         let si = self.session_index(owner).ok_or_else(|| RpcError::not_found(format!("block {owner}")))?;
         let session_id = self.sessions[si].id.clone();
-        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Browser, url, agent: None };
+        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Browser, url, agent: None, ids: None };
         let id = self.spawn_block(&session_id, &new, PARKED_SIZE)?;
         if let Some(Block::Browser(browser)) = self.blocks.get_mut(&id) {
             browser.set_owner_block(owner);
@@ -1065,7 +1081,7 @@ impl Registry {
         self.sessions[si].parked.push(Parked { id: id.clone(), owner: Some(owner.to_owned()) });
         self.session_changed(si);
         self.sessions_changed();
-        Ok(Created { session_id, window_id: String::new(), block_id: id })
+        Ok(Created { session_id, window_id: String::new(), block_id: id, ticket: None })
     }
 
     /// `block.park`: take a block out of its window; it keeps running. The
@@ -2134,7 +2150,7 @@ mod tests {
     #[test]
     fn closing_focus_returns_to_the_previous_block() {
         let (mut reg, _rx) = registry();
-        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Browser, url: None, agent: None };
+        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Browser, url: None, agent: None, ids: None };
         let mut chain = vec!["d".to_owned()];
         for _ in 0..3 {
             let last = chain.last().unwrap().clone();
@@ -2165,7 +2181,7 @@ mod tests {
     #[test]
     fn unknown_block_kinds_are_rejected() {
         let (mut reg, _rx) = registry();
-        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Unknown, url: None, agent: None };
+        let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Unknown, url: None, agent: None, ids: None };
         let blocks = reg.blocks.len();
         assert_eq!(reg.split("a", Axis::Horizontal, &new).unwrap_err().code, "bad_request");
         assert_eq!(reg.create_session(None, &new).unwrap_err().code, "bad_request");

@@ -186,6 +186,16 @@ fn unreachable(error: &ConnectError) -> Option<&'static str> {
     }
 }
 
+/// A connection's selected network path ([`RemoteConn::path`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathInfo {
+    /// Through a relay server rather than straight to the peer.
+    pub relay: bool,
+    /// The peer's address, or the relay's URL.
+    pub addr: String,
+    pub rtt: Duration,
+}
+
 /// An established CTL_ALPN connection. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct RemoteConn {
@@ -223,10 +233,17 @@ impl RemoteConn {
     /// RTT. A LAN host should be direct; a relay adds its round trip to
     /// every keystroke.
     pub fn path_summary(&self) -> Option<String> {
+        let path = self.path()?;
+        let kind = if path.relay { "relay" } else { "direct" };
+        Some(format!("{kind} {}, rtt {:.1} ms", path.addr, path.rtt.as_secs_f64() * 1e3))
+    }
+
+    /// The selected path: through a relay or direct, where to, and its
+    /// smoothed round-trip time (measured by QUIC, no extra traffic).
+    pub fn path(&self) -> Option<PathInfo> {
         let paths = self.conn.paths();
         let path = paths.iter().find(|p| p.is_selected())?;
-        let kind = if path.is_relay() { "relay" } else { "direct" };
-        Some(format!("{kind} {:?}, rtt {:.1} ms", path.remote_addr(), path.rtt().as_secs_f64() * 1e3))
+        Some(PathInfo { relay: path.is_relay(), addr: format!("{:?}", path.remote_addr()), rtt: path.rtt() })
     }
 
     /// Identifier unique among this process's live connections.

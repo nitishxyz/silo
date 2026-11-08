@@ -196,7 +196,7 @@ pub fn split_method(block: &str, side: Side, row: &Row, cwd: Option<String>) -> 
         Row::Path(path) => (BlockKind::Files, SpawnSpec { cwd: Some(path.clone()), ..SpawnSpec::default() }, None),
         Row::Open { url, .. } => (BlockKind::Browser, SpawnSpec::default(), Some(url.clone())),
     };
-    Method::BlockSplit { block_id: block.to_owned(), axis: side.axis(), spawn, kind, url, agent: None }
+    Method::BlockSplit { block_id: block.to_owned(), axis: side.axis(), spawn, kind, url, agent: None, ids: None }
 }
 
 /// What the typed text asks for.

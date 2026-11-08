@@ -73,6 +73,7 @@ async fn browser(control: &Control, url: &str) -> Created {
         kind: BlockKind::Browser,
         url: Some(url.into()),
         agent: None,
+        ids: None,
     };
     control.call(split).await.unwrap()
 }
@@ -150,6 +151,7 @@ async fn split_creates_browser_and_commands_edit_history() {
         kind: BlockKind::Browser,
         url: Some("file:///".into()),
         agent: None,
+        ids: None,
     };
     assert_eq!(code(&control.call_value(split).await.unwrap_err()), "bad_request");
     assert_eq!(state(&control, &created).await.url, "https://example.com", "rejected urls change nothing");
@@ -170,6 +172,7 @@ async fn split_creates_browser_and_commands_edit_history() {
         kind: BlockKind::Browser,
         url: None,
         background: false,
+        ids: None,
     };
     let window: Created = control.call(window).await.unwrap();
     assert_eq!(state(&control, &window).await.url, "about:blank");
@@ -181,6 +184,7 @@ async fn split_creates_browser_and_commands_edit_history() {
         kind: BlockKind::Browser,
         url: Some("example.com/next".into()),
         background: true,
+        ids: None,
     };
     let behind: Created = control.call(behind).await.unwrap();
     let shown = view().await.session;

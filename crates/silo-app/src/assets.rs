@@ -17,6 +17,8 @@ macro_rules! icons {
 
 icons!(
     "laptop",
+    "arrow-left-right",
+    "waypoints",
     "globe",
     "check",
     "filter",

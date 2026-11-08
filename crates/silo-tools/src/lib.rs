@@ -434,14 +434,27 @@ impl Tools {
                 let root = files::new_root(&target, dir, cwd.as_deref());
                 let spawn = SpawnSpec { cwd: Some(root.to_string_lossy().into_owned()), ..Default::default() };
                 let method = match &anchor {
-                    Some(anchor) => {
-                        Method::BlockSplit { block_id: anchor.clone(), axis: Axis::Horizontal, spawn, kind: BlockKind::Files, url: None, agent: None }
-                    }
+                    Some(anchor) => Method::BlockSplit {
+                        block_id: anchor.clone(),
+                        axis: Axis::Horizontal,
+                        spawn,
+                        kind: BlockKind::Files,
+                        url: None,
+                        agent: None,
+                        ids: None,
+                    },
                     None => {
                         let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
                         let session = &self.cx.default_session;
                         match sessions.iter().find(|s| s.name == *session || s.id == *session) {
-                            Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind: BlockKind::Files, url: None, background: false },
+                            Some(s) => Method::WindowCreate {
+                                session_id: s.id.clone(),
+                                spawn,
+                                kind: BlockKind::Files,
+                                url: None,
+                                background: false,
+                                ids: None,
+                            },
                             None => Method::SessionCreate { name: Some(session.clone()), spawn, kind: BlockKind::Files, url: None },
                         }
                     }
@@ -532,6 +545,7 @@ impl Tools {
                             kind: BlockKind::Changes,
                             url: None,
                             agent: None,
+                            ids: None,
                         };
                         match self.control.call(split).await {
                             Ok(created) => created,
@@ -543,6 +557,7 @@ impl Tools {
                                     kind: BlockKind::Changes,
                                     url: None,
                                     background: false,
+                                    ids: None,
                                 };
                                 self.control.call(tab).await?
                             }
@@ -552,9 +567,14 @@ impl Tools {
                         let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
                         let session = &self.cx.default_session;
                         let method = match sessions.iter().find(|s| s.name == *session || s.id == *session) {
-                            Some(s) => {
-                                Method::WindowCreate { session_id: s.id.clone(), spawn, kind: BlockKind::Changes, url: None, background: false }
-                            }
+                            Some(s) => Method::WindowCreate {
+                                session_id: s.id.clone(),
+                                spawn,
+                                kind: BlockKind::Changes,
+                                url: None,
+                                background: false,
+                                ids: None,
+                            },
                             None => Method::SessionCreate { name: Some(session.clone()), spawn, kind: BlockKind::Changes, url: None },
                         };
                         self.control.call(method).await?
@@ -664,24 +684,25 @@ impl Tools {
                 kind,
                 url,
                 agent: None,
+                ids: None,
             },
             "tab" => match input["session"].as_str() {
                 // A named session: it, or a new one of that name.
                 Some(session) => {
                     let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
                     match sessions.iter().find(|s| s.name == session || s.id == session) {
-                        Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind, url, background: false },
+                        Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind, url, background: false, ids: None },
                         None => Method::SessionCreate { name: Some(session.into()), spawn, kind, url },
                     }
                 }
                 // Else the session the agent works in (its block's), then the default one.
                 None => match self.anchor_session(anchor.as_deref()).await? {
-                    Some(session_id) => Method::WindowCreate { session_id, spawn, kind, url, background: false },
+                    Some(session_id) => Method::WindowCreate { session_id, spawn, kind, url, background: false, ids: None },
                     None => {
                         let sessions: Vec<SessionSummary> = self.control.call(Method::SessionList {}).await?;
                         let session = &self.cx.default_session;
                         match sessions.iter().find(|s| s.name == *session || s.id == *session) {
-                            Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind, url, background: false },
+                            Some(s) => Method::WindowCreate { session_id: s.id.clone(), spawn, kind, url, background: false, ids: None },
                             None => Method::SessionCreate { name: Some(session.clone()), spawn, kind, url },
                         }
                     }

@@ -81,7 +81,7 @@ pub(crate) fn turn_refs(turns: &[otto_proto::TurnSummary]) -> Vec<model::TurnRef
 /// `block.split` for a Changes block beside `block` at `cwd`.
 pub fn changes_split(block: String, axis: Axis, cwd: Option<String>) -> Method {
     let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-    Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Changes, url: None, agent: None }
+    Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Changes, url: None, agent: None, ids: None }
 }
 
 impl Workspace {
@@ -128,7 +128,14 @@ impl Workspace {
         let Some(view) = &self.view else { return };
         let cwd = self.new_block_folder(window, cx);
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-        self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Changes, url: None, background: false });
+        self.call(Method::WindowCreate {
+            session_id: view.session.id.clone(),
+            spawn,
+            kind: BlockKind::Changes,
+            url: None,
+            background: false,
+            ids: None,
+        });
     }
 
     /// New Changes Pane: a Changes block beside `block`, on its repo.

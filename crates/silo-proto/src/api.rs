@@ -237,6 +237,7 @@ fn result_schema(method: &Method) -> Schema {
         | M::AppAppearance { .. }
         | M::AppPaneHeaders { .. }
         | M::AppFullScreen { .. }
+        | M::AppConnectionInfo { .. }
         | M::AppSettingsOpen { .. }
         | M::AppSettingsReload { .. }
         | M::AppSettingsOpenFile { .. }
@@ -414,6 +415,7 @@ pub fn examples() -> Vec<Method> {
             kind: BlockKind::Browser,
             url: Some("localhost:3000".into()),
             background: false,
+            ids: None,
         },
         M::WindowSelect { session_id: s(), window_id: w() },
         M::WindowStep { session_id: s(), delta: 1 },
@@ -423,7 +425,7 @@ pub fn examples() -> Vec<Method> {
         M::WindowMerge { window_id: w(), source: "w9f8e7d6c".into(), axis: Axis::Horizontal, at: None },
         M::BlockToWindow { block_id: b(), window_id: None, index: Some(1), axis: None },
         M::BlockView { block_id: b() },
-        M::BlockSplit { block_id: b(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None, agent: None },
+        M::BlockSplit { block_id: b(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None, agent: None, ids: None },
         M::BlockSpawn {
             block_id: b(),
             command: vec!["/bin/zsh".into(), "-lc".into(), "cargo test".into()],
@@ -512,6 +514,7 @@ pub fn examples() -> Vec<Method> {
         M::AppAppearance { density: Density::Compact, client_id: None },
         M::AppPaneHeaders { visible: false, client_id: None },
         M::AppFullScreen { on: None, client_id: Some(3) },
+        M::AppConnectionInfo { on: Some(true), client_id: None },
         M::AppSettingsOpen { section: Some("terminal".into()), client_id: None },
         M::AppSettingsReload { client_id: None },
         M::AppSettingsOpenFile { client_id: None },

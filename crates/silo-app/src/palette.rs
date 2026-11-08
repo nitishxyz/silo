@@ -299,7 +299,7 @@ impl Workspace {
             Command::NewPane => {
                 if let Some(block) = block {
                     let axis = self.auto_axis(&block);
-                    self.split_block(block, axis, cx);
+                    self.split_block(block, axis, window, cx);
                 }
             }
             Command::ClosePane => self.close_block(window, cx),
@@ -455,6 +455,7 @@ impl Workspace {
             Command::OttoSettings => self.open_otto_settings(window, cx),
             Command::AppearanceComfortable => self.set_density(crate::hosts::Density::Comfortable, cx),
             Command::AppearanceCompact => self.set_density(crate::hosts::Density::Compact, cx),
+            Command::ToggleConnectionInfo => self.toggle_link(cx),
             Command::ShowPaneHeaders => self.set_pane_headers(crate::pane_header::PaneHeaders::all(true), cx),
             Command::HidePaneHeaders => self.set_pane_headers(crate::pane_header::PaneHeaders::all(false), cx),
             Command::OpenTerminalSettingsFile => self.open_terminal_settings_file(cx),
@@ -1316,7 +1317,15 @@ impl Workspace {
         };
         let spawn = silo_proto::control::SpawnSpec { cwd: self.cwd_of(&block, cx), command: Vec::new(), size: None };
         let axis = self.auto_axis(&block);
-        self.call(Method::BlockSplit { block_id: block, axis, spawn, kind: silo_proto::model::BlockKind::Browser, url: Some(url), agent: None });
+        self.call(Method::BlockSplit {
+            block_id: block,
+            axis,
+            spawn,
+            kind: silo_proto::model::BlockKind::Browser,
+            url: Some(url),
+            agent: None,
+            ids: None,
+        });
     }
 
     /// A browser on `url` split beside `block` (a terminal's ⌘-clicked
@@ -1325,7 +1334,7 @@ impl Workspace {
         let spawn = silo_proto::control::SpawnSpec { cwd: self.cwd_of(block, cx), command: Vec::new(), size: None };
         let axis = self.auto_axis(block);
         let block_id = block.to_owned();
-        self.call(Method::BlockSplit { block_id, axis, spawn, kind: silo_proto::model::BlockKind::Browser, url: Some(url), agent: None });
+        self.call(Method::BlockSplit { block_id, axis, spawn, kind: silo_proto::model::BlockKind::Browser, url: Some(url), agent: None, ids: None });
     }
 
     /// A new tab holding a browser on `url`.
@@ -1338,6 +1347,7 @@ impl Workspace {
             kind: silo_proto::model::BlockKind::Browser,
             url: Some(url),
             background: false,
+            ids: None,
         });
     }
 

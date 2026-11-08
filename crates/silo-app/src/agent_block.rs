@@ -223,14 +223,14 @@ impl crate::workspace::Workspace {
         let axis = self.auto_axis(&block);
         // The block shows the session from its first frame.
         let agent = Some(AgentState { session_id: Some(session), title });
-        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent }, cx);
+        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent, ids: None }, cx);
     }
 
     /// New Agent: an agent block beside `block` in its cwd, composer focused.
     pub(crate) fn new_agent(&mut self, block: String, cx: &mut gpui::Context<Self>) {
         let spawn = SpawnSpec { cwd: self.cwd_of(&block, cx), command: Vec::new(), size: None };
         let axis = self.auto_axis(&block);
-        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent: None }, cx);
+        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent: None, ids: None }, cx);
     }
 
     /// New Agent Tab: a tab holding an agent block in the focused block's cwd.
@@ -239,7 +239,7 @@ impl crate::workspace::Workspace {
         let session_id = view.session.id.clone();
         let cwd = self.new_block_folder(window, cx);
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-        self.create_agent(Method::WindowCreate { session_id, spawn, kind: BlockKind::Agent, url: None, background: false }, cx);
+        self.create_agent(Method::WindowCreate { session_id, spawn, kind: BlockKind::Agent, url: None, background: false, ids: None }, cx);
     }
 
     pub(crate) fn create_agent(&mut self, method: Method, cx: &mut gpui::Context<Self>) {

@@ -41,7 +41,14 @@ impl BrowserPane {
         }
         // A popup's page is already loading: the block starts blank, so a
         // pane made for it before the adoption only shows the empty state.
-        let method = Method::WindowCreate { session_id, spawn: SpawnSpec::default(), kind: BlockKind::Browser, url: start, background: !foreground };
+        let method = Method::WindowCreate {
+            session_id,
+            spawn: SpawnSpec::default(),
+            kind: BlockKind::Browser,
+            url: start,
+            background: !foreground,
+            ids: None,
+        };
         let opener = Opener { rt: self.rt.clone(), control: control.clone(), route: self.route.clone(), home: self.home.clone() };
         let task = self.rt.spawn(async move { control.call::<Created>(method).await });
         cx.spawn(async move |_, cx| {

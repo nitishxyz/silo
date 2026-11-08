@@ -526,6 +526,25 @@ async fn grant_create(
     to_value(GrantCreated { grant, secret: encode_secret(kind, &secret), ticket })
 }
 
+/// `created` with a data ticket for its block when `attach` (a terminal the
+/// client laid out itself, feature `instant_blocks`): it attaches without
+/// a `data.connect` round trip. A ticket that can't be issued is left out;
+/// the client then asks as usual.
+fn with_ticket(
+    reg: &mut crate::registry::Registry,
+    ctx: &Ctx,
+    client_id: u64,
+    mut created: silo_proto::control::Created,
+    attach: bool,
+) -> silo_proto::control::Created {
+    if attach {
+        let session = Some(created.session_id.as_str());
+        let rights = rights_on(&ctx.principal, On::Block { block: &created.block_id, session }).unwrap_or(Rights::View);
+        created.ticket = reg.issue_ticket(client_id, &created.block_id, rights).ok();
+    }
+    created
+}
+
 async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, RpcError> {
     let client_id = ctx.id;
     match method {
@@ -543,7 +562,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         Method::EventsSubscribe {} => Ok(json!({})),
         Method::SessionList {} => to_value(server.registry.lock().unwrap().summaries_for(&ctx.principal)),
         Method::SessionCreate { name, spawn, kind, url } => {
-            let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: None };
+            let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: None, ids: None };
             to_value(server.registry.lock().unwrap().create_session(name, &new)?)
         }
         Method::SessionView { session_id } => to_value(server.registry.lock().unwrap().view(&session_id)?),
@@ -555,9 +574,11 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.registry.lock().unwrap().close_session(&session_id)?;
             Ok(json!({}))
         }
-        Method::WindowCreate { session_id, spawn, kind, url, background } => {
-            let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: None };
-            to_value(server.registry.lock().unwrap().create_window(&session_id, &new, background)?)
+        Method::WindowCreate { session_id, spawn, kind, url, background, ids } => {
+            let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: None, ids: ids.as_ref() };
+            let mut reg = server.registry.lock().unwrap();
+            let created = reg.create_window(&session_id, &new, background)?;
+            to_value(with_ticket(&mut reg, ctx, client_id, created, ids.is_some() && kind == BlockKind::Terminal))
         }
         Method::WindowSelect { session_id, window_id } => {
             server.registry.lock().unwrap().select_window(&session_id, &window_id)?;
@@ -583,9 +604,11 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             server.registry.lock().unwrap().block_to_window(&block_id, window_id.as_deref(), index, axis)?;
             Ok(json!({}))
         }
-        Method::BlockSplit { block_id, axis, spawn, kind, url, agent } => {
-            let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: agent.as_ref() };
-            to_value(server.registry.lock().unwrap().split(&block_id, axis, &new)?)
+        Method::BlockSplit { block_id, axis, spawn, kind, url, agent, ids } => {
+            let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: agent.as_ref(), ids: ids.as_ref() };
+            let mut reg = server.registry.lock().unwrap();
+            let created = reg.split(&block_id, axis, &new)?;
+            to_value(with_ticket(&mut reg, ctx, client_id, created, ids.is_some() && kind == BlockKind::Terminal))
         }
         Method::BlockSpawn { block_id, command, cwd, env, size, kind, url } => {
             let mut reg = server.registry.lock().unwrap();
@@ -879,6 +902,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::AppAppearance { .. }
         | Method::AppPaneHeaders { .. }
         | Method::AppFullScreen { .. }
+        | Method::AppConnectionInfo { .. }
         | Method::AppSettingsOpen { .. }
         | Method::AppSettingsReload { .. }
         | Method::AppSettingsOpenFile { .. }

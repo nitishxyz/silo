@@ -194,6 +194,7 @@ async fn window_close_with_one_busy_pane_closes_neither() {
         kind: BlockKind::Terminal,
         url: None,
         agent: None,
+        ids: None,
     };
     let idle: Created = control.call(split).await.unwrap();
     until_busy(&mut raw, &created.session_id, &[&created.block_id]).await;
@@ -222,6 +223,7 @@ async fn session_close_is_all_or_nothing_until_forced() {
             kind: BlockKind::Terminal,
             url: None,
             background: false,
+            ids: None,
         })
         .await
         .unwrap();
@@ -431,6 +433,7 @@ async fn closing_an_owner_counts_its_running_parked_blocks() {
         kind: BlockKind::Agent,
         url: None,
         agent: None,
+        ids: None,
     };
     let agent: Created = control.call(split).await.unwrap();
     let spawn = Method::BlockSpawn {

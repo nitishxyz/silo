@@ -58,6 +58,7 @@ async fn files_show_opens_beside_the_agent_and_reuses_the_block() {
         kind: BlockKind::Agent,
         url: None,
         agent: None,
+        ids: None,
     };
     let agent: Created = control.call(split).await.unwrap();
 

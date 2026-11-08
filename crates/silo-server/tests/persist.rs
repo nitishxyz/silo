@@ -130,11 +130,19 @@ async fn populate(control: &Control) -> (Created, Created, Created) {
             kind: BlockKind::Terminal,
             url: None,
             agent: None,
+            ids: None,
         })
         .await
         .unwrap();
     let window: Created = control
-        .call(Method::WindowCreate { session_id: main.session_id.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None, background: false })
+        .call(Method::WindowCreate {
+            session_id: main.session_id.clone(),
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            background: false,
+            ids: None,
+        })
         .await
         .unwrap();
     control.call_value(Method::WindowRename { window_id: window.window_id.clone(), name: Some("logs".into()) }).await.unwrap();
@@ -209,6 +217,7 @@ async fn clean_shutdown_restores_tree_and_screens() {
             kind: BlockKind::Terminal,
             url: None,
             agent: None,
+            ids: None,
         })
         .await
         .unwrap();
@@ -282,7 +291,15 @@ async fn restored_block_gets_a_shell_in_its_cwd() {
     let spawn = SpawnSpec { cwd: Some(work.clone()), ..shell() };
     let main: Created = control.call(Method::SessionCreate { name: None, spawn: spawn.clone(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let split: Created = control
-        .call(Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn, kind: BlockKind::Terminal, url: None, agent: None })
+        .call(Method::BlockSplit {
+            block_id: main.block_id.clone(),
+            axis: Axis::Vertical,
+            spawn,
+            kind: BlockKind::Terminal,
+            url: None,
+            agent: None,
+            ids: None,
+        })
         .await
         .unwrap();
     send(&control, &main.block_id, "echo old-$((2*3))\n").await;
@@ -326,6 +343,7 @@ async fn closed_block_snapshots_are_collected() {
             kind: BlockKind::Terminal,
             url: None,
             agent: None,
+            ids: None,
         })
         .await
         .unwrap();
@@ -369,6 +387,7 @@ async fn a_clean_exit_closes_the_block_and_its_session() {
             kind: BlockKind::Terminal,
             url: None,
             agent: None,
+            ids: None,
         })
         .await
         .unwrap();
@@ -456,6 +475,7 @@ async fn floats_survive_restart() {
             kind: BlockKind::Terminal,
             url: None,
             agent: None,
+            ids: None,
         })
         .await
         .unwrap();
@@ -484,7 +504,8 @@ async fn parked_command_blocks_are_dropped_on_restart() {
     let task = start(&home).await;
     let control = connect(&home).await;
     let main: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
-    let split = |kind| Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind, url: None, agent: None };
+    let split =
+        |kind| Method::BlockSplit { block_id: main.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind, url: None, agent: None, ids: None };
     let agent: Created = control.call(split(BlockKind::Agent)).await.unwrap();
     let parked: Created = control.call(split(BlockKind::Terminal)).await.unwrap();
     control.call_value(Method::BlockPark { block_id: parked.block_id.clone() }).await.unwrap();

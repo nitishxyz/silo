@@ -2478,7 +2478,8 @@ impl crate::workspace::Workspace {
     pub(crate) fn new_browser_tab(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let Some(view) = &self.view else { return };
         let spawn = silo_proto::control::SpawnSpec { cwd: None, command: Vec::new(), size: None };
-        let method = Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Browser, url: None, background: false };
+        let method =
+            Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Browser, url: None, background: false, ids: None };
         self.create_browser(method, window, cx);
     }
 
@@ -2512,7 +2513,7 @@ impl crate::workspace::Workspace {
 
 fn browser_split(block: String, axis: silo_proto::model::Axis, url: Option<String>) -> Method {
     let spawn = silo_proto::control::SpawnSpec { cwd: None, command: Vec::new(), size: None };
-    Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Browser, url, agent: None }
+    Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Browser, url, agent: None, ids: None }
 }
 
 /// Page chords ([`page_chord`]), intercepted ahead of the keymap and the page.

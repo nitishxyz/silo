@@ -217,7 +217,7 @@ fn confirming_splits_to_the_chosen_side() {
         let want_axis = if *side == Side::Right { Axis::Horizontal } else { Axis::Vertical };
         assert_eq!(side.axis(), want_axis);
         for (row, want_kind, want_url) in &rows {
-            let Method::BlockSplit { block_id, axis, spawn, kind, url, agent } = split_method("b", *side, row, Some("/w".into())) else {
+            let Method::BlockSplit { block_id, axis, spawn, kind, url, agent, .. } = split_method("b", *side, row, Some("/w".into())) else {
                 panic!("{row:?}: not a split");
             };
             assert_eq!((block_id.as_str(), axis, kind, &url), ("b", want_axis, *want_kind, want_url), "{side:?} {row:?}");

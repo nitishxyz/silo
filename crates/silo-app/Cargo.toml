@@ -14,6 +14,7 @@ silo-client.workspace = true
 silo-proto.workspace = true
 silo-vt.workspace = true
 silo-render.workspace = true
+rand.workspace = true
 silo-voice.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true

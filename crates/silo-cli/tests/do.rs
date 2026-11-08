@@ -43,7 +43,14 @@ async fn do_calls_methods_with_generated_flags() {
     let created: Created = control.call(Method::SessionCreate { name: None, spawn: spawn(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let session = created.session_id.clone();
     let second: Created = control
-        .call(Method::WindowCreate { session_id: session.clone(), spawn: spawn(), kind: BlockKind::Terminal, url: None, background: false })
+        .call(Method::WindowCreate {
+            session_id: session.clone(),
+            spawn: spawn(),
+            kind: BlockKind::Terminal,
+            url: None,
+            background: false,
+            ids: None,
+        })
         .await
         .unwrap();
     let active = || async {

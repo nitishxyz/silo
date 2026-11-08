@@ -378,6 +378,10 @@ pub struct AppState {
     /// Ask before a close that would end running programs.
     #[serde(default = "yes")]
     pub confirm_close: bool,
+    /// The session pill shows the connection: direct or relay, and its
+    /// round trip (View → Show Connection Info, ⌘⌥L).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show_link: bool,
     /// Soft interface sounds (`sound.rs`).
     #[serde(default = "yes")]
     pub sounds: bool,
@@ -413,6 +417,7 @@ impl Default for AppState {
             translucent_apps: false,
             check_updates: true,
             confirm_close: true,
+            show_link: false,
             sounds: true,
             search_engine: crate::search::SearchEngine::default(),
             recent_pages: Vec::new(),
@@ -567,6 +572,7 @@ pub(crate) mod tests {
             translucent_apps: true,
             check_updates: false,
             confirm_close: false,
+            show_link: true,
             sounds: false,
             search_engine: crate::search::SearchEngine::Kagi,
             recent_pages: Vec::new(),

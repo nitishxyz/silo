@@ -68,6 +68,7 @@ async fn changes_show_opens_the_agents_own_block() {
         kind: BlockKind::Agent,
         url: None,
         agent: None,
+        ids: None,
     };
     let agent: Created = control.call(split).await.unwrap();
     control

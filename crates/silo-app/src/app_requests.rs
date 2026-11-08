@@ -214,6 +214,13 @@ impl Workspace {
                 }
                 return Ok(json!({ "full_screen": want }));
             }
+            Method::AppConnectionInfo { on, .. } => {
+                let want = on.unwrap_or(!self.state.show_link);
+                if want != self.state.show_link {
+                    self.toggle_link(cx);
+                }
+                return Ok(json!({ "shown": want }));
+            }
             Method::AppSettingsOpen { section: None, .. } => self.open_settings(window, cx),
             Method::AppSettingsOpen { section: Some(section), .. } => {
                 let id = setting(&section).ok().or_else(|| SETTINGS.iter().find(|s| s.section.label().eq_ignore_ascii_case(&section)).map(|s| s.id));

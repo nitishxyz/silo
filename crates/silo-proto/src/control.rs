@@ -392,6 +392,9 @@ pub enum Method {
         /// ⌘-clicked link).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         background: bool,
+        /// Ids the client chose (feature `instant_blocks`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ids: Option<ClientIds>,
     },
     #[serde(rename = "window.select")]
     WindowSelect { session_id: SessionId, window_id: WindowId },
@@ -466,6 +469,9 @@ pub enum Method {
         /// Agent blocks: the otto session it shows from the start (a sub-agent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<AgentState>,
+        /// Ids the client chose (feature `instant_blocks`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ids: Option<ClientIds>,
     },
     /// A parked terminal block in the session of `block_id`, its owner
     /// (e.g. an agent block): in no layout until revealed, closed with its
@@ -839,6 +845,15 @@ pub enum Method {
         #[serde(default)]
         client_id: Option<ClientId>,
     },
+    /// Show, hide (`on`) or toggle (`on` omitted) the connection in the
+    /// session pill: direct or relay, and the round trip.
+    #[serde(rename = "app.connection_info")]
+    AppConnectionInfo {
+        #[serde(default)]
+        on: Option<bool>,
+        #[serde(default)]
+        client_id: Option<ClientId>,
+    },
     #[serde(rename = "app.settings_open")]
     AppSettingsOpen {
         #[serde(default)]
@@ -1093,6 +1108,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("app.appearance", "Set the app's density."),
     ("app.pane_headers", "Show or hide pane headers."),
     ("app.full_screen", "Enter, leave or toggle full screen."),
+    ("app.connection_info", "Show, hide or toggle the connection (direct or relay, and its round trip) in the session pill."),
     ("app.settings_open", "Open Settings."),
     ("app.settings_reload", "Reload the terminal settings file."),
     ("app.settings_open_file", "Open the terminal settings file."),
@@ -1563,6 +1579,31 @@ pub struct Created {
     pub session_id: SessionId,
     pub window_id: WindowId,
     pub block_id: BlockId,
+    /// A data ticket for the new terminal block, when the request carried
+    /// [`ClientIds`] (feature `instant_blocks`): attach without `data.connect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<DataTicket>,
+}
+
+/// Ids a client chose for what it creates, so it can lay the new block out
+/// before the server answers (feature `instant_blocks`): `b` and 8 lowercase
+/// hex digits for a block, `w` and 8 for a window. Taken or malformed ids
+/// are refused (`conflict`, `bad_request`). The answer then carries a data
+/// ticket for a terminal block.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ClientIds {
+    pub block_id: BlockId,
+    /// `window.create` only: the new window's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<WindowId>,
+}
+
+impl ClientIds {
+    /// Whether `id` has the server's format for `prefix` (`b` or `w`).
+    #[must_use]
+    pub fn valid(id: &str, prefix: char) -> bool {
+        id.len() == 9 && id.starts_with(prefix) && id[1..].bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -1753,6 +1794,7 @@ mod tests {
             kind: BlockKind::Browser,
             url: None,
             agent: None,
+            ids: None,
         };
         let request = Request { id: 3, method };
         let json = serde_json::to_string(&request).unwrap();

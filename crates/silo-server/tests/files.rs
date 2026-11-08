@@ -106,6 +106,7 @@ async fn files(control: &Control, root: &Path) -> Created {
         kind: BlockKind::Files,
         url: None,
         agent: None,
+        ids: None,
     };
     control.call(split).await.unwrap()
 }
@@ -225,6 +226,7 @@ async fn split_lists_reads_and_finds() {
         kind: BlockKind::Files,
         url: None,
         background: false,
+        ids: None,
     };
     let window: Created = control.call(window).await.unwrap();
     assert_eq!(info(&control, &window).await.files.as_deref().unwrap().clone().root, root_s);

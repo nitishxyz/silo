@@ -126,6 +126,7 @@ async fn changes(control: &Control, cwd: &Path, dir: Option<&Path>) -> Created {
         kind: BlockKind::Changes,
         url: None,
         agent: None,
+        ids: None,
     };
     control.call(split).await.unwrap()
 }
@@ -661,6 +662,7 @@ async fn a_review_split_off_an_agent_goes_back_to_it() {
         kind: BlockKind::Changes,
         url: None,
         agent: None,
+        ids: None,
     };
     let created: Created = control.call(split).await.unwrap();
     let state = info(&control, &created).await.changes.unwrap();

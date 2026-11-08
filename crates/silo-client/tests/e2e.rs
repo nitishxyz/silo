@@ -11,7 +11,7 @@ use std::{
 use serde::de::DeserializeOwned;
 use silo_client::{Applied, Control, DataStream, Events, Mirror};
 use silo_proto::{
-    control::{Capture, Created, Event, Method, OwnMode, SizeInfo, SpawnSpec},
+    control::{Capture, ClientIds, Created, Event, Method, OwnMode, SizeInfo, SpawnSpec},
     data::{ClientData, Resume, StartMode},
     model::{Axis, BlockKind, Lifecycle, SessionView, TermSize, TerminalConfig},
     paths,
@@ -377,7 +377,15 @@ async fn attach_snapshot_resume_ownership_exit_body() {
     // Splits and windows.
     let split: Created = call(
         &control,
-        Method::BlockSplit { block_id: block.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None, agent: None },
+        Method::BlockSplit {
+            block_id: block.clone(),
+            axis: Axis::Horizontal,
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            agent: None,
+            ids: None,
+        },
     )
     .await;
     let view: SessionView = call(&control, Method::SessionView { session_id: created.session_id.clone() }).await;
@@ -459,12 +467,28 @@ async fn block_swap_and_window_move_body() {
     let a = created.block_id.clone();
     let b: Created = call(
         &control,
-        Method::BlockSplit { block_id: a.clone(), axis: Axis::Horizontal, spawn: shell(), kind: BlockKind::Terminal, url: None, agent: None },
+        Method::BlockSplit {
+            block_id: a.clone(),
+            axis: Axis::Horizontal,
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            agent: None,
+            ids: None,
+        },
     )
     .await;
     let c: Created = call(
         &control,
-        Method::BlockSplit { block_id: b.block_id.clone(), axis: Axis::Vertical, spawn: shell(), kind: BlockKind::Terminal, url: None, agent: None },
+        Method::BlockSplit {
+            block_id: b.block_id.clone(),
+            axis: Axis::Vertical,
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            agent: None,
+            ids: None,
+        },
     )
     .await;
     let (b, c) = (b.block_id, c.block_id);
@@ -487,9 +511,11 @@ async fn block_swap_and_window_move_body() {
     assert_eq!(view.blocks.iter().filter(|b| b.exited.is_none()).count(), 3);
 
     // Cross-window swaps are rejected and change nothing.
-    let other: Created =
-        call(&control, Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None, background: false })
-            .await;
+    let other: Created = call(
+        &control,
+        Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None, background: false, ids: None },
+    )
+    .await;
     let after_create = next_view(&mut events, &sid).await;
     let err = call_err(&control, Method::BlockSwap { block_id: a.clone(), other_block_id: other.block_id.clone() }).await;
     assert!(err.to_string().contains("different windows"), "{err}");
@@ -499,9 +525,11 @@ async fn block_swap_and_window_move_body() {
     assert_eq!(unchanged.session.revision, after_create.session.revision);
 
     // window.move: order changes for every client.
-    let third: Created =
-        call(&control, Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None, background: false })
-            .await;
+    let third: Created = call(
+        &control,
+        Method::WindowCreate { session_id: sid.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None, background: false, ids: None },
+    )
+    .await;
     next_view(&mut events, &sid).await;
     call_value(&control, Method::WindowMove { window_id: third.window_id.clone(), index: 0 }).await;
     let view = next_view(&mut events, &sid).await;
@@ -526,6 +554,7 @@ async fn block_swap_and_window_move_body() {
             kind: BlockKind::Terminal,
             url: None,
             agent: None,
+            ids: None,
         },
     )
     .await;
@@ -875,5 +904,77 @@ async fn heartbeat_body() {
     let (again, _events) = connect(&home, "heartbeat").await;
     call_value(&again, Method::Ping {}).await;
     drop(server);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn instant_blocks() {
+    guarded("instant_blocks", instant_blocks_body()).await;
+}
+
+/// Client-chosen ids (feature `instant_blocks`): the block and window get
+/// them, the answer carries a ticket that attaches without `data.connect`,
+/// and taken or malformed ids are refused before anything starts.
+async fn instant_blocks_body() {
+    let home = temp_home("instant");
+    start_server(&home).await;
+    let (control, _) = connect(&home, "test-a").await;
+    assert!(control.peer_supports(silo_proto::compat::feature::INSTANT_BLOCKS));
+    let created: Created = call(&control, Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
+    assert!(created.ticket.is_none(), "no ticket unless asked");
+
+    let split = |id: &str| Method::BlockSplit {
+        block_id: created.block_id.clone(),
+        axis: Axis::Horizontal,
+        spawn: shell(),
+        kind: BlockKind::Terminal,
+        url: None,
+        agent: None,
+        ids: Some(ClientIds { block_id: id.into(), window_id: None }),
+    };
+    let new: Created = call(&control, split("b0000abcd")).await;
+    assert_eq!(new.block_id, "b0000abcd");
+    let ticket = new.ticket.expect("a ticket for the new terminal").ticket;
+    let mut mirror = Mirror::new();
+    let mut stream = step("attach with the ticket", DataStream::open_ticket(&control, ticket, None)).await.unwrap();
+    mirror.begin(&stream.welcome).unwrap();
+    stream.send(&ClientData::Input(b"echo instant-$((2+3))\n".to_vec()));
+    pump_until(&mut stream, &mut mirror, |m| m.screen_text().contains("instant-5")).await;
+
+    let taken = call_err(&control, split("b0000abcd")).await;
+    assert!(format!("{taken:#}").contains("taken"), "{taken:#}");
+    let malformed = call_err(&control, split("B0000ABCD")).await;
+    assert!(format!("{malformed:#}").contains("malformed"), "{malformed:#}");
+
+    let tab: Created = call(
+        &control,
+        Method::WindowCreate {
+            session_id: created.session_id.clone(),
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            background: false,
+            ids: Some(ClientIds { block_id: "b0000beef".into(), window_id: Some("w0000beef".into()) }),
+        },
+    )
+    .await;
+    assert_eq!((tab.block_id.as_str(), tab.window_id.as_str()), ("b0000beef", "w0000beef"));
+    assert!(tab.ticket.is_some());
+    // A taken window id spawns no block.
+    let again = call_err(
+        &control,
+        Method::WindowCreate {
+            session_id: created.session_id.clone(),
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            background: false,
+            ids: Some(ClientIds { block_id: "b0000cafe".into(), window_id: Some("w0000beef".into()) }),
+        },
+    )
+    .await;
+    assert!(format!("{again:#}").contains("taken"), "{again:#}");
+    let view: SessionView = call(&control, Method::SessionView { session_id: created.session_id.clone() }).await;
+    assert!(!view.blocks.iter().any(|b| b.id == "b0000cafe"));
     let _ = std::fs::remove_dir_all(&home);
 }

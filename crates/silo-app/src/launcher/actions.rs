@@ -163,22 +163,34 @@ impl Workspace {
             (Target::Tab, Row::Path(path)) => {
                 let Some(view) = &self.view else { return };
                 let spawn = SpawnSpec { cwd: Some(path), command: Vec::new(), size: None };
-                let method =
-                    Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Files, url: None, background: false };
+                let method = Method::WindowCreate {
+                    session_id: view.session.id.clone(),
+                    spawn,
+                    kind: BlockKind::Files,
+                    url: None,
+                    background: false,
+                    ids: None,
+                };
                 self.open_files_path(method, cx);
             }
             (Target::Tab, Row::Run(command)) => {
                 let Some(view) = &self.view else { return };
                 let cwd = self.new_block_folder(window, cx);
                 let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-                let method =
-                    Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Terminal, url: None, background: false };
+                let method = Method::WindowCreate {
+                    session_id: view.session.id.clone(),
+                    spawn,
+                    kind: BlockKind::Terminal,
+                    url: None,
+                    background: false,
+                    ids: None,
+                };
                 self.launch_command(method, command, cx);
             }
             (Target::Split { block, side, .. }, row) => {
                 let method = split_method(&block, side, &row, self.cwd_of(&block, cx));
                 match row {
-                    Row::Kind(Kind::Terminal, _) => self.split_block(block, side.axis(), cx),
+                    Row::Kind(Kind::Terminal, _) => self.split_block(block, side.axis(), window, cx),
                     Row::Kind(Kind::Browser, _) => self.create_browser(method, window, cx),
                     Row::Kind(Kind::Agent, _) => self.create_agent(method, cx),
                     Row::Kind(Kind::Files | Kind::Changes, _) | Row::Open { .. } => self.call(method),

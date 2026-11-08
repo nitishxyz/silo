@@ -124,6 +124,7 @@ async fn parked_browsers_spawn_reveal_and_close_with_their_owner() {
             kind: BlockKind::Terminal,
             url: None,
             background: false,
+            ids: None,
         })
         .await
         .unwrap();
@@ -151,6 +152,7 @@ async fn parked_blocks_spawn_reveal_park_and_close() {
         kind: BlockKind::Agent,
         url: None,
         agent: None,
+        ids: None,
     };
     let agent: Created = control.call(split).await.unwrap();
 
@@ -212,6 +214,7 @@ async fn parked_blocks_spawn_reveal_park_and_close() {
             kind: BlockKind::Terminal,
             url: None,
             background: false,
+            ids: None,
         })
         .await
         .unwrap();

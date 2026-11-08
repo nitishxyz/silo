@@ -161,6 +161,7 @@ commands! {
     AppearanceCompact => "Appearance: Compact", "View", [], "Flush panes with dividers";
     ShowPaneHeaders => "Show Pane Headers", "View", [];
     HidePaneHeaders => "Hide Pane Headers", "View", [];
+    ToggleConnectionInfo => "Toggle Connection Info", "View", ["cmd-alt-l"], "Direct or relay, and the round trip";
     ToggleFullScreen => "Toggle Full Screen", "View", ["ctrl-cmd-f"];
     CycleWindows => "Cycle Through Windows", "View", ["cmd-`"];
     OpenSettings => "Settings…", "App", ["cmd-,"];
@@ -251,6 +252,7 @@ impl Command {
             Self::AppearanceComfortable | Self::AppearanceCompact => Method("app.appearance"),
             Self::ShowPaneHeaders | Self::HidePaneHeaders => Method("app.pane_headers"),
             Self::ToggleFullScreen => Method("app.full_screen"),
+            Self::ToggleConnectionInfo => Method("app.connection_info"),
             Self::CycleWindows => Method("app.window_cycle"),
             Self::OpenSettings => Method("app.settings_open"),
             Self::Permissions => Method("app.permissions_show"),

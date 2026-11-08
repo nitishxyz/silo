@@ -57,8 +57,15 @@ async fn tiled_blocks_dock_on_any_side_of_another() {
     let (control, task) = start(&home).await;
     assert!(control.peer_supports(silo_proto::compat::feature::DOCK_SIDES));
     let a: Created = control.call(Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await.unwrap();
-    let split =
-        |block: &str, axis| Method::BlockSplit { block_id: block.into(), axis, spawn: shell(), kind: BlockKind::Terminal, url: None, agent: None };
+    let split = |block: &str, axis| Method::BlockSplit {
+        block_id: block.into(),
+        axis,
+        spawn: shell(),
+        kind: BlockKind::Terminal,
+        url: None,
+        agent: None,
+        ids: None,
+    };
     let b: Created = control.call(split(&a.block_id, Axis::Horizontal)).await.unwrap();
     let c: Created = control.call(split(&b.block_id, Axis::Horizontal)).await.unwrap();
     let session = a.session_id.clone();
@@ -83,7 +90,14 @@ async fn tiled_blocks_dock_on_any_side_of_another() {
 
     // Itself, a block of another window and unknown blocks are refused.
     let other: Created = control
-        .call(Method::WindowCreate { session_id: session.clone(), spawn: shell(), kind: BlockKind::Terminal, url: None, background: false })
+        .call(Method::WindowCreate {
+            session_id: session.clone(),
+            spawn: shell(),
+            kind: BlockKind::Terminal,
+            url: None,
+            background: false,
+            ids: None,
+        })
         .await
         .unwrap();
     for (block, target) in [(&a, &a), (&a, &other.block_id), (&other.block_id, &a)] {

@@ -105,6 +105,12 @@ pub mod feature {
     /// servers answer `method_not_found`; agents then list Silo's own tools
     /// only.
     pub const TOOLS: &str = "tools";
+    /// Blocks appear at once: `block.split` and `window.create` take ids
+    /// the client chose (`block_id`/`new_block_id`, `window_id`), so it
+    /// lays the block out before the server answers, and `attach: true`
+    /// returns a data ticket in `Created` (no `data.connect` round trip).
+    /// Older servers ignore both and pick their own ids, so gate on it.
+    pub const INSTANT_BLOCKS: &str = "instant_blocks";
 }
 
 /// Everything this build supports beyond protocol 1.
@@ -127,6 +133,7 @@ pub const FEATURES: &[&str] = &[
     feature::FLOAT_PANES,
     feature::TAB_MOVES,
     feature::TOOLS,
+    feature::INSTANT_BLOCKS,
 ];
 
 /// Features this build's server supports that a client advertises only

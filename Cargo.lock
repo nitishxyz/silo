@@ -8138,6 +8138,7 @@ dependencies = [
  "otto-proto",
  "pulldown-cmark",
  "qrcode",
+ "rand 0.9.5",
  "raw-window-handle",
  "resvg",
  "serde",

@@ -3264,6 +3264,36 @@
         "type": "object"
       }
     },
+    "app.connection_info": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "client_id": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "on": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "title": "AppResult",
+        "type": "object"
+      }
+    },
     "app.copy": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4850,6 +4880,25 @@
         "type": "object"
       },
       "result": {
+        "$defs": {
+          "DataTicket": {
+            "properties": {
+              "expires_in_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "ticket": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ticket",
+              "expires_in_ms"
+            ],
+            "type": "object"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "block_id": {
@@ -4857,6 +4906,16 @@
           },
           "session_id": {
             "type": "string"
+          },
+          "ticket": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DataTicket"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "window_id": {
             "type": "string"
@@ -4923,6 +4982,23 @@
                 "type": "string"
               }
             ]
+          },
+          "ClientIds": {
+            "properties": {
+              "block_id": {
+                "type": "string"
+              },
+              "window_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "block_id"
+            ],
+            "type": "object"
           },
           "SpawnSpec": {
             "properties": {
@@ -5008,6 +5084,16 @@
           "block_id": {
             "type": "string"
           },
+          "ids": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ClientIds"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "kind": {
             "$ref": "#/$defs/BlockKind",
             "default": "terminal"
@@ -5035,6 +5121,25 @@
         "type": "object"
       },
       "result": {
+        "$defs": {
+          "DataTicket": {
+            "properties": {
+              "expires_in_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "ticket": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ticket",
+              "expires_in_ms"
+            ],
+            "type": "object"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "block_id": {
@@ -5042,6 +5147,16 @@
           },
           "session_id": {
             "type": "string"
+          },
+          "ticket": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DataTicket"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "window_id": {
             "type": "string"
@@ -14170,6 +14285,25 @@
         "type": "object"
       },
       "result": {
+        "$defs": {
+          "DataTicket": {
+            "properties": {
+              "expires_in_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "ticket": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ticket",
+              "expires_in_ms"
+            ],
+            "type": "object"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "block_id": {
@@ -14177,6 +14311,16 @@
           },
           "session_id": {
             "type": "string"
+          },
+          "ticket": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DataTicket"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "window_id": {
             "type": "string"
@@ -16329,6 +16473,23 @@
               }
             ]
           },
+          "ClientIds": {
+            "properties": {
+              "block_id": {
+                "type": "string"
+              },
+              "window_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "block_id"
+            ],
+            "type": "object"
+          },
           "SpawnSpec": {
             "properties": {
               "command": {
@@ -16400,6 +16561,16 @@
           "background": {
             "type": "boolean"
           },
+          "ids": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ClientIds"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "kind": {
             "$ref": "#/$defs/BlockKind",
             "default": "terminal"
@@ -16429,6 +16600,25 @@
         "type": "object"
       },
       "result": {
+        "$defs": {
+          "DataTicket": {
+            "properties": {
+              "expires_in_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "ticket": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ticket",
+              "expires_in_ms"
+            ],
+            "type": "object"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "block_id": {
@@ -16436,6 +16626,16 @@
           },
           "session_id": {
             "type": "string"
+          },
+          "ticket": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DataTicket"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "window_id": {
             "type": "string"

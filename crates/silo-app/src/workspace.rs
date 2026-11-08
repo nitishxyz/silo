@@ -14,8 +14,8 @@ use gpui::{
 };
 use silo_client::Control;
 use silo_proto::{
-    control::{Created, Event, Method, SpawnSpec},
-    model::{Axis, BlockKind, SessionSummary, SessionView, WindowInfo},
+    control::{ClientIds, Created, Event, Method, SpawnSpec},
+    model::{Axis, BlockInfo, BlockKind, Layout, Lifecycle, SessionSummary, SessionView, TermSize, WindowInfo},
 };
 
 use crate::{
@@ -62,6 +62,9 @@ pub struct Workspace {
     /// Revision an optimistic local layout change was applied on top of;
     /// snapshots up to it are stale and ignored. See `call_optimistic`.
     pub(crate) ahead_of: Option<u64>,
+    /// Terminal blocks laid out before the server made them (feature
+    /// `instant_blocks`): their panes wait for the creation's ticket.
+    pub(crate) pending_blocks: std::collections::HashSet<String>,
     /// Split ratios applied locally but not yet sent (window, path, ratio);
     /// `ratio_flush` sends them once resizing pauses.
     pub(crate) pending_ratios: Vec<crate::palette::PendingRatio>,
@@ -189,6 +192,10 @@ pub struct Workspace {
     /// records were marked seen (see `seen_tick`).
     seen: Option<SeenWatch>,
     _seen: Task<()>,
+    _link_probe: Task<()>,
+    /// What the session pill shows of the connection while
+    /// `state.show_link` (None: not measured yet).
+    pub(crate) link: Option<Link>,
     /// Voice typing (Fn), its pill and its dictation.
     pub(crate) voice: crate::voice::Voice,
 }
@@ -270,6 +277,14 @@ impl Workspace {
                 }
             }
         });
+        let link_probe = cx.spawn(async move |this, cx| {
+            loop {
+                if Self::probe_link(&this, cx).await.is_err() {
+                    return;
+                }
+                cx.background_executor().timer(LINK_TICK).await;
+            }
+        });
         let mut reduce = crate::material::watch();
         let reduce_transparency = *reduce.borrow_and_update();
         let transparency = cx.spawn(async move |this, cx| {
@@ -302,6 +317,7 @@ impl Workspace {
             notice: None,
             view: None,
             ahead_of: None,
+            pending_blocks: std::collections::HashSet::new(),
             pending_ratios: Vec::new(),
             ratio_flush: None,
             divider_drag: None,
@@ -381,6 +397,8 @@ impl Workspace {
             _updater: updater_subscriptions,
             seen: None,
             _seen: seen,
+            _link_probe: link_probe,
+            link: None,
         };
         this.sync_hosts(cx);
         // Paint the cached tree until the server answers (unless another
@@ -974,7 +992,8 @@ impl Workspace {
         let host = self.active_host;
         let host_name = Some(&self.hosts[host].info).filter(|h| !h.local).map(|h| h.name.clone());
         let restored = self.shared.update(cx, |shared, _| shared.take_restored(host, block));
-        let pane = cx.new(|cx| Pane::new(id, host_name, rt, control, restored, window, cx));
+        let pending = self.pending_blocks.contains(block);
+        let pane = cx.new(|cx| Pane::new(id, host_name, rt, control, restored, pending, window, cx));
         let subscription = cx.subscribe_in(&pane, window, |this, pane, event: &PaneEvent, window, cx| match event {
             PaneEvent::Activated => {
                 let block = pane.read(cx).block_id.clone();
@@ -1367,13 +1386,18 @@ impl Workspace {
 
     pub(crate) fn new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = &self.view else { return };
+        let session_id = view.session.id.clone();
         let cwd = self.new_block_folder(window, cx);
+        if self.instant_terminal(Place::Tab, cwd.clone(), window, cx) {
+            return;
+        }
         self.call(Method::WindowCreate {
-            session_id: view.session.id.clone(),
+            session_id,
             spawn: SpawnSpec { cwd, command: Vec::new(), size: None },
             kind: BlockKind::Terminal,
             url: None,
             background: false,
+            ids: None,
         });
     }
 
@@ -1381,13 +1405,16 @@ impl Workspace {
         let Some(block) = self.focused_block(window, cx) else {
             return;
         };
-        self.split_block(block, axis, cx);
+        self.split_block(block, axis, window, cx);
     }
 
     /// Split `block` (not necessarily the focused one, e.g. from its header).
-    pub(crate) fn split_block(&mut self, block: String, axis: Axis, cx: &gpui::App) {
+    pub(crate) fn split_block(&mut self, block: String, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
         let cwd = self.cwd_of(&block, cx);
         tracing::debug!(%block, ?axis, "split block");
+        if self.instant_terminal(Place::Split { block: block.clone(), axis }, cwd.clone(), window, cx) {
+            return;
+        }
         self.call(Method::BlockSplit {
             block_id: block,
             axis,
@@ -1395,7 +1422,90 @@ impl Workspace {
             kind: BlockKind::Terminal,
             url: None,
             agent: None,
+            ids: None,
         });
+    }
+
+    /// A new terminal (a split or a tab) shown at once: laid out locally
+    /// with ids chosen here, then made on the server, whose answer brings
+    /// the ticket the pane attaches with (feature `instant_blocks`). On a
+    /// remote host the block no longer waits a round trip to appear, and
+    /// its prompt one less. False (nothing done) where the host can't, or
+    /// for a float: the caller asks the server the old way.
+    fn instant_terminal(&mut self, place: Place, cwd: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.host_supports(silo_proto::compat::feature::INSTANT_BLOCKS) {
+            return false;
+        }
+        let (Some(control), Some(old)) = (self.control(), self.view.clone()) else { return false };
+        let block_id = fresh_id('b');
+        let mut view = old.clone();
+        let session_id = view.session.id.clone();
+        let spawn = SpawnSpec { cwd: cwd.clone(), command: Vec::new(), size: None };
+        let method = match &place {
+            Place::Split { block, axis } => {
+                let Some(w) = view.session.windows.iter_mut().find(|w| w.layout.contains(block)) else { return false };
+                if !w.layout.split(block, block_id.clone(), *axis) {
+                    return false;
+                }
+                w.zoomed = false;
+                w.focused.clone_from(&block_id);
+                let ids = ClientIds { block_id: block_id.clone(), window_id: None };
+                Method::BlockSplit { block_id: block.clone(), axis: *axis, spawn, kind: BlockKind::Terminal, url: None, agent: None, ids: Some(ids) }
+            }
+            Place::Tab => {
+                let window_id = fresh_id('w');
+                view.session.windows.push(WindowInfo {
+                    id: window_id.clone(),
+                    name: None,
+                    layout: Layout::block(block_id.clone()),
+                    focused: block_id.clone(),
+                    zoomed: false,
+                    floats: Vec::new(),
+                });
+                view.session.active_window.clone_from(&window_id);
+                let ids = ClientIds { block_id: block_id.clone(), window_id: Some(window_id) };
+                Method::WindowCreate {
+                    session_id: session_id.clone(),
+                    spawn,
+                    kind: BlockKind::Terminal,
+                    url: None,
+                    background: false,
+                    ids: Some(ids),
+                }
+            }
+        };
+        view.blocks.push(placeholder_info(&block_id, &session_id, cwd));
+        let base = old.session.revision;
+        self.pending_blocks.insert(block_id.clone());
+        self.set_view(view, window, cx);
+        // Snapshots up to `base` predate the block; the server's next one has it.
+        self.ahead_of = Some(base);
+        cx.notify();
+        let task = self.rt.spawn(async move { control.call::<Created>(method).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let created = task.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.pending_blocks.remove(&block_id);
+                match created {
+                    Ok(created) => {
+                        if let Some(pane) = this.blocks.terminal(&block_id).cloned() {
+                            pane.update(cx, |pane, cx| pane.attach_created(created.ticket.map(|t| t.ticket), cx));
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!("new block: {error:#}");
+                        // Undo, unless a newer snapshot replaced the guess already.
+                        if this.ahead_of == Some(base) && this.view.as_ref().is_some_and(|v| v.session.id == old.session.id) {
+                            this.set_view(old, window, cx);
+                        }
+                        this.flash(this.failed(&error, "Couldn't open a new terminal"), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        true
     }
 
     pub(crate) fn close_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1430,7 +1540,15 @@ impl Workspace {
         let task = self.rt.spawn(async move {
             let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
             let created: Created = control
-                .call(Method::BlockSplit { block_id: anchor, axis: Axis::Horizontal, spawn, kind: BlockKind::Terminal, url: None, agent: None })
+                .call(Method::BlockSplit {
+                    block_id: anchor,
+                    axis: Axis::Horizontal,
+                    spawn,
+                    kind: BlockKind::Terminal,
+                    url: None,
+                    agent: None,
+                    ids: None,
+                })
                 .await?;
             if let Some(rect) = float {
                 control.call_value(Method::BlockFloat { block_id: created.block_id, rect: Some(rect) }).await?;
@@ -1476,6 +1594,52 @@ impl Workspace {
     pub(crate) fn set_density(&mut self, density: hosts::Density, cx: &mut Context<Self>) {
         tracing::debug!(?density, "appearance");
         self.shared.update(cx, |shared, cx| shared.update_state(|s| s.density = density, cx));
+    }
+
+    /// ⌘⌥L: the session pill shows the connection, or stops.
+    pub(crate) fn toggle_link(&mut self, cx: &mut Context<Self>) {
+        let show = !self.state.show_link;
+        tracing::debug!(show, "connection info");
+        self.link = None;
+        self.shared.update(cx, |shared, cx| shared.update_state(|s| s.show_link = show, cx));
+        cx.notify();
+    }
+
+    /// One reading of the active host's connection while it is shown: a
+    /// remote host's selected path (QUIC's smoothed round trip, no extra
+    /// traffic), this Mac's `ping` round trip, or down.
+    async fn probe_link(this: &gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp) -> anyhow::Result<()> {
+        let (control, rt) = this
+            .update(cx, |this, cx| {
+                if !this.state.show_link {
+                    if this.link.take().is_some() {
+                        cx.notify();
+                    }
+                    return None;
+                }
+                Some((this.control().filter(|c| !c.is_closed()), this.rt.clone()))
+            })?
+            .map_or((None, None), |(c, rt)| (Some(c), Some(rt)));
+        let (Some(control), Some(rt)) = (control, rt) else { return Ok(()) };
+        let reading = match control {
+            None => Link::Down,
+            Some(control) => match control.conn() {
+                silo_client::transport::Conn::Iroh(conn) => conn.path().map_or(Link::Down, Link::Remote),
+                silo_client::transport::Conn::Unix(_) => {
+                    let started = Instant::now();
+                    match rt.spawn(async move { control.call_value(Method::Ping {}).await }).await {
+                        Ok(Ok(_)) => Link::Local(started.elapsed()),
+                        _ => Link::Down,
+                    }
+                }
+            },
+        };
+        this.update(cx, |this, cx| {
+            if this.state.show_link && this.link.as_ref() != Some(&reading) {
+                this.link = Some(reading);
+                cx.notify();
+            }
+        })
     }
 
     pub(crate) fn set_pane_headers(&mut self, headers: crate::pane_header::PaneHeaders, cx: &mut Context<Self>) {
@@ -1950,6 +2114,54 @@ pub(crate) fn is_root_window<V: 'static + Render>(handle: gpui::AnyWindowHandle,
 fn session_folder(candidates: &[(String, bool)]) -> Option<String> {
     let first = |own: bool| candidates.iter().find(|(c, o)| *o == own && !c.is_empty()).map(|(c, _)| c.clone());
     first(true).or_else(|| first(false))
+}
+
+/// How often the shown connection info is read.
+const LINK_TICK: Duration = Duration::from_secs(1);
+
+/// The active host's connection, as the session pill shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Link {
+    /// This Mac: the round trip of a `ping`.
+    Local(Duration),
+    /// A remote host's selected path.
+    Remote(silo_client::transport::PathInfo),
+    /// Not connected (reconnecting).
+    Down,
+}
+
+/// Where [`Workspace::instant_terminal`] puts a new terminal.
+enum Place {
+    Split { block: String, axis: Axis },
+    Tab,
+}
+
+/// An id in the server's format (`b`/`w` and 8 hex digits), for blocks
+/// and windows laid out before the server makes them.
+fn fresh_id(prefix: char) -> String {
+    format!("{prefix}{:08x}", rand::random::<u32>())
+}
+
+/// What the view says of a terminal until the server's snapshot does.
+fn placeholder_info(id: &str, session_id: &str, cwd: Option<String>) -> BlockInfo {
+    BlockInfo {
+        id: id.to_owned(),
+        session_id: session_id.to_owned(),
+        kind: BlockKind::Terminal,
+        title: "shell".into(),
+        cwd,
+        exited: None,
+        lifecycle: Lifecycle::Running,
+        size: TermSize::default(),
+        owner: None,
+        owner_name: None,
+        owner_block: None,
+        pid: None,
+        browser: None,
+        agent: None,
+        files: None,
+        changes: None,
+    }
 }
 
 #[cfg(test)]

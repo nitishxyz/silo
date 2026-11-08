@@ -122,6 +122,7 @@ async fn workspace(control: &Control, root: &Path) -> Created {
         kind: BlockKind::Files,
         url: None,
         agent: None,
+        ids: None,
     };
     control.call(split).await.unwrap()
 }

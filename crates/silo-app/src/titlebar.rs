@@ -945,6 +945,7 @@ impl Workspace {
                     .text_color(rgb(chrome.muted))
                     .child(if host.info.transport.is_shared() { format!("{} · shared", host.info.name) } else { host.info.name.clone() }),
             )
+            .children(self.render_link())
             .on_click(cx.listener(|this, _, window, cx| this.toggle_switcher(window, cx)))
             .map(claim_press)
             // Right-click renames the current session.
@@ -956,6 +957,47 @@ impl Workspace {
                 }),
             )
             .into_any_element()
+    }
+
+    /// The connection, while shown (⌘⌥L): ⇄ direct or waypoints for a
+    /// relay, and the round trip, amber from 150 ms and red from 400 ms;
+    /// a plug for this Mac (its socket); a spinner while reconnecting. The
+    /// tooltip names the path.
+    fn render_link(&self) -> Option<AnyElement> {
+        use crate::workspace::Link;
+        if !self.state.show_link {
+            return None;
+        }
+        let ms = |d: &std::time::Duration| d.as_millis();
+        let (glyph, rtt, tip) = match self.link.as_ref()? {
+            Link::Down => (Some("spinner"), None, "Reconnecting\u{2026}".to_owned()),
+            Link::Local(rtt) => (Some("plug"), Some(*rtt), format!("This Mac \u{00b7} local socket\nRound trip {:.1} ms", rtt.as_secs_f64() * 1e3)),
+            Link::Remote(path) => {
+                let (glyph, how) = if path.relay { ("waypoints", "Relay") } else { ("arrow-left-right", "Direct") };
+                (Some(glyph), Some(path.rtt), format!("{how} \u{00b7} {}\nRound trip {} ms", path.addr, ms(&path.rtt)))
+            }
+        };
+        let color = match rtt.map(|r| r.as_millis()) {
+            Some(400..) => theme::danger(),
+            Some(150..) => theme::warning(),
+            _ => self.chrome.muted,
+        };
+        Some(
+            div()
+                .id("link")
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap(px(3.0))
+                .text_size(px(11.0))
+                .text_color(rgb(color))
+                .children(glyph.map(|g| icon(g, 12.0, color)))
+                // This Mac answers in well under a millisecond.
+                .children(rtt.map(|r| if ms(&r) == 0 { "<1ms".to_owned() } else { format!("{}ms", ms(&r)) }))
+                .tooltip(crate::tooltip::Tooltip::text(format!("{tip}\n\u{2318}\u{2325}L hides this")))
+                .into_any_element(),
+        )
     }
 
     /// Who else watches this session (other devices, tokens and links,

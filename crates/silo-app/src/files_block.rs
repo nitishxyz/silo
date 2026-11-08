@@ -122,7 +122,7 @@ impl Workspace {
                     let block = pane.read(cx).block_id.clone();
                     let axis = this.auto_axis(&block);
                     let spawn = SpawnSpec { cwd: Some(dir.clone()), command: Vec::new(), size: None };
-                    this.call(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Terminal, url: None, agent: None });
+                    this.call(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Terminal, url: None, agent: None, ids: None });
                 }
                 FilesPaneEvent::Unsaved(paths) => {
                     let block = pane.read(cx).block_id.clone();
@@ -332,7 +332,14 @@ impl Workspace {
         let Some(view) = &self.view else { return };
         let cwd = self.new_block_folder(window, cx);
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-        self.call(Method::WindowCreate { session_id: view.session.id.clone(), spawn, kind: BlockKind::Files, url: None, background: false });
+        self.call(Method::WindowCreate {
+            session_id: view.session.id.clone(),
+            spawn,
+            kind: BlockKind::Files,
+            url: None,
+            background: false,
+            ids: None,
+        });
     }
 
     /// Open Folder…: the focused Files block re-roots; elsewhere this Mac's
@@ -349,7 +356,7 @@ impl Workspace {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(dir) = paths.into_iter().next().and_then(|p| p.to_str().map(str::to_owned)) else { return };
             let spawn = SpawnSpec { cwd: Some(dir), command: Vec::new(), size: None };
-            let method = Method::WindowCreate { session_id, spawn, kind: BlockKind::Files, url: None, background: false };
+            let method = Method::WindowCreate { session_id, spawn, kind: BlockKind::Files, url: None, background: false, ids: None };
             let _ = this.update(cx, |this, cx| this.open_files_path(method, cx));
         })
         .detach();
@@ -425,7 +432,7 @@ impl Workspace {
 /// `block.split` for a Files block beside `block` at `cwd`.
 pub fn files_split(block: String, axis: Axis, cwd: Option<String>) -> Method {
     let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-    Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Files, url: None, agent: None }
+    Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Files, url: None, agent: None, ids: None }
 }
 
 fn spawn_cwd(method: &Method) -> Option<String> {
@@ -437,11 +444,11 @@ fn spawn_cwd(method: &Method) -> Option<String> {
 
 fn with_cwd(method: Method, cwd: String) -> Method {
     match method {
-        Method::BlockSplit { block_id, axis, spawn, kind, url, agent } => {
-            Method::BlockSplit { block_id, axis, spawn: SpawnSpec { cwd: Some(cwd), ..spawn }, kind, url, agent }
+        Method::BlockSplit { block_id, axis, spawn, kind, url, agent, .. } => {
+            Method::BlockSplit { block_id, axis, spawn: SpawnSpec { cwd: Some(cwd), ..spawn }, kind, url, agent, ids: None }
         }
-        Method::WindowCreate { session_id, spawn, kind, url, background } => {
-            Method::WindowCreate { session_id, spawn: SpawnSpec { cwd: Some(cwd), ..spawn }, kind, url, background }
+        Method::WindowCreate { session_id, spawn, kind, url, background, .. } => {
+            Method::WindowCreate { session_id, spawn: SpawnSpec { cwd: Some(cwd), ..spawn }, kind, url, background, ids: None }
         }
         other => other,
     }

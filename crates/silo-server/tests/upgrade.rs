@@ -128,6 +128,7 @@ async fn populate(control: &Control) -> (Created, SessionView, DataStream, Tail)
         kind: BlockKind::Terminal,
         url: None,
         agent: None,
+        ids: None,
     };
     let _: Created = control.call(split).await.unwrap();
     let before = view(control, &created.session_id).await;
@@ -456,6 +457,7 @@ async fn takeover_keeps_exit_status() {
         kind: BlockKind::Terminal,
         url: None,
         agent: None,
+        ids: None,
     };
     let failing: Created = control.call(split).await.unwrap();
 

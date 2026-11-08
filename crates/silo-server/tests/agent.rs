@@ -68,7 +68,8 @@ async fn agent(control: &Control) -> Created {
     let spawn = SpawnSpec { command: vec!["/bin/sh".into()], cwd: Some("/tmp".into()), size: Some(TermSize::new(80, 24)) };
     let main: Created = control.call(Method::SessionCreate { name: None, spawn, kind: BlockKind::Terminal, url: None }).await.unwrap();
     let spawn = SpawnSpec { cwd: Some("/tmp".into()), ..SpawnSpec::default() };
-    let split = Method::BlockSplit { block_id: main.block_id, axis: Axis::Horizontal, spawn, kind: BlockKind::Agent, url: None, agent: None };
+    let split =
+        Method::BlockSplit { block_id: main.block_id, axis: Axis::Horizontal, spawn, kind: BlockKind::Agent, url: None, agent: None, ids: None };
     control.call(split).await.unwrap()
 }
 
@@ -150,6 +151,7 @@ async fn split_can_start_an_agent_block_on_a_session() {
         kind: BlockKind::Agent,
         url: None,
         agent: Some(agent),
+        ids: None,
     };
     let created: Created = control.call(split(state.clone())).await.unwrap();
     let block = info(&control, &created).await;

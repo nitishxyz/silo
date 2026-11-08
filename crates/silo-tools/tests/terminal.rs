@@ -50,6 +50,7 @@ async fn command_blocks_and_hidden_terminals() {
         kind: BlockKind::Agent,
         url: None,
         agent: None,
+        ids: None,
     };
     let agent: Created = control.call(split).await.unwrap();
     let set = Method::AgentSet { block_id: agent.block_id.clone(), session_id: Some("ses_parent".into()), title: None, cwd: None };

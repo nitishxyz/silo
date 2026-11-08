@@ -543,8 +543,15 @@ impl Workspace {
                 f(this, block.clone(), cx);
             })
         };
-        let split_right = on(|this, b, cx| this.split_block(b, Axis::Horizontal, cx));
-        let split_down = on(|this, b, cx| this.split_block(b, Axis::Vertical, cx));
+        let split = |axis: Axis| {
+            let block = block.clone();
+            cx.listener(move |this: &mut Workspace, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Workspace>| {
+                cx.stop_propagation();
+                this.split_block(block.clone(), axis, window, cx);
+            })
+        };
+        let split_right = split(Axis::Horizontal);
+        let split_down = split(Axis::Vertical);
         let zoom = on(|this, b, _| this.zoom_block(b));
         let close = {
             let block = block.clone();

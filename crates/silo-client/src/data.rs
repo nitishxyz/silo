@@ -39,8 +39,17 @@ impl DataStream {
     /// Ticket, connection or handshake failure (including `Reject`).
     pub async fn open(control: &Control, block_id: &str, resume: Option<Resume>) -> anyhow::Result<Self> {
         let ticket: DataTicket = control.call(Method::DataConnect { block_id: block_id.to_owned() }).await?;
+        Self::open_ticket(control, ticket.ticket, resume).await
+    }
+
+    /// Attach with a ticket already in hand (one `Created` carried, feature
+    /// `instant_blocks`): no `data.connect` round trip.
+    ///
+    /// # Errors
+    /// Connection or handshake failure (including `Reject`).
+    pub async fn open_ticket(control: &Control, ticket: String, resume: Option<Resume>) -> anyhow::Result<Self> {
         let mut stream = control.conn().open_stream().await.context("open data stream")?;
-        let hello = DataHello::ours(ticket.ticket, resume);
+        let hello = DataHello::ours(ticket, resume);
         write_frame(&mut stream, &Frame::json(kind::DATA_HELLO, &hello)?).await?;
         stream.flush().await?;
         let first = read_frame(&mut stream).await?.ok_or_else(|| anyhow!("data stream closed during hello"))?;

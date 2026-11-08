@@ -413,7 +413,7 @@ mod tests {
 
     fn block(reg: &mut Registry) -> String {
         let spawn = SpawnSpec::default();
-        reg.create_session(None, &crate::registry::New { spawn: &spawn, kind: BlockKind::Files, url: None, agent: None }).unwrap().block_id
+        reg.create_session(None, &crate::registry::New { spawn: &spawn, kind: BlockKind::Files, url: None, agent: None, ids: None }).unwrap().block_id
     }
 
     #[test]

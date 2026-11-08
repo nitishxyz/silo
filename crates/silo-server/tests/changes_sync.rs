@@ -104,6 +104,7 @@ async fn block(control: &Control, repo: &Path) -> String {
         kind: BlockKind::Changes,
         url: None,
         agent: None,
+        ids: None,
     };
     control.call::<Created>(split).await.unwrap().block_id
 }

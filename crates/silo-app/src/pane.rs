@@ -244,12 +244,15 @@ impl ImeLayout {
 
 impl Pane {
     /// `restored`: a mirror from the cache, shown until the stream resumes.
+    /// `pending`: the block is not on the server yet ([`Self::attach_created`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         block_id: String,
         host: Option<String>,
         rt: tokio::runtime::Handle,
         control: Option<Control>,
         restored: Option<Mirror>,
+        pending: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -336,7 +339,10 @@ impl Pane {
             find: None,
         };
         pane.saved = pane.dirty();
-        pane.connect(cx);
+        // Not yet on the server: `attach_created` connects it.
+        if !pending {
+            pane.connect(cx);
+        }
         pane
     }
 
@@ -480,6 +486,19 @@ impl Pane {
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
+        self.connect_with(None, cx);
+    }
+
+    /// A block the workspace laid out before the server made it (feature
+    /// `instant_blocks`): attach once it exists, with the ticket its
+    /// creation returned (no `data.connect` round trip), else as usual.
+    pub fn attach_created(&mut self, ticket: Option<String>, cx: &mut Context<Self>) {
+        if self.status == Status::Connecting && self.stream_task.is_none() {
+            self.connect_with(ticket, cx);
+        }
+    }
+
+    fn connect_with(&mut self, ticket: Option<String>, cx: &mut Context<Self>) {
         let Some(control) = self.control.clone() else {
             return;
         };
@@ -491,7 +510,14 @@ impl Pane {
         let block = self.block_id.clone();
         let rt = self.rt.clone();
         self.stream_task = Some(cx.spawn(async move |this, cx| {
-            let opened = rt.spawn(async move { DataStream::open(&control, &block, resume).await }).await;
+            let opened = rt
+                .spawn(async move {
+                    match ticket {
+                        Some(ticket) => DataStream::open_ticket(&control, ticket, resume).await,
+                        None => DataStream::open(&control, &block, resume).await,
+                    }
+                })
+                .await;
             let mut stream = match opened {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
