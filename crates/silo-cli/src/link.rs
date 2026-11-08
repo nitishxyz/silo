@@ -564,7 +564,9 @@ mod tests {
                 "ssh".to_owned(),
                 "-t".to_owned(),
                 "me@box".to_owned(),
-                sh("chmod 755 ~/.local/bin/.silo.upload && mv -f ~/.local/bin/.silo.upload ~/.local/bin/silo && ~/.local/bin/silo join --yes 'silo1abc'")
+                sh(
+                    "chmod 755 ~/.local/bin/.silo.upload && mv -f ~/.local/bin/.silo.upload ~/.local/bin/silo && ~/.local/bin/silo join --yes 'silo1abc'"
+                )
             ]
         );
         assert_eq!(
