@@ -27,16 +27,25 @@ if [ $# -gt 0 ]; then
     exit 0
 fi
 
-# A stub silo that logs its arguments.
+# A stub silo that logs its arguments; on macOS inside a stub Silo Server.app
+# whose `install --bin-dir <dir>` puts it at <dir>/silo.
 release=$work/release
 mkdir -p "$release" "$work/stage"
-cat > "$work/stage/silo" <<'EOF'
+stub=$work/stage/silo
+member=silo
+if [ "$asset" = silo-macos-aarch64.tar.gz ]; then
+    member="Silo Server.app"
+    mkdir -p "$work/stage/$member/Contents/MacOS"
+    stub="$work/stage/$member/Contents/MacOS/silo"
+fi
+cat > "$stub" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = --version ]; then echo "silo 0.0.0-test"; exit 0; fi
+if [ "${1:-}" = install ] && [ "${2:-}" = --bin-dir ]; then mkdir -p "$3" && cp "$0" "$3/silo"; exit; fi
 echo "$*" >> "$SILO_TEST_LOG"
 EOF
-chmod 755 "$work/stage/silo"
-tar -C "$work/stage" -czf "$release/$asset" silo
+chmod 755 "$stub"
+tar -C "$work/stage" -czf "$release/$asset" "$member"
 (cd "$release" && { sha256sum "$asset" 2>/dev/null || shasum -a 256 "$asset"; } > SHA256SUMS)
 
 export SILO_TEST_LOG="$work/log"

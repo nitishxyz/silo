@@ -19,7 +19,7 @@ use std::{
 use sha2::{Digest, Sha256};
 use silo_proto::{
     BUILD, Frame, kind,
-    release::{download, version_of},
+    release::{download, download_bundle, version_of},
     spawn_reader,
     upgrade::{self, Decision, HostBuild, MAX_BINARY, UpgradeBinary, UpgradeHello, UpgradeRejected, UpgradeStarted},
     write_frame,
@@ -104,22 +104,40 @@ where
         Ok(target) => target,
         Err(refusal) => return reject(&mut writer, refusal).await,
     };
-    let Some(_busy) = Busy::take(&target).filter(|_| !server.upgrading.load(Ordering::SeqCst)) else {
+    let Some(_busy) = Busy::take(&target.path()).filter(|_| !server.upgrading.load(Ordering::SeqCst)) else {
         return reject(&mut writer, (upgrade::BUSY, "an upgrade is already in progress".into())).await;
     };
-    let installed = match install(&status, &binary, &target, &mut frames).await {
+    let installed = match &target {
+        Target::Binary(exe) => install(&status, &binary, exe, &mut frames).await,
+        Target::Bundle { home } => install_bundle(&status, &binary, home).await,
+    };
+    let installed = match installed {
         Ok(installed) => installed,
         Err(refusal) => return reject(&mut writer, refusal).await,
     };
     tracing::info!(version = installed.started.version, build = installed.started.build, "upgrade: installed; handing over");
     send(&mut writer, &Frame::json(kind::UPGRADE_STARTED, &installed.started)?).await?;
-    match hand_over(&server.home, &target).await {
-        Ok(()) => writer.shutdown().await,
+    let exe = match &target {
+        Target::Binary(exe) => exe.clone(),
+        Target::Bundle { home } => silo_client::runtime::server_exe(home),
+    };
+    match hand_over(&server.home, &exe).await {
+        Ok(()) => {
+            if let Target::Bundle { .. } = target {
+                let _ = silo_client::runtime::remove_any(&installed.previous);
+            }
+            writer.shutdown().await
+        }
         Err(why) => {
-            let restored = std::fs::rename(&installed.previous, &target);
+            let restored = match &target {
+                Target::Binary(exe) => std::fs::rename(&installed.previous, exe),
+                Target::Bundle { home } => silo_client::runtime::swap_in(home, &installed.previous).map(|_| {
+                    let _ = silo_client::runtime::remove_any(&installed.previous);
+                }),
+            };
             let reason = match restored {
                 Ok(()) => format!("the new build could not take over ({why}); still serving the previous one, see the server log"),
-                Err(error) => format!("the new build could not take over ({why}), and restoring {} failed: {error}", target.display()),
+                Err(error) => format!("the new build could not take over ({why}), and restoring {} failed: {error}", target.path().display()),
             };
             reject(&mut writer, (upgrade::HANDOFF, reason)).await
         }
@@ -157,9 +175,29 @@ impl Drop for Busy {
     }
 }
 
-/// The executable to replace: the file the service runs (`silo up`
-/// records the canonical path, so a symlinked install upgrades its target).
-fn target_exe(home: &Path) -> Result<PathBuf, Refusal> {
+/// What an upgrade replaces.
+enum Target {
+    /// A bare `silo` (Linux): the new binary is renamed over it.
+    Binary(PathBuf),
+    /// A server-only Mac's runtime `Silo Server.app` in state directory
+    /// `home` (canonical): a release's bundle is swapped in.
+    Bundle { home: PathBuf },
+}
+
+impl Target {
+    /// The path held busy and named in errors.
+    fn path(&self) -> PathBuf {
+        match self {
+            Self::Binary(exe) => exe.clone(),
+            Self::Bundle { home } => silo_client::runtime::server_app(home),
+        }
+    }
+}
+
+/// What to replace: the file the service runs (`silo up` records the
+/// canonical path, so a symlinked install upgrades its target), or the
+/// runtime server bundle of a Mac without Silo.app.
+fn target_exe(home: &Path) -> Result<Target, Refusal> {
     let exe = std::env::current_exe().map_err(|e| ("internal", format!("locate the server executable: {e}")))?;
     // Linux names an executable replaced since it started "<path> (deleted)".
     let path = exe.to_str().and_then(|p| p.strip_suffix(" (deleted)")).map_or(exe.clone(), PathBuf::from);
@@ -167,12 +205,22 @@ fn target_exe(home: &Path) -> Result<PathBuf, Refusal> {
         .canonicalize()
         .map_err(|_| ("install", format!("the server's executable {} was removed since it started; reinstall silo there", path.display())))?;
     let home = home.canonicalize().unwrap_or_else(|_| home.to_owned());
-    // The app's runtime copy, or a signed bundle's own executable (renaming
-    // a bare binary over it would break the bundle's signature).
-    if crate::bundle::runtime_dir(&target, &home).is_some() || in_app_bundle(&target) {
-        return Err(("managed", "this server comes with Silo.app; update the app on that machine".into()));
+    let managed = || ("managed", "this server comes with Silo.app; update the app on that machine".to_owned());
+    if silo_client::runtime::is_runtime_exe(&target, &home) {
+        // With Silo.app installed the app owns the server bundle (and would
+        // put its own build back at its next launch).
+        let user_home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        if silo_client::update::find_app(&silo_client::update::app_roots(&user_home, false)).is_some() {
+            return Err(managed());
+        }
+        return Ok(Target::Bundle { home });
     }
-    Ok(target)
+    // A signed bundle's own executable (renaming a bare binary over it
+    // would break the bundle's signature).
+    if in_app_bundle(&target) {
+        return Err(managed());
+    }
+    Ok(Target::Binary(target))
 }
 
 /// Whether `exe` is inside an app bundle (`<X>.app/Contents/…`).
@@ -193,8 +241,45 @@ impl Drop for Temp {
 
 struct Installed {
     started: UpgradeStarted,
-    /// The previous executable, hard-linked aside.
+    /// The previous executable, hard-linked aside, or the previous server
+    /// bundle (in the new one's staging path).
     previous: PathBuf,
+}
+
+/// Fetch release `binary.release`'s server bundle into the runtime
+/// directory of `home`, check it is newer and signed like the installed
+/// one, and swap it in. Only a release: a bare binary cannot go into the
+/// signed bundle.
+async fn install_bundle(status: &HostBuild, binary: &UpgradeBinary, home: &Path) -> Result<Installed, Refusal> {
+    let Some(release) = &binary.release else {
+        return Err(("bundle", "this Mac runs Silo Server.app, which upgrades from a release; drop --local and --binary".into()));
+    };
+    let io = |e: std::io::Error| ("internal", e.to_string());
+    let staged = silo_client::runtime::staging(home).map_err(io)?;
+    let mut guard = TempTree(Some(staged.clone()));
+    download_bundle(&staged, std::env::var("SILO_DOWNLOAD_BASE").ok().as_deref(), release, &status.platform).await?;
+    let (version, build) = version_of(&staged.join(silo_client::runtime::BUNDLE_EXE)).await?;
+    match upgrade::decide((&status.version, Some(&status.build)), (&version, &build), binary.force) {
+        Decision::Upgrade => {}
+        Decision::UpToDate => return Err((upgrade::UP_TO_DATE, format!("already runs {}", upgrade::version_text(&version, &build)))),
+        Decision::Newer => return Err((upgrade::NEWER, format!("runs {}, newer than {version}", status.version))),
+    }
+    silo_client::update::verify_server(&staged, &version, &silo_client::runtime::server_app(home)).await.map_err(|e| ("invalid", e))?;
+    silo_client::runtime::swap_in(home, &staged)
+        .map_err(|e| ("install", format!("cannot replace {}: {e}", silo_client::runtime::server_app(home).display())))?;
+    guard.0 = None;
+    Ok(Installed { started: UpgradeStarted { version, build }, previous: staged })
+}
+
+/// Removes a directory tree on drop unless disarmed.
+struct TempTree(Option<PathBuf>);
+
+impl Drop for TempTree {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = silo_client::runtime::remove_any(&path);
+        }
+    }
 }
 
 async fn install(

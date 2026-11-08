@@ -105,6 +105,20 @@ impl Candidate {
         }
     }
 
+    /// Fail unless it can be installed over ssh on host `name` of
+    /// `platform`: a Mac runs Silo Server.app, which only a release
+    /// installs (a bare binary never goes into the signed bundle). A paired
+    /// host decides that itself, knowing what it runs.
+    ///
+    /// # Errors
+    /// A binary for a Mac, or [`Candidate::check_platform`]'s.
+    pub fn check_ssh(&self, name: &str, platform: &str) -> anyhow::Result<()> {
+        if upgrade::bundled(platform) && matches!(self, Self::File { .. }) {
+            bail!("{name} runs Silo Server.app, which installs from a release; drop --local and --binary");
+        }
+        self.check_platform(name, platform)
+    }
+
     /// The version it installs, and its build when known.
     fn known(&self) -> (&str, Option<&str>) {
         match self {
@@ -305,13 +319,25 @@ pub fn over_ssh(target: &str, candidate: &Candidate, force: bool) -> anyhow::Res
     let probe = output(&install.probe()).with_context(|| format!("could not reach {target} over ssh"))?;
     let mut lines = probe.lines();
     let platform = Platform::from_uname(lines.next().unwrap_or_default())?;
-    candidate.check_platform(target, platform.name())?;
+    candidate.check_ssh(target, platform.name())?;
     let Some((version, build)) = lines.next().and_then(upgrade::parse_version) else {
         bail!("no silo in ~/.local/bin on {target}; set it up with `silo remote install {target}`");
     };
     let running = build.as_deref().map_or_else(|| version.clone(), |build| version_text(&version, build));
     if let Some(line) = settle(target, (&version, build.as_deref()), candidate.known(), force)? {
         return Ok(line);
+    }
+    if upgrade::bundled(platform.name()) {
+        // A Mac's Silo Server.app: install.sh replaces the runtime copy and
+        // its `silo up` takes over (check_ssh allowed only a release).
+        let Candidate::Release { version: release } = candidate else { unreachable!("refused by check_ssh") };
+        check_release(&install, platform, release)?;
+        eprintln!("silo: installing Silo Server {release} on {target}…");
+        run(&install.upgrade_release(release))?;
+        let after = output(&install.probe())?;
+        let now = after.lines().nth(1).and_then(upgrade::parse_version);
+        let shown = now.map_or_else(|| release.clone(), |(v, b)| b.map_or_else(|| v.clone(), |b| version_text(&v, &b)));
+        return Ok(format!("{target}: {running} → {shown}"));
     }
     stage(&install, platform, candidate)?;
     let (new_version, new_build) = match check_staged(&install)? {
@@ -458,6 +484,10 @@ mod tests {
         let local = Candidate::new(&Source::Local).unwrap();
         assert_eq!(local.known(), (env!("CARGO_PKG_VERSION"), Some(silo_proto::BUILD)));
         local.check_platform("here", ours.name()).unwrap();
+        if upgrade::bundled(ours.name()) {
+            let error = local.check_ssh("mini", ours.name()).unwrap_err().to_string();
+            assert_eq!(error, "mini runs Silo Server.app, which installs from a release; drop --local and --binary");
+        }
         let error = local.check_platform("box", other.name()).unwrap_err().to_string();
         assert_eq!(error, format!("this silo does not run on box ({}); drop --local to install the release", other.name()));
 

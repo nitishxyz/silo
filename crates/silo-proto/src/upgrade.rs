@@ -90,10 +90,22 @@ pub const CHECKSUMS: &str = "SHA256SUMS";
 /// GitHub's REST API describes it (`tag_name` is `v<version>`).
 pub const LATEST: &str = "https://api.github.com/repos/nitishxyz/silo/releases/latest";
 
-/// The release asset holding `silo` for `platform` (`<os>-<arch>`).
+/// The release asset for `platform` (`<os>-<arch>`): a bare `silo` on
+/// Linux, the server bundle ([`SERVER_BUNDLE`]) on macOS ([`bundled`]).
 #[must_use]
 pub fn asset(platform: &str) -> String {
     format!("silo-{platform}.tar.gz")
+}
+
+/// The macOS server bundle: `Silo Server.app` at the root of a macOS
+/// release asset, and the runtime copy's name on every Mac.
+pub const SERVER_BUNDLE: &str = "Silo Server.app";
+
+/// Whether `platform`'s asset holds the server bundle ([`SERVER_BUNDLE`],
+/// macOS) rather than a bare `silo`.
+#[must_use]
+pub fn bundled(platform: &str) -> bool {
+    platform.starts_with("macos-")
 }
 
 /// The release asset holding the macOS app (`Silo.app` at its root).

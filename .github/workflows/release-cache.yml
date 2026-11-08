@@ -74,6 +74,6 @@ jobs:
         if: matrix.os == 'macos'
         run: |
           set -eu
-          cargo build --release --locked -p silo-cli -p silo-menubar -p otto-cli --bins
+          cargo build --release --locked -p silo-cli -p silo-menubar --bins
           cargo build --release --locked -p silo-web --bin silo-web-helper
           cargo build --release --locked -p silo-app --no-default-features --features runtime_shaders

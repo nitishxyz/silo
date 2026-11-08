@@ -339,6 +339,16 @@ impl Install {
         self.ssh(false, &script)
     }
 
+    /// Install release `version` with `install.sh` and run its `silo up`,
+    /// which takes over from the running server live (a Mac: the release's
+    /// Silo Server.app replaces the runtime copy).
+    #[must_use]
+    pub fn upgrade_release(&self, version: &str) -> Vec<String> {
+        let script =
+            format!("curl -fsSL {} | env LC_TERMINAL= sh -s -- --version {} up --no-offer", silo_proto::INSTALL_URL, quote(&format!("v{version}")));
+        self.ssh(false, &script)
+    }
+
     /// Download release `version` with `install.sh` (which checks it) to
     /// where [`Install::upload`] puts a binary, without running it.
     #[must_use]

@@ -1,72 +1,80 @@
-//! The server and menu-bar agent copied out of Silo.app to one fixed place,
-//! `<SILO_HOME>/runtime/{Silo Server.app,silo-menubar}`, so the launchd job
-//! never holds the app bundle open and the app can be replaced while the
-//! server runs. The server ships as an app bundle of its own (`Silo
-//! Server.app`, from the app's `Contents/Helpers`): macOS privacy prompts and
-//! System Settings name and show it, under its own bundle id, for every
-//! program run in Silo's terminals (which the server is the responsible
-//! process of). Each build replaces the copies atomically (a directory
-//! swap: running processes keep theirs, and macOS never sees signed code
-//! overwritten in place).
+//! Where a Mac's server runs from: one copy of the self-contained server
+//! bundle at `<SILO_HOME>/runtime/Silo Server.app`, whichever way Silo was
+//! installed.
 //!
-//! The menu-bar agent ships and is copied here as a helper app too (`Silo
-//! Menu Bar.app`): its own bundle id, so Launch Services never takes it for
-//! Silo.app, and a whole bundle, as its executable's signature seals the
-//! bundle's Info.plist and resources (a bare copy fails verification).
+//! ```text
+//! Silo Server.app                      server bundle id (xyz.nitish.silo.server)
+//! └── Contents/
+//!     ├── MacOS/silo                   server, CLI and otto (`silo otto …`)
+//!     ├── Helpers/Silo Menu Bar.app    the menu-bar agent
+//!     ├── Resources/                   icon
+//!     └── Info.plist
+//! ```
+//!
+//! Silo.app ships it as `Contents/Helpers/Silo Server.app` and copies it
+//! here when it starts; a server-only install (install.sh) unpacks the
+//! release's bundle and its `silo up` (or `silo install`) copies it here.
+//! The launchd job, the CLI links ([`link_cli`]) and the menu-bar agent all
+//! run this copy, so the bundle it came from can be replaced or removed
+//! while the server runs, and installing Silo.app later finds the same
+//! path, launchd job and bundle id.
+//!
+//! The server is a bundle of its own so macOS privacy prompts and System
+//! Settings name and show it, under its own bundle id, for every program
+//! run in Silo's terminals (the server is their responsible process). The
+//! menu-bar agent is a bundle inside it with its own bundle id, so Launch
+//! Services never takes it for Silo.app. Each copy replaces the old one
+//! atomically (a directory swap: running processes keep their files, and
+//! macOS never sees signed code overwritten in place).
 
 use std::{
     io,
     os::fd::AsFd,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
 };
 
 use silo_proto::Channel;
 
 /// The server's bundle in the runtime directory: the same name for every
 /// channel and build.
-pub const SERVER_APP: &str = "Silo Server.app";
+pub const SERVER_APP: &str = silo_proto::upgrade::SERVER_BUNDLE;
 /// A server bundle's executable, relative to the bundle.
 pub const BUNDLE_EXE: &str = "Contents/MacOS/silo";
 /// The menu-bar agent's executable name.
 pub const MENUBAR: &str = "silo-menubar";
-/// The menu-bar agent's bundle in the runtime directory: the same name for
-/// every channel and build.
-pub const MENUBAR_APP: &str = "Silo Menu Bar.app";
-/// A menu-bar bundle's executable, relative to the bundle.
-const MENUBAR_EXE: &str = "Contents/MacOS/silo-menubar";
-/// The server copied here before it was a bundle.
-const LEGACY_EXE: &str = "silo";
 
-/// Legacy per-build runtime directories touched this recently are never
-/// collected (an older app may have just installed one).
-const FRESH: Duration = Duration::from_secs(300);
-
+/// `<home>/runtime`.
 #[must_use]
 pub fn root(home: &Path) -> PathBuf {
     home.join("runtime")
 }
 
-/// Where the runtime copies live: [`root`] itself, for every build.
+/// The runtime server bundle: `<home>/runtime/Silo Server.app`.
 #[must_use]
-pub fn dir(home: &Path) -> PathBuf {
-    root(home)
+pub fn server_app(home: &Path) -> PathBuf {
+    root(home).join(SERVER_APP)
 }
 
 /// The runtime server: `<home>/runtime/Silo Server.app/Contents/MacOS/silo`.
 #[must_use]
 pub fn server_exe(home: &Path) -> PathBuf {
-    dir(home).join(SERVER_APP).join(BUNDLE_EXE)
+    server_app(home).join(BUNDLE_EXE)
 }
 
-/// The runtime menu-bar agent:
-/// `<home>/runtime/Silo Menu Bar.app/Contents/MacOS/silo-menubar`.
+/// The runtime menu-bar agent, inside the runtime server bundle.
 #[must_use]
 pub fn menubar_exe(home: &Path) -> PathBuf {
-    dir(home).join(MENUBAR_APP).join(MENUBAR_EXE)
+    menubar_in(&server_app(home), silo_proto::CHANNEL)
 }
 
-/// `channel`'s server helper bundle in app bundle `app`:
+/// `channel`'s menu-bar agent inside server bundle `server`:
+/// `<server>/Contents/Helpers/<Silo|SiloDev> Menu Bar.app/Contents/MacOS/silo-menubar`.
+#[must_use]
+pub fn menubar_in(server: &Path, channel: Channel) -> PathBuf {
+    server.join("Contents/Helpers").join(format!("{}.app", channel.menubar_name())).join("Contents/MacOS").join(MENUBAR)
+}
+
+/// `channel`'s server bundle in app bundle `app`:
 /// `<app>/Contents/Helpers/Silo Server.app` (dev: `SiloDev Server.app`).
 #[must_use]
 pub fn helper_app(app: &Path, channel: Channel) -> PathBuf {
@@ -79,47 +87,24 @@ pub fn helper_exe(app: &Path, channel: Channel) -> PathBuf {
     helper_app(app, channel).join(BUNDLE_EXE)
 }
 
-/// `channel`'s menu-bar agent helper bundle in app bundle `app`:
-/// `<app>/Contents/Helpers/Silo Menu Bar.app` (dev: `SiloDev Menu Bar.app`).
-#[must_use]
-pub fn menubar_app(app: &Path, channel: Channel) -> PathBuf {
-    app.join("Contents/Helpers").join(format!("{}.app", channel.menubar_name()))
-}
-
-/// The agent executable of [`menubar_app`].
-#[must_use]
-pub fn menubar_helper_exe(app: &Path, channel: Channel) -> PathBuf {
-    menubar_app(app, channel).join(MENUBAR_EXE)
-}
-
-/// Whether `exe` runs from `home`'s runtime directory: the bundle's `silo`,
-/// or the bare `silo` copied there before the bundle (both canonical).
+/// Whether `exe` (canonical) is `home`'s runtime server.
 #[must_use]
 pub fn is_runtime_exe(exe: &Path, home: &Path) -> bool {
-    exe == server_exe(home) || exe == dir(home).join(LEGACY_EXE)
+    exe == server_exe(home)
 }
 
-/// For a bundled server `<X>.app/Contents/Helpers/<S>.app/Contents/MacOS/silo`:
-/// `<S>.app` and `<X>.app`'s menu-bar agent bundle of `<S>`'s channel.
-fn sources(server_exe: &Path) -> io::Result<(PathBuf, PathBuf)> {
-    let bundle = server_exe
-        .ancestors()
-        .nth(3)
-        .filter(|b| b.extension().is_some_and(|e| e == "app") && b.join(BUNDLE_EXE) == server_exe)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{} is not a server bundle's executable", server_exe.display())))?;
-    let app = bundle
-        .parent()
-        .filter(|helpers| helpers.ends_with("Contents/Helpers"))
-        .and_then(|helpers| helpers.parent()?.parent())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{} is not in an app's Contents/Helpers", bundle.display())))?;
-    let channel = [Channel::Release, Channel::Dev]
-        .into_iter()
-        .find(|c| bundle.file_name() == Some(format!("{}.app", c.server_name()).as_ref()))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{} is no channel's server bundle", bundle.display())))?;
-    Ok((bundle.to_owned(), menubar_app(app, channel)))
+/// The server bundle whose executable `exe` is: a channel's
+/// `<Silo|SiloDev> Server.app` anywhere (in an app's `Contents/Helpers`,
+/// unpacked from a release), or the runtime copy.
+#[must_use]
+pub fn server_bundle(exe: &Path) -> Option<&Path> {
+    let bundle = exe.ancestors().nth(3)?;
+    let name = bundle.file_name()?.to_str()?;
+    let known = name == SERVER_APP || [Channel::Release, Channel::Dev].iter().any(|c| name == format!("{}.app", c.server_name()));
+    (known && bundle.join(BUNDLE_EXE) == exe).then_some(bundle)
 }
 
-/// Held across [`install`] and [`collect`] by app instances of any build.
+/// Held across [`install`], [`swap_in`] and [`collect`] by every process.
 fn lock(home: &Path) -> io::Result<std::fs::File> {
     std::fs::create_dir_all(home)?;
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(home.join("runtime.lock"))?;
@@ -127,47 +112,72 @@ fn lock(home: &Path) -> io::Result<std::fs::File> {
     Ok(file)
 }
 
-/// Copy this build's server and menu-bar agent bundles (`server_exe`'s and
-/// its sibling, in the app's `Contents/Helpers`) into the
-/// runtime directory, only reading the app (a disk image or translocated
-/// bundle works), replacing each atomically unless it is already the same;
-/// returns the runtime server ([`server_exe`]).
+/// Copy the server bundle `server_exe` belongs to ([`server_bundle`]) to
+/// the runtime directory, only reading it (a disk image or translocated
+/// app works), unless the copy there is already the same; returns the
+/// runtime server ([`server_exe`]). The runtime server itself is left as
+/// it is.
 ///
 /// # Errors
-/// `server_exe` is not a bundled server, or a file cannot be read, copied
+/// `server_exe` is not a server bundle's, or a file cannot be read, copied
 /// or renamed.
 pub fn install(home: &Path, server_exe: &Path) -> io::Result<PathBuf> {
-    let (bundle, menubar) = sources(server_exe)?;
+    let installed = self::server_exe(home);
+    if server_exe == installed {
+        return Ok(installed);
+    }
+    let bundle = server_bundle(server_exe)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{} is not a server bundle's executable", server_exe.display())))?;
     let _lock = lock(home)?;
-    let dir = dir(home);
-    std::fs::create_dir_all(&dir)?;
-    install_bundle(&bundle, &dir.join(SERVER_APP), BUNDLE_EXE)?;
-    install_bundle(&menubar, &dir.join(MENUBAR_APP), MENUBAR_EXE)?;
-    Ok(self::server_exe(home))
+    std::fs::create_dir_all(root(home))?;
+    let dst = server_app(home);
+    if same_bundle(bundle, &dst)? {
+        return Ok(installed);
+    }
+    let tmp = temp_beside(&dst);
+    remove_any(&tmp)?;
+    let copied = copy_tree(bundle, &tmp).and_then(|()| replace_dir(&tmp, &dst));
+    // After a swap `tmp` holds the old bundle; else a partial copy.
+    if let Err(error) = remove_any(&tmp) {
+        tracing::warn!("runtime: remove {}: {error}", tmp.display());
+    }
+    copied?;
+    tracing::info!("runtime: installed {} from {}", dst.display(), bundle.display());
+    Ok(installed)
+}
+
+/// A fresh staging path for a new server bundle on the runtime
+/// directory's volume (for [`swap_in`]): `<home>/runtime/.Silo Server.app.<pid>.n<hex>`,
+/// collected once this process is gone.
+///
+/// # Errors
+/// The runtime directory cannot be created.
+pub fn staging(home: &Path) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(root(home))?;
+    let path = root(home).join(format!(".{SERVER_APP}.{}.n{:08x}", std::process::id(), rand::random::<u32>()));
+    remove_any(&path)?;
+    Ok(path)
+}
+
+/// Put the bundle `staged` (a [`staging`] path) in place as the runtime
+/// server bundle; `staged` then holds the previous bundle, if there was
+/// one (`Ok(true)`): remove it, or [`swap_in`] it again to roll back.
+///
+/// # Errors
+/// The rename fails.
+pub fn swap_in(home: &Path, staged: &Path) -> io::Result<bool> {
+    let _lock = lock(home)?;
+    let dst = server_app(home);
+    let had = std::fs::symlink_metadata(&dst).is_ok();
+    replace_dir(staged, &dst)?;
+    tracing::info!("runtime: swapped in {}", dst.display());
+    Ok(had)
 }
 
 /// A temporary name beside `dst`: `.<name>.<pid>` (see [`temp_pid`]).
 fn temp_beside(dst: &Path) -> PathBuf {
     let name = dst.file_name().unwrap_or_default().to_string_lossy();
     dst.with_file_name(format!(".{name}.{}", std::process::id()))
-}
-
-/// Copy the bundle `src` (executable `exe`) to `dst` unless [`same_bundle`]:
-/// a fresh copy beside it, swapped in atomically, then the old one removed.
-fn install_bundle(src: &Path, dst: &Path, exe: &str) -> io::Result<()> {
-    if same_bundle(src, dst, exe)? {
-        return Ok(());
-    }
-    let tmp = temp_beside(dst);
-    remove_any(&tmp)?;
-    let copied = copy_tree(src, &tmp).and_then(|()| replace_dir(&tmp, dst));
-    // After a swap `tmp` holds the old bundle; else a partial copy.
-    if let Err(error) = remove_any(&tmp) {
-        tracing::warn!("runtime: remove {}: {error}", tmp.display());
-    }
-    copied?;
-    tracing::info!("runtime: installed {}", dst.display());
-    Ok(())
 }
 
 /// Put directory `new` at `dst`: an atomic swap with an existing `dst` (the
@@ -193,7 +203,10 @@ fn replace_dir(new: &Path, dst: &Path) -> io::Result<()> {
 }
 
 /// Remove a file, link or directory tree at `path`, if any.
-fn remove_any(path: &Path) -> io::Result<()> {
+///
+/// # Errors
+/// It is there and cannot be removed.
+pub fn remove_any(path: &Path) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
@@ -237,58 +250,141 @@ fn same(src: &Path, dst: &Path) -> io::Result<bool> {
     Ok(src.len() == dst.len() && src.modified()? == dst.modified()?)
 }
 
-/// Bundle `dst` is a copy of `src`: the [`same`] executable `exe`, and the
-/// same Info.plist and sealed resources list.
-fn same_bundle(src: &Path, dst: &Path, exe: &str) -> io::Result<bool> {
-    if !same(&src.join(exe), &dst.join(exe))? {
-        return Ok(false);
+/// Bundle `dst` is a copy of `src`: every executable and code signature
+/// the [`same`] (the server's and its nested menu-bar agent's), and the
+/// same Info.plists.
+fn same_bundle(src: &Path, dst: &Path) -> io::Result<bool> {
+    let mut nested = vec![PathBuf::new()];
+    if let Ok(helpers) = std::fs::read_dir(src.join("Contents/Helpers")) {
+        nested.extend(helpers.filter_map(Result::ok).map(|e| Path::new("Contents/Helpers").join(e.file_name())));
     }
-    let read = |bundle: &Path, file: &str| std::fs::read(bundle.join(file)).ok();
-    Ok(["Contents/Info.plist", "Contents/_CodeSignature/CodeResources"].iter().all(|file| read(src, file) == read(dst, file)))
+    for bundle in nested {
+        let (s, d) = (src.join(&bundle), dst.join(&bundle));
+        let exes = std::fs::read_dir(s.join("Contents/MacOS"))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|e| Path::new("Contents/MacOS").join(e.file_name()));
+        for exe in exes {
+            if !same(&s.join(&exe), &d.join(&exe))? {
+                return Ok(false);
+            }
+        }
+        let read = |b: &Path, file: &str| std::fs::read(b.join(file)).ok();
+        if !["Contents/Info.plist", "Contents/_CodeSignature/CodeResources"].iter().all(|f| read(&s, f) == read(&d, f)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
-/// Remove what nothing needs any more: the legacy per-build runtime
-/// directories (`runtime/<build>/`, from before the fixed path) that no
-/// running process was started from and nothing touched recently, the
-/// legacy bare `runtime/silo` and `runtime/silo-menubar` (from before the
-/// bundles) once no process runs them, and copies left half-done by
-/// processes that are gone.
+/// Remove what nothing needs any more: everything in the runtime directory
+/// but the server bundle that no running process was started from
+/// (earlier layouts' copies), and staging copies of processes that are
+/// gone.
 pub fn collect(home: &Path) {
     let Ok(_lock) = lock(home) else { return };
     let Some(running) = running_exes() else { return };
     let Ok(root) = root(home).canonicalize() else { return };
     let Ok(entries) = std::fs::read_dir(&root) else { return };
-    let now = SystemTime::now();
-    let fresh = |dir: &Path| std::fs::metadata(dir).and_then(|m| m.modified()).is_ok_and(|t| now.duration_since(t).unwrap_or_default() < FRESH);
-    let legacy = |p: &Path| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n != SERVER_APP && n != MENUBAR_APP && !n.starts_with('.'));
-    let dirs: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir() && legacy(p) && !fresh(p)).collect();
-    let unused = [LEGACY_EXE, MENUBAR].map(|name| root.join(name)).into_iter().filter(|exe| exe.is_file() && !running.contains(exe));
-    for path in victims(&dirs, &running).into_iter().chain(unused) {
+    for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+        let unused = match temp_pid(&path) {
+            Some(pid) => !alive(pid),
+            None => path.file_name() != Some(SERVER_APP.as_ref()) && !running.iter().any(|exe| exe.starts_with(&path)),
+        };
+        if !unused {
+            continue;
+        }
         match remove_any(&path) {
             Ok(()) => tracing::info!("runtime: removed {}", path.display()),
             Err(error) => tracing::warn!("runtime: remove {}: {error}", path.display()),
         }
     }
-    for tmp in std::fs::read_dir(&root).into_iter().flatten().filter_map(Result::ok).map(|e| e.path()) {
-        if temp_pid(&tmp).is_some_and(|pid| !alive(pid)) && remove_any(&tmp).is_ok() {
-            tracing::info!("runtime: removed {}", tmp.display());
-        }
-    }
 }
 
-fn victims(dirs: &[PathBuf], running: &[PathBuf]) -> Vec<PathBuf> {
-    dirs.iter().filter(|dir| !running.iter().any(|exe| exe.starts_with(dir))).cloned().collect()
-}
-
-/// The pid in a temp copy's name `.<file>.<pid>`.
+/// The pid in a staging copy's name: `.<file>.<pid>`, `.<file>.<pid>.n<hex>`
+/// or `.<file>.old.<pid>`.
 fn temp_pid(path: &Path) -> Option<u32> {
     let name = path.file_name()?.to_str()?.strip_prefix('.')?;
-    name.rsplit_once('.')?.1.parse().ok()
+    let mut parts = name.rsplit('.');
+    let last = parts.next()?;
+    let pid = if last.starts_with('n') { parts.next()? } else { last };
+    pid.bytes().all(|b| b.is_ascii_digit()).then(|| pid.parse().ok()).flatten()
 }
 
 fn alive(pid: u32) -> bool {
     let Some(pid) = i32::try_from(pid).ok().and_then(rustix::process::Pid::from_raw) else { return false };
     !matches!(rustix::process::test_kill_process(pid), Err(rustix::io::Errno::SRCH))
+}
+
+/// What is at a link path now.
+#[derive(Debug, PartialEq, Eq)]
+enum Existing {
+    Missing,
+    Link(PathBuf),
+    Other,
+}
+
+/// Point the CLI at `silo` (the runtime server, see [`server_exe`]):
+/// `<SILO_HOME>/bin/silo` → `silo`, a stable path that survives updates,
+/// and `<bin>/silo` → that stable path. `bin` is `~/.local/bin` unless
+/// given; it is created when `create` (a server install), else only
+/// linked into when it exists (the app). A file or a link to something
+/// else there is replaced only when `replace` (`silo install` owns that
+/// path); a link into an app or server bundle (which updates move) always.
+/// Never edits shell files. The `<bin>/silo` link, if made.
+pub fn link_cli(silo_home: &Path, silo: &Path, bin: Option<&Path>, create: bool, replace: bool) -> Option<PathBuf> {
+    let stable = silo_home.join("bin/silo");
+    if std::fs::read_link(&stable).ok().as_deref() != Some(silo) {
+        let _ = std::fs::create_dir_all(silo_home.join("bin"));
+        link(&stable, silo);
+    }
+    let dir = match bin {
+        Some(dir) => dir.to_owned(),
+        None => std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from)?.join(".local/bin"),
+    };
+    if create {
+        let _ = std::fs::create_dir_all(&dir);
+    }
+    if !dir.is_dir() {
+        return None;
+    }
+    let user = dir.join("silo");
+    let existing = match std::fs::symlink_metadata(&user) {
+        Err(_) => Existing::Missing,
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::read_link(&user).map_or(Existing::Other, Existing::Link),
+        Ok(_) => Existing::Other,
+    };
+    if existing == Existing::Link(stable.clone()) {
+        return Some(user);
+    }
+    if replace || should_link(&existing) {
+        link(&user, &stable);
+        return Some(user);
+    }
+    None
+}
+
+/// Point `path` at `target` atomically.
+fn link(path: &Path, target: &Path) {
+    let tmp = path.with_file_name(format!(".silo-link-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    match std::os::unix::fs::symlink(target, &tmp).and_then(|()| std::fs::rename(&tmp, path)) {
+        Ok(()) => tracing::info!("cli link: {} -> {}", path.display(), target.display()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            tracing::warn!("cli link {}: {error}", path.display());
+        }
+    }
+}
+
+/// Missing, or a link into an app or server bundle (which an update moves).
+fn should_link(existing: &Existing) -> bool {
+    match existing {
+        Existing::Missing => true,
+        Existing::Link(to) => to.ancestors().any(|dir| dir.extension().is_some_and(|e| e == "app")),
+        Existing::Other => false,
+    }
 }
 
 /// The executable of process `pid`, if it runs.
@@ -354,15 +450,9 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn one_runtime_dir_for_every_build() {
-        let home = Path::new("/Users/bat/Library/Application Support/silo");
-        assert_eq!(dir(home), home.join("runtime"));
-        assert_eq!(dir(home), root(home));
-    }
-
     /// A fake `Silo.app` holding a server bundle (`server`: its executable's
-    /// text) and agent; the bundled server's executable.
+    /// text) with its menu-bar agent (`agent`); the bundled server's
+    /// executable.
     fn app(base: &Path, server: &str, agent: &str) -> PathBuf {
         let app = base.join("Silo.app");
         let bundle = helper_app(&app, Channel::Release);
@@ -372,39 +462,37 @@ mod tests {
         std::fs::write(bundle.join(BUNDLE_EXE), server).unwrap();
         std::fs::write(bundle.join("Contents/Info.plist"), "<plist/>").unwrap();
         std::fs::write(bundle.join("Contents/Resources/Silo.icns"), "icon").unwrap();
-        let menubar = menubar_helper_exe(&app, Channel::Release);
+        let menubar = menubar_in(&bundle, Channel::Release);
         std::fs::create_dir_all(menubar.parent().unwrap()).unwrap();
         std::fs::write(menubar, agent).unwrap();
         bundle.join(BUNDLE_EXE)
     }
 
     #[test]
-    fn helper_paths() {
+    fn paths() {
         let app = Path::new("/Applications/Silo.app");
-        assert_eq!(helper_exe(app, Channel::Release), Path::new("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo"));
+        let server = helper_exe(app, Channel::Release);
+        assert_eq!(server, Path::new("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo"));
+        assert_eq!(
+            menubar_in(&helper_app(app, Channel::Release), Channel::Release),
+            Path::new("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/Helpers/Silo Menu Bar.app/Contents/MacOS/silo-menubar")
+        );
         let dev = Path::new("/w/target/debug/SiloDev.app");
         assert_eq!(helper_exe(dev, Channel::Dev), Path::new("/w/target/debug/SiloDev.app/Contents/Helpers/SiloDev Server.app/Contents/MacOS/silo"));
-        let (bundle, agent) = sources(&helper_exe(app, Channel::Release)).unwrap();
-        assert_eq!(bundle, helper_app(app, Channel::Release));
-        assert_eq!(agent, Path::new("/Applications/Silo.app/Contents/Helpers/Silo Menu Bar.app"));
-        assert_eq!(menubar_helper_exe(app, Channel::Release), agent.join("Contents/MacOS/silo-menubar"));
-        let (_, dev_agent) = sources(&helper_exe(dev, Channel::Dev)).unwrap();
-        assert_eq!(
-            menubar_helper_exe(dev, Channel::Dev),
-            Path::new("/w/target/debug/SiloDev.app/Contents/Helpers/SiloDev Menu Bar.app/Contents/MacOS/silo-menubar")
-        );
-        assert_eq!(dev_agent, menubar_app(dev, Channel::Dev));
-        assert!(sources(Path::new("/Applications/Silo.app/Contents/Helpers/Other.app/Contents/MacOS/silo")).is_err(), "no channel's server");
-        assert!(sources(Path::new("/Applications/Silo.app/Contents/MacOS/silo-server")).is_err(), "the old layout");
-        assert!(sources(Path::new("/x/Silo Server.app/Contents/MacOS/silo")).is_err(), "not in an app's Helpers");
+        assert_eq!(server_bundle(&server), Some(helper_app(app, Channel::Release).as_path()));
+        assert_eq!(server_bundle(&helper_exe(dev, Channel::Dev)), Some(helper_app(dev, Channel::Dev).as_path()));
+        // A release's bundle unpacked anywhere, and the runtime copy.
+        assert_eq!(server_bundle(Path::new("/tmp/x/Silo Server.app/Contents/MacOS/silo")), Some(Path::new("/tmp/x/Silo Server.app")));
         let home = Path::new("/h");
         assert_eq!(server_exe(home), Path::new("/h/runtime/Silo Server.app/Contents/MacOS/silo"));
-        assert_eq!(menubar_exe(home), Path::new("/h/runtime/Silo Menu Bar.app/Contents/MacOS/silo-menubar"));
-        assert!(is_runtime_exe(&server_exe(home), home) && is_runtime_exe(Path::new("/h/runtime/silo"), home));
-        assert!(!is_runtime_exe(Path::new("/h/runtime/silo-menubar"), home) && !is_runtime_exe(Path::new("/h/runtime/b/silo"), home));
+        assert_eq!(server_bundle(&server_exe(home)), Some(server_app(home).as_path()));
+        assert!(server_bundle(Path::new("/Applications/Silo.app/Contents/Helpers/Other.app/Contents/MacOS/silo")).is_none());
+        assert!(server_bundle(Path::new("/x/Silo Server.app/Contents/MacOS/other")).is_none());
+        assert!(server_bundle(Path::new("/usr/local/bin/silo")).is_none());
+        assert!(is_runtime_exe(&server_exe(home), home) && !is_runtime_exe(Path::new("/h/runtime/silo"), home));
+        assert_eq!(menubar_exe(home), menubar_in(&server_app(home), silo_proto::CHANNEL));
         // The server's own view of its runtime directory agrees.
-        assert_eq!(silo_server::bundle::runtime_dir(&server_exe(home), home), Some(dir(home)));
-        assert_eq!(silo_server::bundle::runtime_dir(&dir(home).join(LEGACY_EXE), home), Some(dir(home)));
+        assert_eq!(silo_server::bundle::runtime_dir(&server_exe(home), home), Some(root(home)));
     }
 
     #[test]
@@ -415,10 +503,11 @@ mod tests {
         let silo = install(&home, &bundled).unwrap();
         assert_eq!(silo, home.join("runtime/Silo Server.app/Contents/MacOS/silo"));
         assert_eq!(std::fs::read_to_string(&silo).unwrap(), "server");
-        let copy = home.join("runtime").join(SERVER_APP);
+        let copy = server_app(&home);
         assert_eq!(std::fs::read_to_string(copy.join("Contents/Info.plist")).unwrap(), "<plist/>");
         assert_eq!(std::fs::read_to_string(copy.join("Contents/Resources/Silo.icns")).unwrap(), "icon");
-        assert_eq!(std::fs::read_to_string(menubar_exe(&home)).unwrap(), "agent");
+        assert_eq!(std::fs::read_to_string(menubar_in(&copy, Channel::Release)).unwrap(), "agent", "the agent comes inside it");
+        assert_eq!(install(&home, &silo).unwrap(), silo, "the runtime copy installs nothing");
         let inode = |p: &Path| std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(p).unwrap());
         let (before, dir_before) = (inode(&silo), inode(&copy));
         install(&home, &bundled).unwrap();
@@ -437,17 +526,15 @@ mod tests {
         install(&home, &bundled).unwrap();
         assert_ne!(inode(&copy), dir_before);
         assert_eq!(std::fs::read_to_string(copy.join("Contents/Info.plist")).unwrap(), "<plist>2</plist>");
-        let mut names: Vec<_> = std::fs::read_dir(home.join("runtime")).unwrap().map(|e| e.unwrap().file_name()).collect();
-        names.sort();
-        assert_eq!(names, [MENUBAR_APP, SERVER_APP], "no copy left behind");
-        // Only the agent changed: its bundle is swapped, the server's left alone.
-        let (server_dir, agent_dir) = (inode(&copy), inode(&home.join("runtime").join(MENUBAR_APP)));
-        std::fs::write(menubar_helper_exe(&base.join("Silo.app"), Channel::Release), "agent2").unwrap();
+        // Only the nested agent changed: a new bundle too.
+        let dir_before = inode(&copy);
+        std::fs::write(menubar_in(server_bundle(&bundled).unwrap(), Channel::Release), "agent2").unwrap();
         install(&home, &bundled).unwrap();
-        assert_eq!(std::fs::read_to_string(menubar_exe(&home)).unwrap(), "agent2");
-        assert_eq!(inode(&copy), server_dir);
-        assert_ne!(inode(&home.join("runtime").join(MENUBAR_APP)), agent_dir);
-        assert!(install(&home, &base.join("Silo.app/Contents/MacOS/silo-menubar")).is_err());
+        assert_ne!(inode(&copy), dir_before);
+        assert_eq!(std::fs::read_to_string(menubar_in(&copy, Channel::Release)).unwrap(), "agent2");
+        let names: Vec<_> = std::fs::read_dir(root(&home)).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, [SERVER_APP], "no copy left behind");
+        assert!(install(&home, &base.join("Silo.app/Contents/MacOS/silo")).is_err(), "not a server bundle");
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -475,34 +562,51 @@ mod tests {
         std::fs::write(&bundled, "new").unwrap();
         install(&home, &bundled).unwrap();
         assert_eq!(std::fs::read_to_string(&silo).unwrap(), "new");
-        assert_eq!(std::fs::read_dir(dir(&home)).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(root(&home)).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
-    fn collect_removes_legacy_build_dirs_and_files() {
+    fn swaps_a_staged_bundle_in_and_back() {
+        let base = temp("swap");
+        let home = base.join("home");
+        let bundled = app(&base, "one", "agent");
+        let silo = install(&home, &bundled).unwrap();
+        let staged = staging(&home).unwrap();
+        assert!(staged.starts_with(root(&home)) && temp_pid(&staged) == Some(std::process::id()), "{}", staged.display());
+        std::fs::create_dir_all(staged.join("Contents/MacOS")).unwrap();
+        std::fs::write(staged.join(BUNDLE_EXE), "two").unwrap();
+        assert!(swap_in(&home, &staged).unwrap());
+        assert_eq!(std::fs::read_to_string(&silo).unwrap(), "two");
+        assert_eq!(std::fs::read_to_string(staged.join(BUNDLE_EXE)).unwrap(), "one", "the previous bundle, to roll back to");
+        assert!(swap_in(&home, &staged).unwrap());
+        assert_eq!(std::fs::read_to_string(&silo).unwrap(), "one");
+        remove_any(&staged).unwrap();
+        // Into an empty runtime directory: nothing previous.
+        let fresh = base.join("fresh");
+        let staged = staging(&fresh).unwrap();
+        std::fs::create_dir_all(staged.join("Contents/MacOS")).unwrap();
+        assert!(!swap_in(&fresh, &staged).unwrap());
+        assert!(server_app(&fresh).is_dir() && !staged.exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn collect_keeps_only_the_server_bundle() {
         let home = temp("collect");
-        let old = SystemTime::now() - FRESH - Duration::from_secs(1);
         let root = root(&home);
-        for build in ["a", "b", "new", SERVER_APP, MENUBAR_APP] {
-            std::fs::create_dir_all(root.join(build)).unwrap();
-            if build != "new" {
-                std::fs::File::open(root.join(build)).unwrap().set_modified(old).unwrap();
-            }
+        // Earlier layouts' copies, which no process runs here.
+        for dir in [SERVER_APP, "Silo Menu Bar.app", "0123456789abcdef"] {
+            std::fs::create_dir_all(root.join(dir).join("Contents")).unwrap();
         }
-        // The bare `silo` and `silo-menubar` from before the bundles: no process runs them here.
         std::fs::write(root.join("silo"), "").unwrap();
-        std::fs::write(root.join("silo-menubar"), "").unwrap();
-        let (dead, mine) = (root.join(".silo-menubar.999999999"), root.join(format!(".silo-menubar.{}", std::process::id())));
-        std::fs::write(&dead, "").unwrap();
-        std::fs::write(&mine, "").unwrap();
-        let dead_bundle = root.join(".Silo Server.app.999999999");
-        std::fs::create_dir_all(dead_bundle.join("Contents")).unwrap();
+        let (dead, mine) = (root.join(format!(".{SERVER_APP}.999999999.n0a")), root.join(format!(".{SERVER_APP}.{}", std::process::id())));
+        std::fs::create_dir_all(dead.join("Contents")).unwrap();
+        std::fs::create_dir_all(&mine).unwrap();
         collect(&home);
         let mut left: Vec<_> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
         left.sort();
-        assert_eq!(left, [format!(".silo-menubar.{}", std::process::id()).as_str(), MENUBAR_APP, SERVER_APP, "new"]);
-        assert!(!dead.exists() && mine.exists() && !dead_bundle.exists());
+        assert_eq!(left, [format!(".{SERVER_APP}.{}", std::process::id()), SERVER_APP.to_owned()]);
         let _ = std::fs::remove_dir_all(home);
     }
 
@@ -513,18 +617,38 @@ mod tests {
         assert!(running_exes().unwrap().iter().any(|e| e.canonicalize().ok().as_ref() == Some(&me)));
         let name = name_of(std::process::id()).unwrap();
         assert!(!name.is_empty() && me.file_name().unwrap().to_str().unwrap().starts_with(&name), "{name}");
-        assert_eq!(temp_pid(Path::new("/r/b/.silo-menubar.42")), Some(42));
-        assert_eq!(temp_pid(Path::new("/r/b/silo")), None);
         assert_eq!(temp_pid(Path::new("/r/.Silo Server.app.7")), Some(7));
+        assert_eq!(temp_pid(Path::new("/r/.Silo Server.app.7.n0a1b2c3d")), Some(7));
+        assert_eq!(temp_pid(Path::new("/r/.Silo Server.app.7.n12345678")), Some(7), "an all-digit suffix is no pid");
         assert_eq!(temp_pid(Path::new("/r/.Silo Server.app.old.8")), Some(8));
+        assert_eq!(temp_pid(Path::new("/r/Silo Server.app")), None);
+        assert_eq!(temp_pid(Path::new("/r/silo")), None);
     }
 
     #[test]
-    fn collects_unused_dirs_only() {
-        let root = Path::new("/h/runtime");
-        let dirs = ["old", "busy", "agent"].map(|d| root.join(d));
-        let running = [PathBuf::from("/h/runtime/busy/silo"), PathBuf::from("/h/runtime/agent/silo-menubar"), PathBuf::from("/usr/bin/login")];
-        assert_eq!(victims(&dirs, &running), [root.join("old")]);
-        assert_eq!(victims(&dirs, &[PathBuf::from("/h/runtime/silo")]), dirs.to_vec(), "the fixed copy keeps no legacy dir");
+    fn cli_links() {
+        let base = temp("links");
+        let (home, bin) = (base.join("h"), base.join("bin"));
+        let silo = home.join("runtime/Silo Server.app/Contents/MacOS/silo");
+        let stable = home.join("bin/silo");
+        assert_eq!(link_cli(&home, &silo, Some(&bin), false, false), None, "no bin folder: only the stable link");
+        assert_eq!(std::fs::read_link(&stable).unwrap(), silo);
+        assert_eq!(link_cli(&home, &silo, Some(&bin), true, false), Some(bin.join("silo")), "a server install creates it");
+        assert_eq!(std::fs::read_link(bin.join("silo")).unwrap(), stable);
+        // A file of another install: kept, unless the install owns the path.
+        std::fs::remove_file(bin.join("silo")).unwrap();
+        std::fs::write(bin.join("silo"), "old").unwrap();
+        assert_eq!(link_cli(&home, &silo, Some(&bin), false, false), None);
+        assert_eq!(std::fs::read_to_string(bin.join("silo")).unwrap(), "old");
+        assert_eq!(link_cli(&home, &silo, Some(&bin), true, true), Some(bin.join("silo")));
+        assert_eq!(std::fs::read_link(bin.join("silo")).unwrap(), stable);
+        assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 1, "no temp link left");
+        let _ = std::fs::remove_dir_all(base);
+        // Links into a bundle (moved by updates) are relinked; others kept.
+        assert!(should_link(&Existing::Missing));
+        assert!(should_link(&Existing::Link("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo".into())));
+        assert!(should_link(&Existing::Link("/tmp/x/Silo Server.app/Contents/MacOS/silo".into())));
+        assert!(!should_link(&Existing::Link("/opt/homebrew/bin/silo".into())));
+        assert!(!should_link(&Existing::Other));
     }
 }

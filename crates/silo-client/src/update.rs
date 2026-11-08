@@ -16,11 +16,18 @@
 //!   staging directory for [`clean_stale`] (a running app may still load
 //!   files from it). The new app's launch runs `silo up` as always, which
 //!   takes the local server over to the new build live.
-//! - A standalone `silo` (install.sh): the release's
+//! - A server-only Mac (the runtime `Silo Server.app`, no Silo.app): the
+//!   release's `silo-macos-<arch>.tar.gz`, checked against the sums and
+//!   unpacked into a staging path in the runtime directory
+//!   ([`silo_proto::release::download_bundle`]); its `Silo Server.app`
+//!   must report the release's version, pass `codesign --verify --deep
+//!   --strict` and be signed like the installed one, both
+//!   `xyz.nitish.silo.server` ([`verify_server`]). It is swapped in
+//!   atomically ([`crate::runtime::swap_in`]).
+//! - A standalone `silo` (install.sh on Linux): the release's
 //!   `silo-<os>-<arch>.tar.gz`, checked against the sums and unpacked next
 //!   to the binary ([`silo_proto::release::download`]), must report the
-//!   release's version and, on macOS, be signed like the installed binary
-//!   ([`same_signer`]); it is renamed over the binary.
+//!   release's version; it is renamed over the binary.
 //!
 //! The identity rule: a Developer ID build updates only to one of the same
 //! team and signing certificate name, also checked as a code requirement
@@ -308,15 +315,16 @@ pub async fn signature(path: &Path) -> Result<Signature, String> {
     parse_signature(&String::from_utf8_lossy(&out.stderr)).ok_or_else(|| format!("{} is not signed", path.display()))
 }
 
-/// `codesign --verify --strict` `path` (`--deep` for an app), against the
-/// team's requirement when signed by one.
-async fn verify_code(path: &Path, identity: &Identity, app: bool) -> Result<(), String> {
+/// `codesign --verify --strict` `path` (`--deep` for a bundle, which then
+/// must have `identifier`), against the team's requirement when signed by
+/// one.
+async fn verify_code(path: &Path, identity: &Identity, identifier: Option<&str>) -> Result<(), String> {
     let requirement = match identity {
-        Identity::Team { team, .. } => Some(requirement(team, app.then_some(APP_ID))),
+        Identity::Team { team, .. } => Some(requirement(team, identifier)),
         Identity::AdHoc => None,
     };
     let mut args: Vec<&OsStr> = vec!["--verify".as_ref(), "--strict".as_ref()];
-    if app {
+    if identifier.is_some() {
         args.push("--deep".as_ref());
     }
     if let Some(requirement) = &requirement {
@@ -338,7 +346,7 @@ pub async fn verify_app(app: &Path, version: &str, running: &Signature) -> Resul
     }
     let candidate = signature(app).await?;
     same_identity(running, &candidate)?;
-    verify_code(app, &candidate.1, true).await
+    verify_code(app, &candidate.1, Some(APP_ID)).await
 }
 
 /// Why an update could not be prepared.
@@ -688,10 +696,15 @@ pub fn on_relaunch(f: impl Fn() + Send + 'static) -> std::io::Result<()> {
 /// How the running `silo` is installed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Origin {
-    /// It comes with Silo.app: the bundle's own server (that bundle), or a
-    /// runtime copy under `<SILO_HOME>/runtime` (which bundle is unknown).
-    App(Option<PathBuf>),
-    /// A binary of its own (install.sh).
+    /// The server bundle inside Silo.app (`<X>.app/Contents/Helpers/<S>.app`):
+    /// that app.
+    App(PathBuf),
+    /// The runtime server bundle (`<SILO_HOME>/runtime/Silo Server.app`):
+    /// Silo.app's copy when the app is installed, else a server-only install.
+    Runtime(PathBuf),
+    /// A server bundle anywhere else (an unpacked release, not installed).
+    Bundle(PathBuf),
+    /// A binary of its own (install.sh on Linux).
     Standalone(PathBuf),
     /// A debug build, or anything in a cargo target directory.
     Dev,
@@ -705,29 +718,15 @@ pub fn origin(exe: &Path, home: &Path, release: bool) -> Origin {
     if !release || exe.ancestors().skip(1).any(|dir| dir.join("CACHEDIR.TAG").is_file()) {
         return Origin::Dev;
     }
-    let dir = exe.parent();
-    let legacy_runtime = exe.file_name() == Some(OsStr::new("silo")) && dir.and_then(Path::parent) == Some(&crate::runtime::root(home));
-    if crate::runtime::is_runtime_exe(exe, home) || legacy_runtime {
-        return Origin::App(None);
+    if crate::runtime::is_runtime_exe(exe, home) {
+        return Origin::Runtime(crate::runtime::server_app(home));
     }
-    match bundle_of_server(exe) {
-        Some(app) => Origin::App(Some(app.to_owned())),
-        None => Origin::Standalone(exe.to_owned()),
-    }
-}
-
-/// The app bundle shipping server `exe`: `<X>.app` for
-/// `<X>.app/Contents/Helpers/<S>.app/Contents/MacOS/silo`, or for
-/// `<X>.app/Contents/MacOS/silo-server` (before the server helper app).
-fn bundle_of_server(exe: &Path) -> Option<&Path> {
+    let Some(bundle) = crate::runtime::server_bundle(exe) else { return Origin::Standalone(exe.to_owned()) };
     let is_app = |p: &Path| p.extension() == Some(OsStr::new("app"));
-    let app = if exe.file_name() == Some(OsStr::new("silo-server")) {
-        exe.parent().filter(|d| d.ends_with("Contents/MacOS"))?.parent()?.parent()?
-    } else {
-        let helper = exe.ancestors().nth(3).filter(|h| is_app(h) && h.join(crate::runtime::BUNDLE_EXE) == exe)?;
-        helper.parent().filter(|d| d.ends_with("Contents/Helpers"))?.parent()?.parent()?
-    };
-    is_app(app).then_some(app)
+    match bundle.parent().filter(|d| d.ends_with("Contents/Helpers")).and_then(|d| d.parent()?.parent()).filter(|a| is_app(a)) {
+        Some(app) => Origin::App(app.to_owned()),
+        None => Origin::Bundle(bundle.to_owned()),
+    }
 }
 
 /// Folders Silo.app is installed in: /Applications and ~/Applications
@@ -769,7 +768,7 @@ pub async fn prepare_binary(feed: &Feed, version: &str, exe: &Path) -> Result<Pa
         if cfg!(target_os = "macos") {
             let (running, candidate) = (signature(exe).await?, signature(&staged).await?);
             same_signer(&running.1, &candidate.1)?;
-            verify_code(&staged, &candidate.1, false).await?;
+            verify_code(&staged, &candidate.1, None).await?;
         }
         Ok(())
     }
@@ -778,6 +777,60 @@ pub async fn prepare_binary(feed: &Feed, version: &str, exe: &Path) -> Result<Pa
         Ok(()) => Ok(staged),
         Err(error) => {
             let _ = std::fs::remove_file(&staged);
+            Err(error)
+        }
+    }
+}
+
+/// The server bundle's identifier on this channel (`xyz.nitish.silo.server`).
+#[must_use]
+pub fn server_id() -> &'static str {
+    silo_proto::CHANNEL.server_bundle_id()
+}
+
+/// Whether server bundle `staged` is intact, Silo `version` and signed
+/// like the installed server bundle `installed`: the same signer and, for
+/// a team, its requirement with the server's identifier.
+///
+/// # Errors
+/// Why not.
+pub async fn verify_server(staged: &Path, version: &str, installed: &Path) -> Result<(), String> {
+    let exe = staged.join(crate::runtime::BUNDLE_EXE);
+    let (found, _) = release::version_of(&exe).await.map_err(|(_, e)| e)?;
+    if found != version {
+        return Err(format!("the release's Silo Server reports {found}, not {version}"));
+    }
+    let (running, candidate) = (signature(installed).await?, signature(staged).await?);
+    if running.0 != server_id() || candidate.0 != server_id() {
+        return Err(format!("bundle identifier {} replacing {}", candidate.0, running.0));
+    }
+    same_signer(&running.1, &candidate.1)?;
+    verify_code(staged, &candidate.1, Some(server_id())).await
+}
+
+/// Download release `version`'s server bundle for this Mac into a
+/// staging path in `home`'s runtime directory and check it
+/// ([`verify_server`] against `installed`); the staged bundle, for
+/// [`crate::runtime::swap_in`].
+///
+/// # Errors
+/// Not published, not downloadable, not matching, not that version, or
+/// not signed like `installed`.
+pub async fn prepare_server(feed: &Feed, version: &str, home: &Path, installed: &Path) -> Result<PathBuf, String> {
+    let staged = crate::runtime::staging(home).map_err(|e| format!("can't stage the update: {e}"))?;
+    let platform = upgrade::platform();
+    let result = async {
+        release::download_bundle(&staged, feed.assets.as_deref(), version, &platform).await.map_err(|(code, error)| match code {
+            upgrade::NOT_PUBLISHED => format!("Silo Server {version} isn't published for {platform}"),
+            _ => error,
+        })?;
+        verify_server(&staged, version, installed).await
+    }
+    .await;
+    match result {
+        Ok(()) => Ok(staged),
+        Err(error) => {
+            let _ = crate::runtime::remove_any(&staged);
             Err(error)
         }
     }
@@ -989,9 +1042,9 @@ mod tests {
     #[tokio::test]
     async fn team_requirements_are_evaluated() {
         let team = Identity::Team { team: "FRUHQC68JC".into(), authority: "Developer ID Application: X (FRUHQC68JC)".into() };
-        let error = verify_code(Path::new("/usr/bin/true"), &team, false).await.unwrap_err();
+        let error = verify_code(Path::new("/usr/bin/true"), &team, None).await.unwrap_err();
         assert!(error.contains("failed to satisfy"), "{error}");
-        verify_code(Path::new("/usr/bin/true"), &Identity::AdHoc, false).await.unwrap();
+        verify_code(Path::new("/usr/bin/true"), &Identity::AdHoc, None).await.unwrap();
     }
 
     #[test]
@@ -1023,17 +1076,12 @@ mod tests {
     fn install_origins() {
         let dir = temp("origin");
         let home = dir.join("state");
-        let runtime = home.join("runtime/0123456789abcdef/silo");
-        assert_eq!(origin(&runtime, &home, true), Origin::App(None), "the app's runtime copy");
-        assert_eq!(origin(&home.join("runtime/silo"), &home, true), Origin::App(None), "the bare copy before the server bundle");
         let copy = home.join("runtime/Silo Server.app/Contents/MacOS/silo");
-        assert_eq!(origin(&copy, &home, true), Origin::App(None), "the runtime server bundle");
+        assert_eq!(origin(&copy, &home, true), Origin::Runtime(home.join("runtime/Silo Server.app")), "the runtime server bundle");
         let bundled = Path::new("/Applications/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo");
-        assert_eq!(origin(bundled, &home, true), Origin::App(Some("/Applications/Silo.app".into())));
-        let legacy = Path::new("/Applications/Silo.app/Contents/MacOS/silo-server");
-        assert_eq!(origin(legacy, &home, true), Origin::App(Some("/Applications/Silo.app".into())));
-        let loose = Path::new("/tmp/Silo Server.app/Contents/MacOS/silo");
-        assert_eq!(origin(loose, &home, true), Origin::Standalone(loose.into()), "a server bundle outside an app");
+        assert_eq!(origin(bundled, &home, true), Origin::App("/Applications/Silo.app".into()));
+        let loose = Path::new("/tmp/x/Silo Server.app/Contents/MacOS/silo");
+        assert_eq!(origin(loose, &home, true), Origin::Bundle("/tmp/x/Silo Server.app".into()), "a server bundle outside an app");
         let standalone = dir.join(".local/bin/silo");
         assert_eq!(origin(&standalone, &home, true), Origin::Standalone(standalone.clone()));
         assert_eq!(origin(Path::new("/usr/local/bin/silo"), &home, true), Origin::Standalone("/usr/local/bin/silo".into()));
@@ -1042,10 +1090,10 @@ mod tests {
         std::fs::create_dir_all(dir.join("w/target/release")).unwrap();
         std::fs::write(dir.join("w/target/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55").unwrap();
         assert_eq!(origin(&dir.join("w/target/release/silo"), &home, true), Origin::Dev);
-        assert_eq!(origin(&dir.join("w/target/Silo.app/Contents/MacOS/silo-server"), &home, true), Origin::Dev);
         assert_eq!(origin(&dir.join("w/target/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo"), &home, true), Origin::Dev);
-        // Another home's runtime copy, or a `silo` elsewhere in a bundle, is standalone.
-        assert_eq!(origin(&dir.join("other/runtime/x/silo"), &home, true), Origin::Standalone(dir.join("other/runtime/x/silo")));
+        // Another home's runtime copy is a bundle that home owns, not this one.
+        let other = dir.join("other/runtime/Silo Server.app/Contents/MacOS/silo");
+        assert_eq!(origin(&other, &home, true), Origin::Bundle(dir.join("other/runtime/Silo Server.app")));
         // Apps are looked for where installed; with the test feed only in the home's.
         assert_eq!(app_roots(Path::new("/Users/bat"), false), [PathBuf::from("/Applications"), "/Users/bat/Applications".into()]);
         assert_eq!(app_roots(Path::new("/Users/bat"), true), [PathBuf::from("/Users/bat/Applications")]);

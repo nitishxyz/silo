@@ -240,21 +240,30 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
     (`silo-cli/src/disclaim.rs`; launchd jobs already are; `silo server --daemon` does it in its final process after
     the forks that detach it, since the pre-fork pid it would otherwise leave responsible exits), and prompts and System Settings name Silo Server
     whoever started it.
-  - The menu-bar agent is a helper app too, `Silo.app/Contents/Helpers/Silo Menu Bar.app` (`Contents/MacOS/silo-menubar`,
-    bundle id `xyz.nitish.silo.menubar`, dev `SiloDev Menu Bar.app`/`xyz.nitish.silo.dev.menubar`, `LSUIElement`,
-    the app's icon, no entitlements): run from the app's own `Contents/MacOS`, AppKit took it for Silo.app (same
-    bundle id) and Launch Services could deliver Dock clicks, `open` and reopen events to the windowless agent.
-    Without launchd the app runs that helper (an unbundled `silo-app` runs the `silo-menubar` beside it); its
-    "Open Silo" opens the `.app` whose `Contents/Helpers` holds it, a runtime copy opens the installed app by id.
-  - Under launchd the app copies the server bundle and menu-bar agent to `<SILO_HOME>/runtime/`
-    (`Silo Server.app` and `Silo Menu Bar.app`, each swapped in atomically when it differs; whole bundles, as their
-    executables' signatures seal the bundle) and the launchd job and the app run them from there, so nothing holds Silo.app open and Finder can replace it while the server runs; moving to the new build is
-    a hot upgrade (a job of an older app, running the bare `runtime/silo`, is stale and refreshed that way; the bare
-    copies `runtime/silo` and `runtime/silo-menubar` are removed once nothing runs them). Once this build's job serves, runtime
-    dirs of other builds that no process runs from and nothing touched in 5 minutes are removed (under
-    `runtime.lock`). A new menu-bar agent replaces the one `menubar.lock` records if that is of another build
-    and its process is still named `silo-menubar` (by name: a swapped-out runtime bundle moves under a running agent),
-    whichever layout it runs from.
+  - **One server bundle on every Mac:** `Silo Server.app` is self-contained: `Contents/MacOS/silo` (server, CLI and
+    otto, `silo otto …`) and the menu-bar agent inside it, `Contents/Helpers/Silo Menu Bar.app`
+    (`Contents/MacOS/silo-menubar`, bundle id `xyz.nitish.silo.menubar`, dev `SiloDev Menu Bar.app`/
+    `xyz.nitish.silo.dev.menubar`, `LSUIElement`, the app's icon, no entitlements; a bundle of its own so AppKit and
+    Launch Services never take it for Silo.app). Silo.app ships it as `Contents/Helpers/Silo Server.app` (and no other
+    helper or otto binary); the macOS release asset `silo-macos-aarch64.tar.gz` is the same bundle, stapled, for
+    server-only installs. "Open Silo" in the agent opens the `.app` holding its server bundle, else (the runtime copy)
+    the installed app by id.
+  - **Runtime copy:** whichever way it was installed, the server runs from `<SILO_HOME>/runtime/Silo Server.app`
+    (`silo_client::runtime`): Silo.app copies its helper there at launch under launchd; a server-only install
+    (install.sh) unpacks the release's bundle and its hidden `silo install` copies it there; `silo up` run from any
+    server bundle does the same. Copies are swapped in atomically when they differ (whole bundles: their signatures
+    seal them) under `runtime.lock`, so nothing holds the source open and moving to a new build is a hot upgrade.
+    Anything else in `runtime/` that no process runs from is removed (`runtime::collect`). The launchd job, the
+    menu-bar agent (started by the runtime server) and the CLI links (`<SILO_HOME>/bin/silo` → the runtime `silo`,
+    `~/.local/bin/silo` → that) all use this copy, so installing Silo.app on a server-only Mac later finds the same
+    path, launchd job, bundle id and state. A new menu-bar agent replaces the one `menubar.lock` records if that is
+    of another build and its process is still named `silo-menubar`.
+  - **Updates:** the newest copy wins. With Silo.app installed the app owns the server bundle: `silo update` updates
+    the app (and, with no app running, installs its server bundle and lets it take over); a server-only Mac's
+    `silo update` and `silo remote upgrade` fetch the release's `Silo Server.app`, check it (version, `codesign
+    --verify --deep --strict`, the installed bundle's signer and identifier), swap it in and run its `silo up`. A
+    bare binary never goes into the signed bundle, so `--local` and `--binary` are refused for Macs; over ssh a Mac
+    reruns install.sh for the release.
   - **Launch = `silo up` (done):** a release Silo.app in (~)/Applications, on a disk image or translocated, with the
     default state dir installs or refreshes the launchd agent for its runtime `silo` (shared `silo_client::service`),
     taking over or adopting a running server live, points `<SILO_HOME>/bin/silo` at that `silo` and links

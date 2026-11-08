@@ -1,10 +1,11 @@
 //! `silo update` (or `silo upgrade`): this machine's Silo to the latest
 //! release, by how it is installed (steps in `silo_client::update`):
-//! a `silo` that comes with Silo.app updates the app, which a running app
-//! restarts into (its launch takes the server over live); a standalone
-//! `silo` (install.sh) replaces itself and runs `silo up`, as re-running
-//! install.sh does, and on a Mac with Silo.app installed updates the app
-//! too. Development builds are refused.
+//! a Mac's server comes with Silo.app (then the app is updated, and a
+//! running app restarts into it; its launch takes the server over live) or
+//! was installed on its own (then the runtime `Silo Server.app` is
+//! replaced and its `silo up` takes over live); a standalone `silo` on
+//! Linux replaces itself and runs `silo up`, as re-running install.sh
+//! does. Development builds are refused.
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     App(PathBuf),
+    /// The runtime server bundle of a server-only Mac.
+    Server(PathBuf),
     Binary(PathBuf),
 }
 
@@ -24,29 +27,35 @@ impl Target {
     fn label(&self) -> &'static str {
         match self {
             Self::App(_) => "Silo.app",
+            Self::Server(_) => "Silo Server",
             Self::Binary(_) => "silo",
         }
     }
 }
 
 /// What to update for a `silo` installed as `origin`, with `found` the
-/// Silo.app installed in one of `roots` (macOS), in update order (the
-/// binary last: its `silo up` runs last).
+/// Silo.app installed in one of `roots` (macOS): one target. With Silo.app
+/// installed, the app owns the Mac's server.
 ///
 /// # Errors
-/// A development build, or a `silo` of Silo.app with no app to update.
+/// A development build, an app outside Applications, or a server bundle
+/// that is not installed.
 pub fn targets(origin: Origin, found: Option<PathBuf>, roots: &[PathBuf]) -> anyhow::Result<Vec<Target>> {
     match origin {
         Origin::Dev => bail!("this is a development build; update it from source"),
-        Origin::App(Some(app)) => {
+        Origin::App(app) => {
             let installed = app.parent().is_some_and(|dir| roots.iter().any(|r| r.canonicalize().unwrap_or_else(|_| r.clone()) == dir));
             if !installed {
                 bail!("Silo.app is not in Applications; move it there to update it");
             }
             Ok(vec![Target::App(app)])
         }
-        Origin::App(None) => Ok(vec![Target::App(found.context("Silo.app is not in Applications")?)]),
-        Origin::Standalone(exe) => Ok(found.into_iter().map(Target::App).chain([Target::Binary(exe)]).collect()),
+        Origin::Runtime(bundle) => Ok(vec![found.map_or(Target::Server(bundle), Target::App)]),
+        Origin::Bundle(bundle) => bail!("{} is not installed; run `silo up` from it first", bundle.display()),
+        Origin::Standalone(_) if cfg!(target_os = "macos") => {
+            bail!("on macOS silo runs as Silo Server.app; install it with install.sh (or Silo.app)")
+        }
+        Origin::Standalone(exe) => Ok(vec![Target::Binary(exe)]),
     }
 }
 
@@ -90,7 +99,7 @@ pub async fn run(check: bool) -> anyhow::Result<i32> {
         .map(|target| {
             let version = match &target {
                 Target::App(app) => update::app_version(app).context("Silo.app has no version")?,
-                Target::Binary(_) => VERSION.to_owned(),
+                Target::Server(_) | Target::Binary(_) => VERSION.to_owned(),
             };
             anyhow::Ok((target, version))
         })
@@ -104,14 +113,10 @@ pub async fn run(check: bool) -> anyhow::Result<i32> {
         report(&installed, &latest, check).iter().for_each(|line| println!("{line}"));
         return Ok(0);
     }
-    // With Silo.app here the app runs the server (from a runtime copy); a
-    // standalone `silo up` would point the service away from it and race
-    // the app's own takeover.
-    let plist = std::fs::read_to_string(user_home.join("Library/LaunchAgents").join(format!("{}.plist", silo_client::service::LABEL))).ok();
-    let app_server = app_runs_server(installed.iter().any(|(t, _)| matches!(t, Target::App(_))), plist.as_deref(), &state);
     let failed = for_each_target(&pending, async |target| match target {
-        Target::App(app) => update_app(&feed, &latest, app).await,
-        Target::Binary(exe) => update_binary(&feed, &latest, exe, !app_server).await,
+        Target::App(app) => update_app(&feed, &latest, app, &state).await,
+        Target::Server(bundle) => update_server(&feed, &latest, &state, bundle).await,
+        Target::Binary(exe) => update_binary(&feed, &latest, exe).await,
     })
     .await;
     if failed > 0 {
@@ -121,14 +126,6 @@ pub async fn run(check: bool) -> anyhow::Result<i32> {
         println!("run `silo remote upgrade --all` to update remote hosts");
     }
     Ok(0)
-}
-
-/// Whether Silo.app runs this machine's server: it is installed, or the
-/// launchd job (its `plist`) runs a copy from `home`'s runtime directory.
-#[must_use]
-pub fn app_runs_server(app_installed: bool, plist: Option<&str>, home: &Path) -> bool {
-    let runtime = silo_client::runtime::root(home);
-    app_installed || plist.is_some_and(|p| p.contains(&format!("<string>{}/", runtime.display())))
 }
 
 /// Run `update` for every target, reporting each failure; how many failed.
@@ -144,7 +141,7 @@ async fn for_each_target<'a>(targets: &[&'a Target], update: impl AsyncFn(&'a Ta
 }
 
 #[cfg(target_os = "macos")]
-async fn update_app(feed: &Feed, version: &str, app: &Path) -> anyhow::Result<()> {
+async fn update_app(feed: &Feed, version: &str, app: &Path, home: &Path) -> anyhow::Result<()> {
     let running = update::signature(app).await.map_err(|e| anyhow!("can't update Silo.app: {e}"))?;
     let (progress, phases) = tokio::sync::watch::channel(update::Phase::Download { done: 0, total: None });
     let shown = std::io::IsTerminal::is_terminal(&std::io::stderr()).then(|| tokio::spawn(show_progress(version.to_owned(), phases)));
@@ -165,6 +162,13 @@ async fn update_app(feed: &Feed, version: &str, app: &Path) -> anyhow::Result<()
     println!("updated Silo.app to {version}");
     if pids.is_empty() {
         let _ = update::replaced(&staged).map(std::fs::remove_dir_all);
+        // No app to take the server over at its launch: the new app's
+        // server bundle does now, if this Mac runs one.
+        if silo_client::runtime::server_app(home).is_dir() {
+            let helper = silo_client::runtime::helper_exe(app, silo_proto::CHANNEL);
+            let runtime = silo_client::runtime::install(home, &helper).with_context(|| format!("install {}", helper.display()))?;
+            take_over(&runtime)?;
+        }
         return Ok(());
     }
     // The old app is still running from the staging folder (removed at the
@@ -182,7 +186,7 @@ async fn update_app(feed: &Feed, version: &str, app: &Path) -> anyhow::Result<()
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn update_app(_: &Feed, _: &str, _: &Path) -> anyhow::Result<()> {
+async fn update_app(_: &Feed, _: &str, _: &Path, _: &Path) -> anyhow::Result<()> {
     bail!("Silo.app updates only on macOS")
 }
 
@@ -212,7 +216,7 @@ async fn show_progress(version: String, mut phases: tokio::sync::watch::Receiver
     eprint!("\r\x1b[K");
 }
 
-async fn update_binary(feed: &Feed, version: &str, exe: &Path, up: bool) -> anyhow::Result<()> {
+async fn update_binary(feed: &Feed, version: &str, exe: &Path) -> anyhow::Result<()> {
     println!("downloading silo {version} for {}…", silo_proto::upgrade::platform());
     let staged = update::prepare_binary(feed, version, exe).await.map_err(|e| anyhow!("can't update silo: {e}"))?;
     // Renamed into place, so a running silo keeps its old binary.
@@ -221,10 +225,25 @@ async fn update_binary(feed: &Feed, version: &str, exe: &Path, up: bool) -> anyh
         bail!("can't replace {}: {error}", exe.display());
     }
     println!("updated silo to {version}");
-    if !up {
-        println!("Silo.app runs the server; it takes over when Silo starts");
-        return Ok(());
-    }
+    take_over(exe)
+}
+
+/// Replace the runtime server bundle `bundle` of state directory `home`
+/// with release `version`'s, then let it take over.
+async fn update_server(feed: &Feed, version: &str, home: &Path, bundle: &Path) -> anyhow::Result<()> {
+    println!("downloading Silo Server {version} for {}…", silo_proto::upgrade::platform());
+    let staged = update::prepare_server(feed, version, home, bundle).await.map_err(|e| anyhow!("can't update Silo Server: {e}"))?;
+    let swapped = silo_client::runtime::swap_in(home, &staged);
+    // Holds the previous bundle after a swap (a running server keeps its
+    // files), else the new one.
+    let _ = silo_client::runtime::remove_any(&staged);
+    swapped.with_context(|| format!("can't replace {}", bundle.display()))?;
+    println!("updated Silo Server to {version}");
+    take_over(&silo_client::runtime::server_exe(home))
+}
+
+/// Run the new `exe up`: it takes the running server over live.
+fn take_over(exe: &Path) -> anyhow::Result<()> {
     let status = std::process::Command::new(exe).arg("up").status().context("run `silo up`")?;
     if !status.success() {
         bail!("`silo up` failed ({status}); run it again to upgrade the server");
@@ -240,34 +259,23 @@ mod tests {
     fn what_each_install_updates() {
         let roots = [PathBuf::from("/Applications"), PathBuf::from("/Users/bat/Applications")];
         let app = PathBuf::from("/Applications/Silo.app");
-        let exe = PathBuf::from("/Users/bat/.local/bin/silo");
+        let runtime = PathBuf::from("/Users/bat/Library/Application Support/silo/runtime/Silo Server.app");
         assert!(targets(Origin::Dev, Some(app.clone()), &roots).unwrap_err().to_string().contains("development build"));
-        assert_eq!(targets(Origin::App(Some(app.clone())), None, &roots).unwrap(), [Target::App(app.clone())]);
-        let elsewhere = targets(Origin::App(Some("/Volumes/Silo/Silo.app".into())), None, &roots);
+        assert_eq!(targets(Origin::App(app.clone()), None, &roots).unwrap(), [Target::App(app.clone())]);
+        let elsewhere = targets(Origin::App("/Volumes/Silo/Silo.app".into()), None, &roots);
         assert!(elsewhere.unwrap_err().to_string().contains("not in Applications"));
-        // The app's runtime copy: the installed app.
-        assert_eq!(targets(Origin::App(None), Some(app.clone()), &roots).unwrap(), [Target::App(app.clone())]);
-        assert!(targets(Origin::App(None), None, &roots).is_err());
-        // Standalone: the binary, and the app too when there is one.
-        assert_eq!(targets(Origin::Standalone(exe.clone()), None, &roots).unwrap(), [Target::Binary(exe.clone())]);
-        assert_eq!(targets(Origin::Standalone(exe.clone()), Some(app.clone()), &roots).unwrap(), [Target::App(app), Target::Binary(exe)]);
-    }
-
-    #[test]
-    fn the_app_keeps_its_server() {
-        let home = Path::new("/Users/bat/Library/Application Support/silo");
-        let job = |exe: &str| silo_client::service::launchd_plist(Path::new(exe), home);
-        let runtime = job("/Users/bat/Library/Application Support/silo/runtime/0123456789abcdef/silo");
-        let standalone = job("/Users/bat/.local/bin/silo");
-        assert!(app_runs_server(true, None, home), "Silo.app is installed");
-        assert!(app_runs_server(false, Some(&runtime), home), "the job runs the app's runtime copy");
-        let legacy = job("/Users/bat/Library/Application Support/silo/runtime/silo");
-        assert!(app_runs_server(false, Some(&legacy), home), "the bare copy before the server bundle");
-        let bundle = job(&silo_client::runtime::server_exe(home).to_string_lossy());
-        assert!(bundle.contains("runtime/Silo Server.app/Contents/MacOS/silo"));
-        assert!(app_runs_server(false, Some(&bundle), home), "the runtime server bundle");
-        assert!(!app_runs_server(false, Some(&standalone), home));
-        assert!(!app_runs_server(false, None, home));
+        // The runtime server bundle: the installed app owns it, else it updates itself.
+        assert_eq!(targets(Origin::Runtime(runtime.clone()), Some(app.clone()), &roots).unwrap(), [Target::App(app.clone())]);
+        assert_eq!(targets(Origin::Runtime(runtime.clone()), None, &roots).unwrap(), [Target::Server(runtime)]);
+        let loose = targets(Origin::Bundle("/tmp/x/Silo Server.app".into()), Some(app), &roots);
+        assert!(loose.unwrap_err().to_string().contains("not installed"));
+        let exe = PathBuf::from("/home/me/.local/bin/silo");
+        let standalone = targets(Origin::Standalone(exe.clone()), None, &roots);
+        if cfg!(target_os = "macos") {
+            assert!(standalone.unwrap_err().to_string().contains("Silo Server.app"));
+        } else {
+            assert_eq!(standalone.unwrap(), [Target::Binary(exe)]);
+        }
     }
 
     #[tokio::test]

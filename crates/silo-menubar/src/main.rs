@@ -27,10 +27,9 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::net::{Cmd, Shared};
 
-/// Opens the Silo app: the `.app` bundle whose `Contents/Helpers` holds this
-/// agent's helper bundle, the `silo-app` binary next to this one
-/// (development), else the installed app by bundle id (run from the runtime
-/// directory).
+/// Opens the Silo app: the `.app` bundle whose server bundle holds this
+/// agent, the `silo-app` binary next to this one (development), else the
+/// installed app by bundle id (run from the runtime directory).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppLauncher {
     Bundle(PathBuf),
@@ -48,12 +47,19 @@ impl AppLauncher {
     }
 
     fn of(exe: &Path) -> Self {
-        // .../Silo.app/Contents/Helpers/Silo Menu Bar.app/Contents/MacOS/silo-menubar
-        let helper = exe.ancestors().nth(3).filter(|p| p.extension().is_some_and(|e| e == "app"));
-        if let Some(helper) = helper {
-            return match helper.parent().filter(|h| h.ends_with("Contents/Helpers")).and_then(|h| h.parent()?.parent()) {
-                Some(app) if app.extension().is_some_and(|e| e == "app") => Self::Bundle(app.to_owned()),
-                _ => Self::Installed,
+        // .../Silo.app/Contents/Helpers/Silo Server.app/Contents/Helpers/Silo Menu Bar.app/Contents/MacOS/silo-menubar
+        let is_app = |p: &Path| p.extension().is_some_and(|e| e == "app");
+        fn holder(bundle: &Path) -> Option<&Path> {
+            bundle
+                .parent()
+                .filter(|h| h.ends_with("Contents/Helpers"))
+                .and_then(|h| h.parent()?.parent())
+                .filter(|b| b.extension().is_some_and(|e| e == "app"))
+        }
+        if let Some(agent) = exe.ancestors().nth(3).filter(|p| is_app(p)) {
+            return match holder(agent).and_then(holder) {
+                Some(app) => Self::Bundle(app.to_owned()),
+                None => Self::Installed,
             };
         }
         match exe.parent().map(|d| d.join("silo-app")).filter(|p| p.is_file()) {
@@ -401,14 +407,18 @@ mod tests {
 
     #[test]
     fn opens_the_app_holding_the_helper() {
-        let helper = |app: &str, name: &str| PathBuf::from(format!("{app}/Contents/Helpers/{name}.app/Contents/MacOS/silo-menubar"));
-        let release = helper("/Applications/Silo.app", "Silo Menu Bar");
+        let helper = |app: &str, server: &str, name: &str| {
+            PathBuf::from(format!("{app}/Contents/Helpers/{server}.app/Contents/Helpers/{name}.app/Contents/MacOS/silo-menubar"))
+        };
+        let release = helper("/Applications/Silo.app", "Silo Server", "Silo Menu Bar");
         assert_eq!(AppLauncher::of(&release), AppLauncher::Bundle("/Applications/Silo.app".into()));
-        let dev = helper("/w/target/debug/SiloDev.app", "SiloDev Menu Bar");
+        let dev = helper("/w/target/debug/SiloDev.app", "SiloDev Server", "SiloDev Menu Bar");
         assert_eq!(AppLauncher::of(&dev), AppLauncher::Bundle("/w/target/debug/SiloDev.app".into()));
-        // The runtime copy, and a bundle in no app's Helpers.
-        assert_eq!(AppLauncher::of(Path::new("/h/Library/Application Support/silo/runtime/silo-menubar")), AppLauncher::Installed);
+        // The runtime copy (whose server bundle is in no app), and agents in no server bundle.
+        let runtime = "/h/Library/Application Support/silo/runtime/Silo Server.app/Contents/Helpers/Silo Menu Bar.app/Contents/MacOS/silo-menubar";
+        assert_eq!(AppLauncher::of(Path::new(runtime)), AppLauncher::Installed);
         assert_eq!(AppLauncher::of(Path::new("/x/Silo Menu Bar.app/Contents/MacOS/silo-menubar")), AppLauncher::Installed);
+        assert_eq!(AppLauncher::of(Path::new("/x/Silo.app/Contents/Helpers/Silo Menu Bar.app/Contents/MacOS/silo-menubar")), AppLauncher::Installed);
         assert_eq!(AppLauncher::of(Path::new("/x/Silo.app/Contents/Other/Silo Menu Bar.app/Contents/MacOS/silo-menubar")), AppLauncher::Installed);
         // Development: `silo-app` beside it.
         let dir = std::env::temp_dir().join(format!("silo-menubar-launcher-{}", std::process::id()));

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Wrap already-built debug binaries in a dev bundle CEF can start from:
 #   <target>/debug/SiloDev.app  (exe = silo-app, helpers = copies of it,
-#   framework = symlink into CEF_PATH, silo/otto-silo symlinked next to the
-#   exe, and as in Silo.app the server and menu-bar agent the app runs:
-#   copies as Contents/Helpers/SiloDev Server.app and SiloDev Menu Bar.app).
+#   framework = symlink into CEF_PATH, silo symlinked next to the exe, and
+#   as in Silo.app the server bundle the app runs, with the menu-bar agent
+#   inside it: Contents/Helpers/SiloDev Server.app/Contents/Helpers/SiloDev Menu Bar.app).
 # Usage: scripts/dev-bundle.sh   (prints the bundle's executable path)
 #
 # The binaries must be dev-channel builds (plain `cargo build`, SILO_CHANNEL
@@ -65,33 +65,33 @@ for f in "${icons[@]}"; do
 done
 plist SiloDev xyz.nitish.silo.dev "" Silo > "$app/Contents/Info.plist"
 install_bin "$out/silo-app" "$app/Contents/MacOS/SiloDev"
-for bin in silo otto-silo; do
-  [[ -f "$out/$bin" ]] && ln -sf "$out/$bin" "$app/Contents/MacOS/$bin"
-done
-# The agent is a helper app of its own (below): a silo-menubar here would
-# register as SiloDev itself.
-rm -f "$app/Contents/MacOS/silo-menubar"
-# The helper apps (scripts/bundle-macos.sh): real copies, as a symlinked
+[[ -f "$out/silo" ]] && ln -sf "$out/silo" "$app/Contents/MacOS/silo"
+# Earlier layouts: otto (now `silo otto`), the agent beside the app or as a
+# helper of its own (now inside the server bundle).
+rm -rf "$app/Contents/MacOS/silo-menubar" "$app/Contents/MacOS/otto-silo" "$app/Contents/Helpers/SiloDev Menu Bar.app"
+# The server bundle (scripts/bundle-macos.sh): real copies, as a symlinked
 # executable resolves to target/debug and runs without the bundle's
-# identity. Copied and signed only when the binary or the plist changed, so
-# a running server's or agent's bundle stays put and its signature stable.
+# identity. Copied and signed only when a binary or plist changed, so a
+# running server's or agent's bundle stays put and its signature stable.
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)"
-helper_app() { # bin name id plist-script stamp
-  local bundle="$app/Contents/Helpers/$2.app" info want
+helper_app() { # bin bundle-path name id plist-script stamp [extra-stamp]
+  local bundle="$2" info want
   [[ -f "$out/$1" ]] || return 0
-  info="$("$root/scripts/$4" "$2" "$3" "$version" Silo)"
-  want="$(stat -f '%m %z %i' "$out/$1") $(printf '%s' "$info" | shasum | cut -c1-40) $(cat "${icons[@]}" | shasum | cut -c1-40)"
-  if [[ ! -x "$bundle/Contents/MacOS/$1" || "$(cat "$out/$5" 2>/dev/null)" != "$want" ]]; then
+  info="$("$root/scripts/$5" "$3" "$4" "$version" Silo)"
+  want="$(stat -f '%m %z %i' "$out/$1") $(printf '%s' "$info" | shasum | cut -c1-40) $(cat "${icons[@]}" | shasum | cut -c1-40) ${7:-}"
+  if [[ ! -x "$bundle/Contents/MacOS/$1" || "$(cat "$out/$6" 2>/dev/null)" != "$want" ]]; then
     mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
     printf '%s\n' "$info" > "$bundle/Contents/Info.plist"
     cp "${icons[@]}" "$bundle/Contents/Resources/"
     install_bin "$out/$1" "$bundle/Contents/MacOS/$1"
     sign "$bundle"
-    echo "$want" > "$out/$5"
+    echo "$want" > "$out/$6"
   fi
 }
-helper_app silo "SiloDev Server" xyz.nitish.silo.dev.server server-info-plist.sh .silodev-server.stamp
-helper_app silo-menubar "SiloDev Menu Bar" xyz.nitish.silo.dev.menubar menubar-info-plist.sh .silodev-menubar.stamp
+server="$app/Contents/Helpers/SiloDev Server.app"
+# Inside out: the agent first; a new agent re-signs the server bundle.
+helper_app silo-menubar "$server/Contents/Helpers/SiloDev Menu Bar.app" "SiloDev Menu Bar" xyz.nitish.silo.dev.menubar menubar-info-plist.sh .silodev-menubar.stamp
+helper_app silo "$server" "SiloDev Server" xyz.nitish.silo.dev.server server-info-plist.sh .silodev-server.stamp "$(cat "$out/.silodev-menubar.stamp" 2>/dev/null | shasum | cut -c1-40)"
 for suffix in "" " (GPU)" " (Renderer)" " (Plugin)"; do
   name="SiloDev Helper$suffix"
   dir="$app/Contents/Frameworks/$name.app/Contents"

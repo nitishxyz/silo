@@ -113,6 +113,15 @@ enum Command {
         #[arg(long)]
         no_offer: bool,
     },
+    /// Install the Silo Server.app this `silo` belongs to as this Mac's
+    /// server (copied to the runtime directory, `silo` linked onto PATH)
+    /// without starting it; install.sh runs it from the unpacked release.
+    #[command(hide = true)]
+    Install {
+        /// Folder for the `silo` link (default ~/.local/bin).
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
+    },
     /// Start the server (as `up`) and offer it to the machine whose join
     /// ticket this is; it is added there.
     Join { ticket: String },
@@ -713,6 +722,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             command,
             Command::Server { .. }
                 | Command::Up { .. }
+                | Command::Install { .. }
                 | Command::Join { .. }
                 | Command::Remote { .. }
                 | Command::Update { .. }
@@ -992,6 +1002,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             }
             Ok(0)
         }
+        Command::Install { bin_dir } => install(bin_dir.as_deref()),
         Command::Join { ticket } => join(&ticket).await,
         Command::Update { check } => silo_cli::update::run(check).await,
         Command::Remote { command: RemoteCommand::Install { target, local, binary } } => {
@@ -1286,8 +1297,51 @@ async fn shutdown(control: Control, force: bool) -> anyhow::Result<()> {
 }
 
 fn local_service(runner: &dyn service::Runner) -> anyhow::Result<service::Service> {
+    service::Service::local(service::detect(runner), service_exe(false)?, paths::home())
+}
+
+/// `paths::home()`, created and canonical (the runtime paths compare
+/// canonical executables).
+fn canonical_home() -> anyhow::Result<PathBuf> {
+    let home = paths::home();
+    std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
+    Ok(home.canonicalize().unwrap_or(home))
+}
+
+/// The executable the service runs: on a Mac, the runtime copy of the
+/// server bundle this `silo` belongs to (copied there first when
+/// `install`), so every install runs `Silo Server.app` from one place;
+/// else (Linux, a development binary) this executable.
+fn service_exe(install: bool) -> anyhow::Result<PathBuf> {
     let exe = std::env::current_exe().and_then(|e| e.canonicalize()).context("locate silo executable")?;
-    service::Service::local(service::detect(runner), exe, paths::home())
+    if !cfg!(target_os = "macos") || silo_client::runtime::server_bundle(&exe).is_none() {
+        return Ok(exe);
+    }
+    let home = canonical_home()?;
+    if install {
+        let runtime =
+            silo_client::runtime::install(&home, &exe).with_context(|| format!("install {}", silo_client::runtime::server_app(&home).display()))?;
+        silo_client::runtime::link_cli(&home, &runtime, None, false, false);
+        Ok(runtime)
+    } else {
+        Ok(silo_client::runtime::server_exe(&home))
+    }
+}
+
+/// `silo install`: this server bundle as the Mac's server, not started.
+fn install(bin_dir: Option<&std::path::Path>) -> anyhow::Result<i32> {
+    let exe = std::env::current_exe().and_then(|e| e.canonicalize()).context("locate silo executable")?;
+    if silo_client::runtime::server_bundle(&exe).is_none() {
+        bail!("`silo install` installs a Silo Server.app; run the `silo` inside one (install.sh does)");
+    }
+    let home = canonical_home()?;
+    let silo =
+        silo_client::runtime::install(&home, &exe).with_context(|| format!("install {}", silo_client::runtime::server_app(&home).display()))?;
+    println!("installed {}", silo_client::runtime::server_app(&home).display());
+    if let Some(link) = silo_client::runtime::link_cli(&home, &silo, bin_dir, true, true) {
+        println!("linked {}", link.display());
+    }
+    Ok(0)
 }
 
 /// The local server, if one of this build answers, and how it runs.
@@ -1307,7 +1361,7 @@ fn manager_name(manager: service::Manager) -> &'static str {
 /// build's server answers.
 async fn up() -> anyhow::Result<Control> {
     let runner = service::System;
-    let svc = local_service(&runner)?;
+    let svc = service::Service::local(service::detect(&runner), service_exe(true)?, paths::home())?;
     let service::Up { control, actions, notes } = service::up(&svc, &runner, &client_name()).await.map_err(|error| {
         if error.is::<service::NotUpgraded>() {
             anyhow::anyhow!("{error}; stop it with `silo down` (ends its sessions), then run `silo up`")
@@ -1414,7 +1468,7 @@ async fn remote_install(target: &str, source: &silo_cli::upgrade::Source) -> any
         bail!("could not reach {target} over ssh ({})", output.status);
     }
     let platform = link::Platform::from_uname(&String::from_utf8_lossy(&output.stdout))?;
-    candidate.check_platform(target, platform.name())?;
+    candidate.check_ssh(target, platform.name())?;
     if let Candidate::Release { version } = &candidate {
         eprintln!("silo: checking that {target} ({}) can download silo {version}…", platform.name());
         silo_cli::upgrade::check_release(&install, platform, version)?;

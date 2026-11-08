@@ -94,9 +94,9 @@ fn jitter() -> f64 {
     f64::from(nanos % 1000) / 999.0
 }
 
-/// The server binary: the app bundle's `Silo Server.app` helper (in
-/// `Contents/Helpers`), `silo-server` (bundles before the helper) or `silo`
-/// (cargo target dir) next to this executable, else `silo` on `PATH`.
+/// The server binary: the app bundle's `Silo Server.app` (in
+/// `Contents/Helpers`) or `silo` next to this executable (cargo target
+/// dir), else `silo` on `PATH`.
 #[must_use]
 pub fn server_exe() -> PathBuf {
     server_exe_path()
@@ -115,7 +115,7 @@ fn server_exe_path() -> PathBuf {
     if let Some(path) = helper() {
         return path;
     }
-    if let Some(path) = sibling(&["silo-server", "silo"]) {
+    if let Some(path) = sibling(&["silo"]) {
         return path;
     }
     if let Some(path) = std::env::var_os("PATH") {
@@ -395,8 +395,8 @@ fn app_of(exe: &Path) -> Option<&Path> {
 }
 
 /// The menu-bar agent this app runs when no launchd job manages the server:
-/// its bundle's `<Silo|SiloDev> Menu Bar.app` helper, or `silo-menubar` next
-/// to an unbundled executable (the cargo target dir).
+/// the one inside its bundle's server bundle, or `silo-menubar` next to an
+/// unbundled executable (the cargo target dir).
 #[must_use]
 pub fn menubar_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -406,7 +406,7 @@ pub fn menubar_exe() -> Option<PathBuf> {
 
 fn menubar_of(exe: &Path) -> Option<PathBuf> {
     match app_of(exe) {
-        Some(app) => Some(runtime::menubar_helper_exe(app, silo_proto::CHANNEL)).filter(|agent| agent.is_file()),
+        Some(app) => Some(runtime::menubar_in(&runtime::helper_app(app, silo_proto::CHANNEL), silo_proto::CHANNEL)).filter(|agent| agent.is_file()),
         None => Some(exe.with_file_name(runtime::MENUBAR)).filter(|agent| agent.is_file()),
     }
 }
@@ -697,8 +697,7 @@ mod tests {
             launch(&Origin { server_exe: Path::new("/Volumes/Silo/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo"), ..base }),
             Launch::Plain
         );
-        // The layout before the server helper app, or a dev helper.
-        assert_eq!(launch(&Origin { server_exe: Path::new("/Applications/Silo.app/Contents/MacOS/silo-server"), ..base }), Launch::Plain);
+        // A dev helper.
         let dev_helper = "/Applications/Silo.app/Contents/Helpers/SiloDev Server.app/Contents/MacOS/silo";
         assert_eq!(launch(&Origin { server_exe: Path::new(dev_helper), ..base }), Launch::Plain);
         let dev = Path::new("/w/target/debug/SiloDev.app/Contents/MacOS/SiloDev");
@@ -761,12 +760,13 @@ mod tests {
         std::fs::create_dir_all(server.parent().unwrap()).unwrap();
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
         std::fs::write(&server, "silo").unwrap();
-        let menubar = runtime::menubar_helper_exe(&app, silo_proto::Channel::Release);
+        let menubar = runtime::menubar_in(&runtime::helper_app(&app, silo_proto::Channel::Release), silo_proto::Channel::Release);
         std::fs::create_dir_all(menubar.parent().unwrap()).unwrap();
         std::fs::write(&menubar, "silo-menubar").unwrap();
         let exe = managed_exe(&home, &server).unwrap();
         assert_eq!(exe, home.join("runtime/Silo Server.app/Contents/MacOS/silo"), "one fixed path for every build");
         assert_eq!(exe, runtime::server_exe(&home));
+        assert_eq!(std::fs::read_to_string(runtime::menubar_in(&runtime::server_app(&home), silo_proto::Channel::Release)).unwrap(), "silo-menubar");
         let svc = Service::new(Manager::Launchd, exe.clone(), home.clone(), base.clone(), 501, "bat".into()).unwrap();
         let plist = svc.unit_text().unwrap();
         assert!(plist.contains(&format!("<string>{}</string>\n\t\t<string>server</string>", exe.display())));
@@ -778,10 +778,11 @@ mod tests {
         std::fs::write(&channel_helper, "silo").unwrap();
         assert_eq!(helper_of(&app_exe), Some(channel_helper));
         assert_eq!(helper_of(&base.join("target/debug/silo-app")), None);
-        // So is its menu-bar agent (never a stray `Contents/MacOS/silo-menubar`).
+        // So is its menu-bar agent, inside the server bundle (never a stray
+        // `Contents/MacOS/silo-menubar`).
         std::fs::write(app.join("Contents/MacOS/silo-menubar"), "old layout").unwrap();
         assert_eq!(menubar_of(&app_exe), None);
-        let channel_menubar = runtime::menubar_helper_exe(&app, silo_proto::CHANNEL);
+        let channel_menubar = runtime::menubar_in(&runtime::helper_app(&app, silo_proto::CHANNEL), silo_proto::CHANNEL);
         std::fs::create_dir_all(channel_menubar.parent().unwrap()).unwrap();
         std::fs::write(&channel_menubar, "silo-menubar").unwrap();
         assert_eq!(menubar_of(&app_exe), Some(channel_menubar));

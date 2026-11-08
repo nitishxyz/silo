@@ -22,7 +22,6 @@ mod browser_pane;
 mod cache;
 mod changes;
 mod changes_block;
-mod cli_link;
 mod clipboard;
 mod close_confirm;
 mod commands;
@@ -233,10 +232,10 @@ fn main() {
     let managed = service.as_ref().ok().filter(|s| s.manager == silo_client::service::Manager::Launchd);
     if let Some(svc) = managed {
         let (home, silo) = (home.clone(), svc.exe.clone());
-        rt.spawn_blocking(move || cli_link::refresh(&home, &silo));
+        rt.spawn_blocking(move || silo_client::runtime::link_cli(&home, &silo, None, false, false));
     }
     let agent = match managed {
-        // Installed beside the runtime server bundle (`runtime::install`).
+        // Inside the runtime server bundle (`runtime::install`).
         Some(svc) => Some(silo_client::runtime::menubar_exe(&svc.silo_home)),
         None => conn::menubar_exe(),
     };

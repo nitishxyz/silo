@@ -56,7 +56,7 @@ What makes it different: all of this runs on a **Silo server** on a machine you 
 curl -fsSL https://nitishxyz.github.io/silo/install.sh | sh
 ```
 
-This installs `silo` to `~/.local/bin` and starts the server as a user service (systemd or launchd). To add the machine to your Mac:
+On Linux this installs `silo` to `~/.local/bin`; on macOS it installs `Silo Server.app` (the same server bundle Silo.app carries, menu-bar agent included) and links `~/.local/bin/silo` to it, so installing Silo.app on that Mac later just takes it over. Either way the server starts as a user service (systemd or launchd). To add the machine to your Mac:
 
 ```sh
 silo remote install user@host     # from the Mac, over SSH: install, start and pair in one go

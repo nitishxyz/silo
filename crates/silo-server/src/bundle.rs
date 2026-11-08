@@ -1,7 +1,6 @@
 //! Exposing `silo` to shells spawned by a server run from its runtime
 //! directory (`<SILO_HOME>/runtime/Silo Server.app/Contents/MacOS/silo`,
-//! installed by the app; `<SILO_HOME>/runtime/silo` before the server was a
-//! bundle),
+//! see `silo_client::runtime`),
 //! through the stable `<SILO_HOME>/bin/silo` link that survives upgrades,
 //! and the clipboard tool shims in `<SILO_HOME>/shims`.
 
@@ -14,16 +13,11 @@ use std::{
 /// Tools shimmed to `silo clipboard shim <tool>`.
 pub const SHIMMED: &[&str] = &["pbpaste", "pbcopy", "xclip", "xsel", "wl-paste", "wl-copy"];
 
-/// The server bundle in the runtime directory and its executable (as
-/// `silo_client::runtime` installs them).
-const RUNTIME_SERVER: &str = "Silo Server.app/Contents/MacOS/silo";
-
-/// `home`'s runtime directory when `exe` is the app's copy of the server in
-/// it: the server bundle's `silo`, or the bare `silo` from before it.
+/// `home`'s runtime directory when `exe` is the runtime server bundle's
+/// `silo` in it.
 #[must_use]
 pub fn runtime_dir(exe: &Path, home: &Path) -> Option<PathBuf> {
-    let dir = home.join("runtime");
-    (exe == dir.join(RUNTIME_SERVER) || exe == dir.join("silo")).then_some(dir)
+    silo_client::runtime::is_runtime_exe(exe, home).then(|| silo_client::runtime::root(home))
 }
 
 /// The `silo` the shims run: the stable `<home>/bin/silo` for a
@@ -118,7 +112,6 @@ mod tests {
     #[test]
     fn runtime_server_is_recognized() {
         let home = Path::new("/Users/bat/Library/Application Support/silo");
-        assert_eq!(runtime_dir(&home.join("runtime/silo"), home), Some(home.join("runtime")));
         assert_eq!(runtime_dir(&home.join("runtime/Silo Server.app/Contents/MacOS/silo"), home), Some(home.join("runtime")));
     }
 
@@ -127,6 +120,7 @@ mod tests {
         let home = Path::new("/h");
         for exe in [
             "/h/runtime/old/silo",
+            "/h/runtime/silo",
             "/h/runtime/silo-menubar",
             "/h/runtime/Silo Server.app/Contents/MacOS/silo-menubar",
             "/h/runtime/Silo Menu Bar.app/Contents/MacOS/silo-menubar",

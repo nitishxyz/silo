@@ -1,7 +1,9 @@
-//! `silo update` of a standalone binary from a local release feed: the
-//! binary is replaced by the release's and its `silo up` takes the running
-//! server over live, keeping the session. Everything stays in a temp
-//! directory (its own HOME and SILO_HOME, no service manager).
+//! `silo update` from a local release feed: on Linux a standalone binary
+//! is replaced by the release's, on macOS the runtime `Silo Server.app`
+//! (installed with `silo install`, as install.sh does) by the release's
+//! bundle; either way its `silo up` takes the running server over live,
+//! keeping the session. Everything stays in a temp directory (its own
+//! HOME and SILO_HOME, no service manager).
 
 use std::{
     path::{Path, PathBuf},
@@ -116,25 +118,55 @@ fn sha256(path: &Path) -> String {
     silo_proto::release::sha256_file(path).unwrap()
 }
 
+/// A server bundle at `bundle` holding `exe` (this channel's identifier),
+/// signed ad hoc like a local build.
+fn server_bundle(bundle: &Path, exe: &Path) {
+    std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+    std::fs::copy(exe, bundle.join("Contents/MacOS/silo")).unwrap();
+    let id = silo_proto::CHANNEL.server_bundle_id();
+    let plist = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>silo</string>\
+         <key>CFBundleIdentifier</key><string>{id}</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n"
+    );
+    std::fs::write(bundle.join("Contents/Info.plist"), plist).unwrap();
+    let signed = Command::new("codesign").args(["--force", "--sign", "-"]).arg(bundle).output().unwrap();
+    assert!(signed.status.success(), "{}", String::from_utf8_lossy(&signed.stderr));
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn updates_a_standalone_binary_and_its_server_live() {
+async fn updates_the_install_and_its_server_live() {
+    let mac = cfg!(target_os = "macos");
     let root = PathBuf::from(format!("/tmp/silo-cli-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     for dir in ["b", "f", "h", "u", "new"] {
         std::fs::create_dir_all(root.join(dir)).unwrap();
     }
-    let env = Env { bin: root.join("b/silo"), root: root.clone() };
-    // The installed binary: this build, outside the cargo target directory.
-    std::fs::copy(env!("CARGO_BIN_EXE_silo"), &env.bin).unwrap();
+    let root = root.canonicalize().unwrap();
+    // This build, outside the cargo target directory.
+    std::fs::copy(env!("CARGO_BIN_EXE_silo"), root.join("b/silo")).unwrap();
+    let mut env = Env { bin: root.join("b/silo"), root: root.clone() };
     let (_, build) = silo_proto::upgrade::parse_version(&env.stdout(&["--version"])).unwrap();
     let build = build.unwrap();
     let (next, next_build) = next_release(&env.bin, &build, &root.join("new/silo"));
-
-    // The feed: latest.json, the platform's tarball and its checksum.
     let feed = root.join("f");
     let asset = silo_proto::upgrade::asset(&silo_proto::upgrade::platform());
-    let packed = Command::new("tar").arg("-czf").arg(feed.join(&asset)).arg("-C").arg(root.join("new")).arg("silo").status().unwrap();
-    assert!(packed.success());
+    if mac {
+        // Installed as install.sh does: the bundle copied to the runtime directory, `silo` linked.
+        server_bundle(&root.join("b/Silo Server.app"), &env.bin);
+        env.bin = root.join("b/Silo Server.app/Contents/MacOS/silo");
+        let out = env.stdout(&["install", "--bin-dir", &root.join("u/.local/bin").to_string_lossy()]);
+        assert!(out.contains("installed"), "{out}");
+        env.bin = root.join("u/.local/bin/silo");
+        assert_eq!(env.bin.canonicalize().unwrap(), root.join("h/runtime/Silo Server.app/Contents/MacOS/silo"));
+        // The feed's asset: the next release's bundle.
+        server_bundle(&root.join("new/pack/Silo Server.app"), &root.join("new/silo"));
+        let packed =
+            Command::new("tar").arg("-czf").arg(feed.join(&asset)).arg("-C").arg(root.join("new/pack")).arg("Silo Server.app").status().unwrap();
+        assert!(packed.success());
+    } else {
+        let packed = Command::new("tar").arg("-czf").arg(feed.join(&asset)).arg("-C").arg(root.join("new")).arg("silo").status().unwrap();
+        assert!(packed.success());
+    }
     std::fs::write(feed.join("SHA256SUMS"), format!("{}  {asset}\n", sha256(&feed.join(&asset)))).unwrap();
     std::fs::write(feed.join("latest.json"), format!(r#"{{"tag_name":"v{next}","draft":false,"prerelease":false}}"#)).unwrap();
 
@@ -145,18 +177,20 @@ async fn updates_a_standalone_binary_and_its_server_live() {
 
     assert_eq!(env.stdout(&["update", "--check"]).trim(), format!("{next} available (installed {VERSION})"));
     let out = env.stdout(&["upgrade"]);
-    assert!(out.contains(&format!("updated silo to {next}")), "{out}");
+    let updated = if mac { format!("updated Silo Server to {next}") } else { format!("updated silo to {next}") };
+    assert!(out.contains(&updated), "{out}");
     assert!(out.contains("silo server running"), "its `silo up` ran: {out}");
     assert!(!out.contains("remote upgrade"), "no paired hosts, no hint: {out}");
 
-    // The binary is the release's; the server is too, with the session.
+    // The install is the release's; the server is too, with the session.
     assert_eq!(env.stdout(&["--version"]).trim(), format!("silo {}", silo_proto::upgrade::channel_version_text(&next, &next_build)));
     let (control, _events) = silo_client::Control::connect(&silo_proto::paths::socket(&root.join("h")), "update test").await.unwrap();
     assert_eq!((control.hello().server.version.as_str(), control.hello().build.as_str()), (next.as_str(), next_build.as_str()));
     assert!(env.stdout(&["ls"]).contains("kept"), "the session survived the takeover");
     drop(control);
-    let left: Vec<_> = std::fs::read_dir(root.join("b")).unwrap().map(|e| e.unwrap().file_name()).collect();
-    assert_eq!(left, ["silo"], "nothing staged is left behind");
+    let (dir, only) = if mac { (root.join("h/runtime"), "Silo Server.app") } else { (root.join("b"), "silo") };
+    let left: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left, [only], "nothing staged is left behind");
 
     assert_eq!(env.stdout(&["update"]).trim(), format!("silo {next} is up to date"));
     assert_eq!(env.stdout(&["update", "--check"]).trim(), format!("up to date ({next})"));

@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# A release Silo-<version>.dmg built here, as release.yml's macOS job does:
-# Silo.app (scripts/bundle-macos.sh) Developer ID signed under the hardened
-# runtime, notarized with the app's bare `silo`, stapled, then the DMG around
-# it signed, notarized, stapled and checked.
+# Release assets built here, as release.yml's macOS job does: Silo.app
+# (scripts/bundle-macos.sh) Developer ID signed under the hardened runtime,
+# notarized and stapled; its Silo Server.app stapled on its own copy and
+# packed as the server-only asset; then the DMG around the app signed,
+# notarized, stapled and checked.
 #
 #   scripts/release-macos-local.sh
 #
 # SILO_SIGN_IDENTITY: the signing identity (default: the keychain's one
 # "Developer ID Application" identity). NOTARY_PROFILE: a notarytool keychain
 # profile (`xcrun notarytool store-credentials`; default "notary").
-# Output: dist/Silo-<version>.dmg.
+# Output: dist/Silo-<version>.dmg and dist/silo-macos-aarch64.tar.gz.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -52,23 +53,28 @@ staple() { retry xcrun stapler staple "$1"; }
 
 scripts/bundle-macos.sh
 
-bin=target/release/silo
-case "$("$bin" --version)" in
-  *" dev") echo "$bin is a dev-channel build" >&2; exit 1 ;;
+server_app="target/Silo.app/Contents/Helpers/Silo Server.app"
+case "$("$server_app/Contents/MacOS/silo" --version)" in
+  *" dev") echo "$server_app is a dev-channel build" >&2; exit 1 ;;
 esac
-codesign --force --sign "$SILO_SIGN_IDENTITY" --options runtime --timestamp "$bin"
-codesign --verify --strict "$bin"
 
-# One submission tickets the bare `silo` and the app; the app is stapled so it passes Gatekeeper offline.
+# One submission tickets the app and everything signed in it (the server
+# bundle too); the app is stapled so it passes Gatekeeper offline.
 work=$(mktemp -d)
 mkdir "$work/silo-notary"
 ditto target/Silo.app "$work/silo-notary/Silo.app"
-cp "$bin" "$work/silo-notary/silo"
 ditto -c -k --keepParent "$work/silo-notary" "$work/silo-notary.zip"
 notarize "$work/silo-notary.zip"
 staple target/Silo.app
 
-mkdir -p dist "$work/stage"
+# The server-only asset: a stapled copy of the app's server bundle.
+mkdir -p dist "$work/srv"
+ditto "$server_app" "$work/srv/Silo Server.app"
+staple "$work/srv/Silo Server.app"
+codesign --verify --deep --strict "$work/srv/Silo Server.app"
+COPYFILE_DISABLE=1 tar -C "$work/srv" -czf dist/silo-macos-aarch64.tar.gz "Silo Server.app"
+
+mkdir -p "$work/stage"
 ditto target/Silo.app "$work/stage/Silo.app"
 ln -s /Applications "$work/stage/Applications"
 for attempt in 1 2 3 4 5; do
@@ -94,5 +100,5 @@ codesign --verify --strict "$mnt/$server"
 # Captured first: `grep -q` stops reading early, and codesign's SIGPIPE would fail the pipeline (pipefail).
 identifier() { local info; info=$(codesign -dv "$1" 2>&1); grep -qx "Identifier=$2" <<< "$info"; }
 identifier "$mnt/$server" xyz.nitish.silo.server
-identifier "$mnt/Silo.app/Contents/Helpers/Silo Menu Bar.app" xyz.nitish.silo.menubar
-echo "done: $dmg ($(du -h "$dmg" | cut -f1))"
+identifier "$mnt/$server/Contents/Helpers/Silo Menu Bar.app" xyz.nitish.silo.menubar
+echo "done: $dmg ($(du -h "$dmg" | cut -f1)), dist/silo-macos-aarch64.tar.gz"

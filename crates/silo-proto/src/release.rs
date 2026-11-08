@@ -147,25 +147,15 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Fetch release `version` for `platform` into `path` (mode 0755): its
-/// asset, checked against the release's checksums, unpacked. Uses `curl`
-/// and `tar` like install.sh; `base` (`SILO_DOWNLOAD_BASE`) overrides the
-/// location.
-///
-/// # Errors
-/// Not published (`upgrade::NOT_PUBLISHED`), not downloadable, not
-/// matching the checksums, or not holding a plain `silo`.
-pub async fn download(path: &Path, base: Option<&str>, version: &str, platform: &str) -> Result<(), FetchError> {
+/// Fetch release `version`'s asset for `platform` into the new directory
+/// `unpack`, checked against the release's checksums; the archive's path.
+async fn fetch_asset(unpack: &Path, base: Option<&str>, version: &str, platform: &str) -> Result<PathBuf, FetchError> {
     let url = |file: &str| upgrade::release_url(base, version, file).ok_or_else(|| ("bad_request", format!("{version:?} is not a release version")));
     let (sums_url, asset) = (url(upgrade::CHECKSUMS)?, upgrade::asset(platform));
     let asset_url = url(&asset)?;
     // Only the default (GitHub) location must be https; an override may be
     // a mirror or a test server.
     let https = base.is_none_or(str::is_empty);
-    let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| ("internal", "bad staging path".to_owned()))?;
-    let unpack = path.with_file_name(format!("{name}.d"));
-    std::fs::create_dir(&unpack).map_err(|e| ("internal", e.to_string()))?;
-    let _unpack = TempDir(unpack.clone());
     let not_published = || (upgrade::NOT_PUBLISHED, upgrade::not_published(version, platform));
     let sums = unpack.join(upgrade::CHECKSUMS);
     fetch(&sums_url, &sums, https, upgrade::MAX_BINARY).await?.ok_or_else(not_published)?;
@@ -177,29 +167,91 @@ pub async fn download(path: &Path, base: Option<&str>, version: &str, platform: 
     if actual != expected {
         return Err(("checksum", format!("{asset} does not match the release's {}", upgrade::CHECKSUMS)));
     }
+    Ok(archive)
+}
+
+/// Unpack `member` of the gzipped tar `archive` into `dir`.
+async fn untar(archive: &Path, dir: &Path, member: &str) -> Result<(), FetchError> {
     let tar = tokio::process::Command::new("tar")
         .arg("-xzf")
-        .arg(&archive)
+        .arg(archive)
         .arg("-C")
-        .arg(&unpack)
-        .arg("silo")
+        .arg(dir)
+        .arg(member)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output()
         .await
         .map_err(|e| ("download", format!("run tar: {e}")))?;
     if !tar.status.success() {
-        return Err(("download", format!("unpack {asset}: {}", String::from_utf8_lossy(&tar.stderr).trim())));
+        let name = archive.file_name().unwrap_or_default().to_string_lossy();
+        return Err(("download", format!("unpack {name}: {}", String::from_utf8_lossy(&tar.stderr).trim())));
     }
-    let member = unpack.join("silo");
-    // A plain file of its own: a symlink or hard link member could point
-    // anywhere (set_permissions and rename would act on its target).
-    let plain = std::fs::symlink_metadata(&member).is_ok_and(|m| m.file_type().is_file() && std::os::unix::fs::MetadataExt::nlink(&m) == 1);
-    if !plain {
-        return Err(("invalid", format!("{asset} does not hold a plain `silo` file")));
+    Ok(())
+}
+
+/// A plain file of its own: a symlink or hard link member could point
+/// anywhere (set_permissions and rename would act on its target).
+fn plain_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file() && std::os::unix::fs::MetadataExt::nlink(&m) == 1)
+}
+
+/// Whether `dir` holds only directories and [`plain_file`]s.
+fn plain_tree(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    entries.filter_map(Result::ok).all(|entry| match entry.file_type() {
+        Ok(kind) if kind.is_dir() => plain_tree(&entry.path()),
+        Ok(_) => plain_file(&entry.path()),
+        Err(_) => false,
+    })
+}
+
+/// A staging directory beside `path`: `<name>.d`, removed on drop.
+fn unpack_dir(path: &Path) -> Result<TempDir, FetchError> {
+    let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| ("internal", "bad staging path".to_owned()))?;
+    let unpack = path.with_file_name(format!("{name}.d"));
+    std::fs::create_dir(&unpack).map_err(|e| ("internal", e.to_string()))?;
+    Ok(TempDir(unpack))
+}
+
+/// Fetch release `version` for `platform` into `path` (mode 0755): its
+/// asset, checked against the release's checksums, unpacked. Uses `curl`
+/// and `tar` like install.sh; `base` (`SILO_DOWNLOAD_BASE`) overrides the
+/// location. For a platform whose asset is a bare `silo` (not
+/// [`upgrade::bundled`]).
+///
+/// # Errors
+/// Not published (`upgrade::NOT_PUBLISHED`), not downloadable, not
+/// matching the checksums, or not holding a plain `silo`.
+pub async fn download(path: &Path, base: Option<&str>, version: &str, platform: &str) -> Result<(), FetchError> {
+    let unpack = unpack_dir(path)?;
+    let archive = fetch_asset(&unpack.0, base, version, platform).await?;
+    untar(&archive, &unpack.0, "silo").await?;
+    let member = unpack.0.join("silo");
+    if !plain_file(&member) {
+        return Err(("invalid", format!("{} does not hold a plain `silo` file", upgrade::asset(platform))));
     }
     std::fs::rename(&member, path).map_err(|e| ("internal", e.to_string()))?;
     std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).map_err(|e| ("internal", e.to_string()))
+}
+
+/// Fetch release `version`'s server bundle for `platform` (macOS,
+/// [`upgrade::bundled`]) to the new directory `dest`, as [`download`]
+/// does: the asset's [`upgrade::SERVER_BUNDLE`], holding only directories
+/// and plain files. Its signature is the caller's to check.
+///
+/// # Errors
+/// As [`download`], or the asset holds no such bundle.
+pub async fn download_bundle(dest: &Path, base: Option<&str>, version: &str, platform: &str) -> Result<(), FetchError> {
+    let unpack = unpack_dir(dest)?;
+    let archive = fetch_asset(&unpack.0, base, version, platform).await?;
+    untar(&archive, &unpack.0, upgrade::SERVER_BUNDLE).await?;
+    let bundle = unpack.0.join(upgrade::SERVER_BUNDLE);
+    let is_dir = std::fs::symlink_metadata(&bundle).is_ok_and(|m| m.is_dir());
+    if !is_dir || !plain_tree(&bundle) || !plain_file(&bundle.join("Contents/MacOS/silo")) {
+        return Err(("invalid", format!("{} does not hold a plain {}", upgrade::asset(platform), upgrade::SERVER_BUNDLE)));
+    }
+    std::fs::rename(&bundle, dest).map_err(|e| ("internal", e.to_string()))
 }
 
 /// Removes a directory tree on drop.
@@ -358,6 +410,48 @@ mod tests {
         assert!(!path.exists());
         let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(left.len(), 4, "only the fixtures remain: {left:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn downloads_a_checked_server_bundle() {
+        let dir = std::env::temp_dir().join(format!("silo-upgrade-bundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pack = |name: &str, link: bool| {
+            let root = dir.join(name);
+            let macos = root.join(upgrade::SERVER_BUNDLE).join("Contents/MacOS");
+            std::fs::create_dir_all(&macos).unwrap();
+            std::fs::write(macos.join("silo"), "#!/bin/sh\necho 'silo 9.9.9 (rel)'\n").unwrap();
+            std::fs::set_permissions(macos.join("silo"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            std::fs::write(root.join(upgrade::SERVER_BUNDLE).join("Contents/Info.plist"), "<plist/>").unwrap();
+            if link {
+                std::os::unix::fs::symlink("/etc/passwd", root.join(upgrade::SERVER_BUNDLE).join("Contents/Resources")).unwrap();
+            }
+            let archive = dir.join(format!("{name}.tar.gz"));
+            let packed =
+                std::process::Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&root).arg(upgrade::SERVER_BUNDLE).status().unwrap();
+            assert!(packed.success());
+            std::fs::read(&archive).unwrap()
+        };
+        let (good, evil) = (pack("good", false), pack("evil", true));
+        let sha = |bytes: &[u8]| -> String { Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect() };
+        let sums = format!("{}  silo-macos-aarch64.tar.gz\n{}  silo-macos-x86_64.tar.gz\n", sha(&good), sha(&evil));
+        let files = std::collections::HashMap::from([
+            (upgrade::CHECKSUMS.to_owned(), sums.into_bytes()),
+            ("silo-macos-aarch64.tar.gz".to_owned(), good),
+            ("silo-macos-x86_64.tar.gz".to_owned(), evil),
+        ]);
+        let base = serve_files(files).await;
+        let dest = dir.join(".Silo Server.app.1.n0a");
+        download_bundle(&dest, Some(&base), "9.9.9", "macos-aarch64").await.unwrap();
+        assert_eq!(version_of(&dest.join("Contents/MacOS/silo")).await.unwrap(), ("9.9.9".into(), "rel".into()));
+        assert_eq!(std::fs::read_to_string(dest.join("Contents/Info.plist")).unwrap(), "<plist/>");
+        std::fs::remove_dir_all(&dest).unwrap();
+        // A link inside the bundle is refused, and nothing is left.
+        let error = download_bundle(&dest, Some(&base), "9.9.9", "macos-x86_64").await.unwrap_err();
+        assert_eq!(error.0, "invalid", "{error:?}");
+        assert!(!dest.exists() && !dir.join(".Silo Server.app.1.n0a.d").exists());
+        assert!(upgrade::bundled("macos-aarch64") && !upgrade::bundled("linux-x86_64"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

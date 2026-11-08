@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Build target/Silo.app: the GPUI client and the otto-silo daemon (agent
-# blocks) in Contents/MacOS, and two helper apps in Contents/Helpers: the
-# `silo` server/CLI binary as Silo Server.app (the identity macOS privacy
-# prompts show for programs in Silo's terminals) and the silo-menubar agent
-# as Silo Menu Bar.app (its own bundle id, so it is never taken for Silo).
+# Build target/Silo.app: the GPUI client in Contents/MacOS and the
+# self-contained server bundle in Contents/Helpers:
+#
+#   Silo Server.app                     xyz.nitish.silo.server
+#     Contents/MacOS/silo               server, CLI and otto (`silo otto ...`)
+#     Contents/Helpers/Silo Menu Bar.app  menu-bar agent (xyz.nitish.silo.menubar)
+#
+# The same Silo Server.app is the macOS release asset for server-only
+# installs (silo-macos-<arch>.tar.gz, .github/workflows/release.yml);
+# either way it runs from <SILO_HOME>/runtime (crates/silo-client/src/runtime.rs).
 #
 # Signed ad-hoc, or with SILO_SIGN_IDENTITY (a Developer ID Application
 # identity in the keychain) under the hardened runtime with secure
@@ -33,7 +38,7 @@ cargo_flags=()
 app_flags=(--no-default-features)
 [[ -n "$features" ]] && app_flags+=(--features "$features")
 
-cargo build "${cargo_flags[@]}" -p silo-cli -p silo-menubar -p otto-cli --bins
+cargo build "${cargo_flags[@]}" -p silo-cli -p silo-menubar --bins
 cargo build "${cargo_flags[@]}" -p silo-web --bin silo-web-helper
 cargo build "${cargo_flags[@]}" -p silo-app "${app_flags[@]}"
 
@@ -48,26 +53,21 @@ cp "$out/silo-app" "$app/Contents/MacOS/Silo"
 # The app icon (scripts/make-icons.sh): Assets.car for macOS 26 and later,
 # Silo.icns before; shared with Silo Server.app below.
 cp "$root/packaging/macos/Assets.car" "$root/packaging/macos/Silo.icns" "$app/Contents/Resources/"
-# The server/CLI: Contents/Helpers/Silo Server.app/Contents/MacOS/silo. It is
-# the responsible process of every shell (it disclaims whoever started it,
-# crates/silo-cli/src/disclaim.rs), so privacy prompts and System Settings
-# name it, with usage strings worded for terminal programs
-# (scripts/server-info-plist.sh).
+# The server bundle: Contents/Helpers/Silo Server.app/Contents/MacOS/silo. It
+# is the responsible process of every shell (it disclaims whoever started
+# it, crates/silo-cli/src/disclaim.rs), so privacy prompts and System
+# Settings name it, with usage strings worded for terminal programs
+# (scripts/server-info-plist.sh). Agents run as `silo otto` inside it.
 server_app="$app/Contents/Helpers/Silo Server.app"
 mkdir -p "$server_app/Contents/MacOS" "$server_app/Contents/Resources"
 cp "$out/silo" "$server_app/Contents/MacOS/silo"
-# Menu-bar agent (accessory app, no Dock icon):
-# Contents/Helpers/Silo Menu Bar.app/Contents/MacOS/silo-menubar. In the
-# app's Contents/MacOS, AppKit would take it for Silo.app itself (same bundle
-# id) and Launch Services could send the app's reopen and open events to it
-# (scripts/menubar-info-plist.sh). Under launchd the app runs copies of both
-# helper bundles out of <SILO_HOME>/runtime (one fixed place), so the app
-# can be replaced while they run.
-menubar_app="$app/Contents/Helpers/Silo Menu Bar.app"
+# Menu-bar agent (accessory app, no Dock icon), inside the server bundle:
+# Silo Server.app/Contents/Helpers/Silo Menu Bar.app. A bundle of its own,
+# so AppKit and Launch Services never take it for Silo.app
+# (scripts/menubar-info-plist.sh).
+menubar_app="$server_app/Contents/Helpers/Silo Menu Bar.app"
 mkdir -p "$menubar_app/Contents/MacOS" "$menubar_app/Contents/Resources"
 cp "$out/silo-menubar" "$menubar_app/Contents/MacOS/silo-menubar"
-# The otto daemon agent blocks connect to (started by the app).
-cp "$out/otto-silo" "$app/Contents/MacOS/otto-silo"
 # Browser engine: CEF framework + four helper apps (copies of
 # silo-web-helper), as silo-web's README describes.
 cef="${CEF_PATH:-$("$root/scripts/fetch-cef.sh")}"
@@ -97,7 +97,7 @@ PLIST
 done
 # The app finds the server at ../Helpers/Silo Server.app/Contents/MacOS/silo
 # (crates/silo-app/src/conn.rs); in Contents/MacOS `silo` and `Silo` would
-# collide on a case-insensitive volume. Both helpers get the app's icon.
+# collide on a case-insensitive volume. Both bundles get the app's icon.
 icon=""
 if [[ -f "$app/Contents/Resources/Assets.car" ]]; then
   for helper_app in "$server_app" "$menubar_app"; do
@@ -180,11 +180,11 @@ for helper in "${helpers[@]}"; do
     *) sign "$helper" ;;
   esac
 done
-sign --entitlements "$terminal" "$server_app"
-codesign --verify --strict "$server_app"
+# Inside out (the menu-bar agent before the server bundle holding it).
 sign "$menubar_app"
 codesign --verify --strict "$menubar_app"
-sign "$app/Contents/MacOS/otto-silo"
+sign --entitlements "$terminal" "$server_app"
+codesign --verify --deep --strict "$server_app"
 sign --entitlements "$devices" "$app"
 codesign --verify --deep --strict "$app"
 echo "built $app"

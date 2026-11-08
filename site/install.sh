@@ -5,8 +5,12 @@
 #   curl -fsSL https://nitishxyz.github.io/silo/install.sh | sh -s -- join <ticket>
 #   curl -fsSL https://nitishxyz.github.io/silo/install.sh | sh -s -- --version v0.1.0
 #
-# Downloads silo-<os>-<arch>.tar.gz from the GitHub release, checks it
-# against the release's SHA256SUMS and installs silo to ~/.local/bin.
+# Downloads silo-<os>-<arch>.tar.gz from the GitHub release and checks it
+# against the release's SHA256SUMS. On Linux it holds `silo`, installed to
+# ~/.local/bin. On macOS it holds Silo Server.app (the server, CLI, otto
+# and the menu-bar agent, as in Silo.app): its `silo install` copies it to
+# ~/Library/Application Support/silo/runtime, where the server always runs
+# from, and links ~/.local/bin/silo to it.
 #
 # Options (before any silo arguments):
 #   --version <tag>   install that release (v0.1.0 or 0.1.0) instead of the
@@ -17,7 +21,8 @@
 #
 # Environment:
 #   SILO_VERSION        release tag to install (default: latest)
-#   SILO_INSTALL_DIR    install directory (default: ~/.local/bin)
+#   SILO_INSTALL_DIR    install directory (default: ~/.local/bin; on macOS
+#                       where the `silo` link goes)
 #   SILO_DOWNLOAD_BASE  directory URL holding the release assets; overrides
 #                       the GitHub Releases location (for mirrors and tests)
 #
@@ -134,14 +139,21 @@ main() {
     actual=$(sha256 "$tmp/$asset")
     [ "$expected" = "$actual" ] || die "checksum mismatch for $asset"
 
-    tar -xzf "$tmp/$asset" -C "$tmp" silo || die "bad archive: $asset"
-
     dir=${SILO_INSTALL_DIR:-$HOME/.local/bin}
     mkdir -p "$dir"
-    # Rename into place so a running silo keeps its old binary.
-    cp "$tmp/silo" "$dir/.silo.new.$$"
-    chmod 755 "$dir/.silo.new.$$"
-    mv -f "$dir/.silo.new.$$" "$dir/silo"
+    if [ "$os" = macos ]; then
+        tar -xzf "$tmp/$asset" -C "$tmp" "Silo Server.app" || die "bad archive: $asset"
+        [ -x "$tmp/Silo Server.app/Contents/MacOS/silo" ] || die "bad archive: $asset"
+        # Copies the bundle to its runtime directory (replacing an older one
+        # atomically; a running server keeps its files) and links $dir/silo.
+        "$tmp/Silo Server.app/Contents/MacOS/silo" install --bin-dir "$dir" >&2 || die "installing Silo Server.app failed"
+    else
+        tar -xzf "$tmp/$asset" -C "$tmp" silo || die "bad archive: $asset"
+        # Rename into place so a running silo keeps its old binary.
+        cp "$tmp/silo" "$dir/.silo.new.$$"
+        chmod 755 "$dir/.silo.new.$$"
+        mv -f "$dir/.silo.new.$$" "$dir/silo"
+    fi
     silo=$dir/silo
     say "installed $("$silo" --version 2>/dev/null || echo silo) to $silo"
 

@@ -4,19 +4,19 @@ name: release
 # GitHub Release for a `v*` tag:
 #   silo-linux-x86_64.tar.gz     `silo` CLI/server
 #   silo-linux-aarch64.tar.gz
-#   silo-macos-aarch64.tar.gz
-#   Silo-<version>.dmg           the app; Developer ID signed, notarized and
-#                                stapled (app and DMG)
+#   silo-macos-aarch64.tar.gz    `Silo Server.app` (server, CLI, otto and
+#                                the menu-bar agent; site/install.sh)
+#   Silo-<version>.dmg           the app (with the same Silo Server.app)
 #   build-id                     silo_proto::BUILD, identical on every platform
 #   SHA256SUMS                   covers every other asset (site/install.sh
 #                                verifies downloads against it)
 #
-# The macOS `silo` binary is Developer ID signed and notarized too (a bare
-# binary cannot be stapled; Gatekeeper looks its ticket up online). Signing
-# is mandatory: the macOS build fails without the APPLE_* secrets.
-# Notarization takes two submissions: one zip holding `silo` and Silo.app
-# (the notary service tickets every signed item in it, so both are covered),
-# then the DMG built around the stapled app.
+# Everything macOS is Developer ID signed, notarized and stapled (app,
+# server bundle, DMG). Signing is mandatory: the macOS build fails without
+# the APPLE_* secrets. Notarization takes two submissions: Silo.app (the
+# notary service tickets every signed item in it, the server bundle
+# included, which is then stapled on its own copy for the tarball), then
+# the DMG built around the stapled app.
 #
 # A tag push builds right away, while the `ci` workflow is still testing the
 # same commit (pushed to a branch; ci does not run on tags). The release job
@@ -140,29 +140,19 @@ jobs:
       - name: Build silo
         if: matrix.os == 'linux'
         run: cargo build -p silo-cli --release --locked
-      # Builds silo, silo-menubar, otto-silo, the CEF helper and the app into
-      # target/Silo.app (Developer ID signed, hardened runtime).
+      # Builds silo, silo-menubar, the CEF helper and the app into
+      # target/Silo.app (Developer ID signed, hardened runtime), with
+      # Contents/Helpers/Silo Server.app.
       - name: Build Silo.app
         if: matrix.os == 'macos'
         env:
           SILO_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: scripts/bundle-macos.sh
-      # Notarized together with the app below. The app's copy (Contents/Helpers/
-      # Silo Server.app/Contents/MacOS/silo) was signed with its bundle by
-      # bundle-macos.sh; this signs the bare binary of the tarball.
-      - name: Sign silo
-        if: matrix.os == 'macos'
-        env:
-          SILO_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -eu
-          bin=target/release/silo
-          codesign --force --sign "$SILO_SIGN_IDENTITY" --options runtime --timestamp "$bin"
-          codesign --verify --strict "$bin"
       - name: Package silo
         run: |
           set -eu
           bin=target/release/silo
+          [ "${{ matrix.os }}" = macos ] && bin="target/Silo.app/Contents/Helpers/Silo Server.app/Contents/MacOS/silo"
           "$bin" --version
           # A dev-channel binary says so after its build id.
           case "$("$bin" --version)" in
@@ -182,14 +172,14 @@ jobs:
           esac
           [ "${#id}" -eq 16 ] || { echo "bad build id '$id'" >&2; exit 1; }
           mkdir -p stage dist
+          printf '%s\n' "$id" > "dist/build-id-$ASSET"
+          echo "### $ASSET" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`$("$bin" --version)\`, build id \`$id\`" >> "$GITHUB_STEP_SUMMARY"
+          # macOS: the stapled server bundle, packed in "Package Silo.app".
+          [ "${{ matrix.os }}" = linux ] || exit 0
           cp "$bin" stage/silo
           COPYFILE_DISABLE=1 tar -C stage -czf "dist/$ASSET.tar.gz" silo
-          printf '%s\n' "$id" > "dist/build-id-$ASSET"
-          {
-            echo "### $ASSET"
-            echo "- \`$("$bin" --version)\`, build id \`$id\`"
-            echo "- $ASSET.tar.gz: $(du -h "dist/$ASSET.tar.gz" | cut -f1)"
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "- $ASSET.tar.gz: $(du -h "dist/$ASSET.tar.gz" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
       - name: Package Silo.app
         if: matrix.os == 'macos'
         env:
@@ -212,18 +202,25 @@ jobs:
           }
           stapler() { retry xcrun stapler "$@"; }
           staple() { stapler staple "$1"; }
-          # One submission tickets the bare `silo` (signed above, already in
-          # the tarball) and the app. Staple the app itself so it passes
+          # One submission tickets the app and every signed item in it, the
+          # server bundle included. Staple the app itself so it passes
           # Gatekeeper offline once copied out of the DMG.
           notary=$(mktemp -d)/silo-notary
           mkdir "$notary"
           ditto target/Silo.app "$notary/Silo.app"
-          cp target/release/silo "$notary/silo"
           ditto -c -k --keepParent "$notary" "$RUNNER_TEMP/silo-notary.zip"
           .github/scripts/notarize.sh "$RUNNER_TEMP/silo-notary.zip"
           staple target/Silo.app
-          notarized() { spctl -a -vv -t install "$1" 2>&1 | tee /dev/stderr | grep '^source=Notarized Developer ID$' > /dev/null; }
-          retry notarized target/release/silo
+          notarized() { spctl -a -vv -t "$1" "$2" 2>&1 | tee /dev/stderr | grep '^source=Notarized Developer ID$' > /dev/null; }
+          # The server-only asset: a stapled copy of the app's server bundle.
+          srv=$(mktemp -d)
+          ditto "target/Silo.app/Contents/Helpers/Silo Server.app" "$srv/Silo Server.app"
+          staple "$srv/Silo Server.app"
+          stapler validate "$srv/Silo Server.app"
+          codesign --verify --deep --strict "$srv/Silo Server.app"
+          retry notarized exec "$srv/Silo Server.app"
+          COPYFILE_DISABLE=1 tar -C "$srv" -czf "dist/$ASSET.tar.gz" "Silo Server.app"
+          echo "- $ASSET.tar.gz: $(du -h "dist/$ASSET.tar.gz" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
           stage=$(mktemp -d)
           ditto target/Silo.app "$stage/Silo.app"
           ln -s /Applications "$stage/Applications"
@@ -249,10 +246,11 @@ jobs:
           codesign --verify --strict "$mnt/$server"
           codesign -dv "$mnt/$server" 2>&1 | grep -qx 'Identifier=xyz.nitish.silo.server'
           [ ! -e "$mnt/Silo.app/Contents/MacOS/silo-server" ]
-          menubar="Silo.app/Contents/Helpers/Silo Menu Bar.app"
+          menubar="$server/Contents/Helpers/Silo Menu Bar.app"
           codesign --verify --strict "$mnt/$menubar"
           codesign -dv "$mnt/$menubar" 2>&1 | grep -qx 'Identifier=xyz.nitish.silo.menubar'
-          [ ! -e "$mnt/Silo.app/Contents/MacOS/silo-menubar" ]
+          [ ! -e "$mnt/Silo.app/Contents/Helpers/Silo Menu Bar.app" ]
+          [ ! -e "$mnt/Silo.app/Contents/MacOS/otto-silo" ]
           hdiutil detach "$mnt"
           echo "- $(basename "$dmg"): $(du -h "$dmg" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
       - name: Delete signing keychain

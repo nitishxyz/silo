@@ -21,9 +21,8 @@ See §8 for status.
 - The otto daemon is the one this Mac's silo server serves (one per Silo home, OTTO.md §9): the pane connects with
   `Connection::connect_dial`, whose dial asks the app's own server for `service.socket {name: "otto"}` (the server
   starts or checks the daemon exactly as for a tunnel) and connects to that socket. One shared connection per app,
-  redialed the same way. The app no longer starts a daemon itself; `otto-silo` still ships in the bundle
-  (`scripts/dev-bundle.sh`, `scripts/bundle-macos.sh`, release workflow) next to `silo`, which also embeds otto
-  (`silo otto …`).
+  redialed the same way. The app no longer starts a daemon itself, and ships no `otto-silo`: the daemon is the
+  server bundle's `silo otto …` (`Silo Server.app`, see docs/PLAN.md §5).
 - Agent blocks of a remote host run on that host's otto: when its server advertises feature `otto` (it registered
   the tunnel service), the pane connects with `Connection::connect_dial` over `open_service("otto")` on the host's
   `TunnelDialer` (shared with its browser tunnel proxy; `agent/client.rs`, one connection per `Otto` target). The
