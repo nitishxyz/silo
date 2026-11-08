@@ -1898,86 +1898,61 @@ impl SettingsPanel {
                 for (index, host) in s.hosts.iter().enumerate() {
                     let confirming = self.pending_remove.as_deref() == Some(host.id.as_str());
                     let notify = (!confirming).then(|| self.host_notify(index, host, cx));
-                    let control = if confirming {
+                    // The address and actions go on a line of their own
+                    // under the name ([`Self::host_row`]).
+                    let mut details = Vec::new();
+                    if confirming {
                         let id = host.id.clone();
-                        Some(
-                            div()
-                                .flex()
-                                .gap(px(6.0))
-                                .child(Self::button(
-                                    ("settings-remove-cancel", index),
-                                    "Cancel",
-                                    ButtonKind::Secondary,
-                                    |this, cx| {
-                                        this.pending_remove = None;
-                                        cx.notify();
-                                    },
-                                    cx,
-                                ))
-                                .child(Self::button(
-                                    ("settings-remove-confirm", index),
-                                    "Remove",
-                                    ButtonKind::Danger,
-                                    move |this, cx| {
-                                        this.pending_remove = None;
-                                        cx.emit(SettingsEvent::RemoveHost(id.clone()));
-                                    },
-                                    cx,
-                                ))
-                                .into_any_element(),
-                        )
-                    } else if host.removable {
-                        let id = host.id.clone();
-                        Some(
-                            div()
-                                .flex()
-                                .gap(px(6.0))
-                                .child(Self::emit_button(("settings-rename-host", index), "Rename…", SettingsEvent::RenameHost(id.clone()), cx))
-                                .child(Self::button(
-                                    ("settings-remove-host", index),
-                                    "Remove…",
-                                    ButtonKind::Secondary,
-                                    move |this, cx| {
-                                        this.pending_remove = Some(id.clone());
-                                        cx.notify();
-                                    },
-                                    cx,
-                                ))
-                                .into_any_element(),
-                        )
+                        details.push(Self::button(
+                            ("settings-remove-cancel", index),
+                            "Cancel",
+                            ButtonKind::Secondary,
+                            |this, cx| {
+                                this.pending_remove = None;
+                                cx.notify();
+                            },
+                            cx,
+                        ));
+                        details.push(Self::button(
+                            ("settings-remove-confirm", index),
+                            "Remove",
+                            ButtonKind::Danger,
+                            move |this, cx| {
+                                this.pending_remove = None;
+                                cx.emit(SettingsEvent::RemoveHost(id.clone()));
+                            },
+                            cx,
+                        ));
                     } else {
-                        None
-                    };
-                    // Remote addresses are long: a short, ellipsized form and
-                    // a copy button; the full value stays one click away.
-                    let control = if host.address.is_empty() || confirming {
-                        control
-                    } else {
-                        let address = host.address.clone();
-                        Some(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(div().max_w(px(140.0)).child(Self::value(host.address.clone())))
-                                .child(Self::button(
-                                    ("settings-copy-host", index),
-                                    "Copy",
-                                    ButtonKind::Secondary,
-                                    move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(address.clone())),
-                                    cx,
-                                ))
-                                .children(control)
-                                .into_any_element(),
-                        )
-                    };
-                    let control = match (notify, control) {
-                        (Some(notify), Some(control)) => {
-                            Some(div().flex().items_center().gap(px(10.0)).child(notify).child(control).into_any_element())
+                        // Remote addresses are long: an ellipsized form and a
+                        // copy button; the full value stays one click away.
+                        if !host.address.is_empty() {
+                            let address = host.address.clone();
+                            details.push(Self::host_address(host.address.clone()));
+                            details.push(Self::button(
+                                ("settings-copy-host", index),
+                                "Copy",
+                                ButtonKind::Secondary,
+                                move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(address.clone())),
+                                cx,
+                            ));
                         }
-                        (notify, control) => notify.or(control),
-                    };
-                    rows.push(Self::row(host.name.clone(), Some(host.status.clone().into()), control, narrow));
+                        if host.removable {
+                            let id = host.id.clone();
+                            details.push(Self::emit_button(("settings-rename-host", index), "Rename…", SettingsEvent::RenameHost(id.clone()), cx));
+                            details.push(Self::button(
+                                ("settings-remove-host", index),
+                                "Remove…",
+                                ButtonKind::Secondary,
+                                move |this, cx| {
+                                    this.pending_remove = Some(id.clone());
+                                    cx.notify();
+                                },
+                                cx,
+                            ));
+                        }
+                    }
+                    rows.push(Self::host_row(host.name.clone(), host.status.clone(), notify, details));
                 }
                 if !rows.is_empty() {
                     out.push(self.group(None, rows));
@@ -2217,6 +2192,58 @@ impl SettingsPanel {
             "Programs in Silo terminals get what Silo Server is granted. Programs already running may need restarting once granted.",
         ));
         out
+    }
+
+    /// A host's row: its name and status (one line each, ellipsized) with
+    /// the Notify switch beside them; the address and actions, when any, on
+    /// a second line under the name, wrapping rather than leaving the panel.
+    /// The name column takes the room the switch leaves, so it never
+    /// collapses to a letter a line.
+    fn host_row(
+        name: impl Into<gpui::SharedString>,
+        status: impl Into<gpui::SharedString>,
+        notify: Option<AnyElement>,
+        details: Vec<AnyElement>,
+    ) -> AnyElement {
+        let line = |text: gpui::SharedString| div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(text);
+        let head = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(line(name.into()).text_size(px(13.0)).font_weight(FontWeight::MEDIUM))
+                    .child(line(status.into()).text_size(px(11.5)).line_height(px(15.0)).text_color(rgb(theme::muted()))),
+            )
+            .children(notify.map(|n| div().flex_none().flex().items_center().child(n)));
+        let tail = (!details.is_empty()).then(|| div().w_full().min_w_0().flex().flex_wrap().items_center().gap(px(6.0)).children(details));
+        div()
+            .w_full()
+            .min_w_0()
+            .min_h(px(ROW_MIN_H))
+            .px(px(14.0))
+            .py(px(10.0))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap(px(8.0))
+            .child(head)
+            .children(tail)
+            .into_any_element()
+    }
+
+    /// A host's address on its row's second line: shrinks and ellipsizes
+    /// before the buttons beside it move.
+    fn host_address(address: impl Into<gpui::SharedString>) -> AnyElement {
+        div().flex_shrink(1.0).min_w_0().max_w(px(220.0)).overflow_hidden().child(Self::value(address)).into_any_element()
     }
 
     /// A host row's notification switch.
@@ -2729,6 +2756,78 @@ mod tests {
         assert_eq!(Places::default().offset(Section::Terminal, "Colors"), None);
         places.clear();
         assert_eq!(places.offset(Section::Appearance, "Colors"), None);
+    }
+
+    /// A remote host's row laid out in a window (gpui's test text system).
+    mod host_row_layout {
+        use std::{cell::RefCell, rc::Rc};
+
+        use gpui::{Bounds, Context, IntoElement, Pixels, Render, TestAppContext, Window, canvas, div, prelude::*, px, size};
+
+        use super::super::SettingsPanel;
+
+        type Seen = Rc<RefCell<Vec<(&'static str, Bounds<Pixels>)>>>;
+
+        struct Row {
+            seen: Seen,
+        }
+
+        fn probe(name: &'static str, seen: &Seen) -> impl IntoElement {
+            let seen = seen.clone();
+            canvas(move |b, _, _| seen.borrow_mut().push((name, b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full()
+        }
+
+        /// A fixed-size stand-in for a control.
+        fn control(name: &'static str, w: f32, seen: &Seen) -> gpui::AnyElement {
+            div().relative().flex_none().w(px(w)).h(px(26.0)).child(probe(name, seen)).into_any_element()
+        }
+
+        impl Render for Row {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let s = &self.seen;
+                let details = vec![
+                    SettingsPanel::host_address("fa0f35ed89700c80cd7e3b1f0a9c4d2e6b8a1f3c5d7e9b0a2c4e6f8a1b3d5c7e9"),
+                    control("copy", 56.0, s),
+                    control("rename", 76.0, s),
+                    control("remove", 80.0, s),
+                ];
+                let row =
+                    SettingsPanel::host_row("box-node-f8cdea256182c450-with-a-long-name", "Connected", Some(control("notify", 90.0, s)), details);
+                div().size_full().flex().flex_col().child(div().relative().w_full().child(row).child(probe("row", s)))
+            }
+        }
+
+        #[gpui::test]
+        fn the_name_keeps_its_room_and_the_controls_stay_inside(cx: &mut TestAppContext) {
+            for width in [360.0_f32, 480.0, 620.0] {
+                let seen = Seen::default();
+                let (_, cx) = cx.add_window_view({
+                    let seen = seen.clone();
+                    move |_, _| Row { seen }
+                });
+                cx.simulate_resize(size(px(width), px(400.0)));
+                cx.run_until_parked();
+                let seen = seen.borrow();
+                let last = |name| seen.iter().rev().find(|(n, _)| *n == name).map(|(_, b)| *b).unwrap();
+                let (row, notify) = (last("row"), last("notify"));
+                let right = |b: Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
+                // One line each for name and status, then the actions:
+                // nowhere near a letter a line.
+                assert!(f32::from(row.size.height) < 140.0, "{width}: row {} tall", f32::from(row.size.height));
+                // The name takes what the switch leaves.
+                let name = f32::from(notify.origin.x - row.origin.x) - 14.0 - 12.0;
+                assert!((name - (width - 28.0 - 12.0 - 90.0)).abs() < 0.6, "{width}: name {name} wide");
+                for (control, w) in [("notify", 90.0), ("copy", 56.0), ("rename", 76.0), ("remove", 80.0)] {
+                    let b = last(control);
+                    assert!(right(b) <= width - 14.0 + 0.5, "{width}: {control} ends at {} past the row", right(b));
+                    assert!((f32::from(b.size.width) - w).abs() < 0.01, "{width}: {control} squeezed");
+                }
+                // The actions are under the name, starting at its left edge.
+                let copy = last("copy");
+                assert!(copy.origin.y >= notify.origin.y + notify.size.height, "{width}: actions beside the name");
+                assert!(f32::from(copy.origin.x - row.origin.x) > 14.0, "{width}: the address leads the second line");
+            }
+        }
     }
 
     /// The finder's settings are the panel's: searching the panel for a
