@@ -618,21 +618,20 @@ fn test_clicks(rt: &tokio::runtime::Handle, clicks: tokio::sync::mpsc::Unbounded
     });
 }
 
-/// A clicked notification: bring Silo forward and show its host, session
-/// and block in the frontmost window showing that session, else the
-/// frontmost window.
+/// A clicked notification: bring Silo forward and show its host, session,
+/// tab and block in the right window ([`reveal_window`]).
 fn reveal(target: &notifications::Target, cx: &mut App) {
     let shared = HostsState::global(cx);
     let Some(host) = shared.read(cx).entries.iter().position(|h| !h.removed && h.info.key() == target.host) else {
         tracing::info!(host = target.host, "notification for a host no longer here");
         return;
     };
-    let windows: Vec<_> =
-        cx.window_stack().unwrap_or_else(|| cx.windows()).into_iter().filter_map(|w| w.downcast::<crate::workspace::Workspace>()).collect();
-    let shown: Vec<_> = windows.iter().map(|w| w.read(cx).ok().map(|w| (w.active_host, w.view.as_ref().map(|v| v.session.id.clone())))).collect();
+    let windows = crate::workspace::workspace_windows(cx);
+    let shown: Vec<_> =
+        windows.iter().map(|w| w.read(cx).ok().map(|w| Shows { host: w.active_host, session: w.shown_session(), recent: w.shown.clone() })).collect();
     let pick = reveal_window(&shown, host, target.session_id.as_deref());
     tracing::info!(host, session = ?target.session_id, windows = windows.len(), ?pick, "notification reveal");
-    let Some(handle) = pick.map(|i| windows[i]).or_else(|| crate::open_window(None, cx).ok()) else { return };
+    let Some(handle) = pick.map(|(i, _)| windows[i]).or_else(|| crate::open_window(None, cx).ok()) else { return };
     let _ = handle.update(cx, |workspace, window, cx| {
         window.activate_window();
         workspace.reveal_block(host, target.session_id.clone(), target.block_id.clone(), window, cx);
@@ -643,11 +642,49 @@ fn reveal(target: &notifications::Target, cx: &mut App) {
 /// What a window shows: its host and session (`None` while unreadable).
 pub(crate) type WindowShows = Option<(usize, Option<String>)>;
 
-/// Which of the windows (front to back: each one's host and shown session,
-/// `None` when unreadable) a notification for `session` on `host` opens in:
-/// the frontmost showing that session, else the frontmost.
-fn reveal_window(windows: &[WindowShows], host: usize, session: Option<&str>) -> Option<usize> {
-    window_showing(windows, host, session).or_else(|| (!windows.is_empty()).then_some(0))
+/// A window as a notification click sees it.
+#[derive(Clone, Debug)]
+pub(crate) struct Shows {
+    pub host: usize,
+    /// The session it shows (or is about to, while connecting).
+    pub session: Option<String>,
+    /// The sessions it showed, and when last.
+    pub recent: Vec<(usize, String, std::time::Instant)>,
+}
+
+/// Why [`reveal_window`] picked a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pick {
+    /// It shows the session.
+    Showing,
+    /// No window shows it; this one did last.
+    ShowedLast,
+    /// It shows the host (a notification without a session, or one no
+    /// window ever showed).
+    OnHost,
+    /// None of these: the frontmost.
+    Frontmost,
+}
+
+/// Which of the windows (front to back, `None` when unreadable) a
+/// notification for `session` on `host` opens in, and why: the frontmost
+/// showing that session, else the one that showed it most recently, else
+/// the frontmost on that host, else the frontmost. `None`: no window.
+pub(crate) fn reveal_window(windows: &[Option<Shows>], host: usize, session: Option<&str>) -> Option<(usize, Pick)> {
+    let readable = || windows.iter().enumerate().filter_map(|(i, w)| Some((i, w.as_ref()?)));
+    if let Some(session) = session {
+        if let Some((i, _)) = readable().find(|(_, w)| w.host == host && w.session.as_deref() == Some(session)) {
+            return Some((i, Pick::Showing));
+        }
+        let last = |w: &Shows| w.recent.iter().filter(|(h, s, _)| *h == host && s == session).map(|(_, _, at)| *at).max();
+        if let Some((i, _)) = readable().filter_map(|(i, w)| Some((i, last(w)?))).max_by_key(|(_, at)| *at) {
+            return Some((i, Pick::ShowedLast));
+        }
+    }
+    if let Some((i, _)) = readable().find(|(_, w)| w.host == host) {
+        return Some((i, Pick::OnHost));
+    }
+    (!windows.is_empty()).then_some((0, Pick::Frontmost))
 }
 
 /// The frontmost of the windows (front to back: each one's host and shown
@@ -665,14 +702,43 @@ mod tests {
 
     #[test]
     fn a_notification_opens_in_the_window_showing_its_session() {
-        let w = |host, session: &str| Some((host, Some(session.to_owned())));
-        let windows = [w(0, "a"), w(0, "b"), w(1, "b")];
-        assert_eq!(reveal_window(&windows, 0, Some("b")), Some(1), "behind the frontmost, it still shows b");
-        assert_eq!(reveal_window(&windows, 1, Some("b")), Some(2), "same session id, other host");
-        assert_eq!(reveal_window(&windows, 0, Some("c")), Some(0), "no window shows it: the frontmost");
-        assert_eq!(reveal_window(&windows, 1, None), Some(2), "a host's notification: a window on that host");
-        assert_eq!(reveal_window(&[None, w(0, "b")], 0, Some("b")), Some(1));
+        let t0 = std::time::Instant::now();
+        let at = |s: u64| t0 + std::time::Duration::from_secs(s);
+        let w = |host, session: &str, recent: &[(&str, u64)]| {
+            Some(Shows { host, session: Some(session.to_owned()), recent: recent.iter().map(|(s, t)| (host, (*s).to_owned(), at(*t))).collect() })
+        };
+        let windows = [w(0, "a", &[("a", 9)]), w(0, "b", &[("b", 9)]), w(1, "b", &[("b", 9)])];
+        assert_eq!(reveal_window(&windows, 0, Some("b")), Some((1, Pick::Showing)), "behind the frontmost, it still shows b");
+        assert_eq!(reveal_window(&windows, 1, Some("b")), Some((2, Pick::Showing)), "same session id, other host");
+        assert_eq!(reveal_window(&windows, 1, None), Some((2, Pick::OnHost)), "a host's notification: a window on that host");
+        assert_eq!(reveal_window(&[None, w(0, "b", &[])], 0, Some("b")), Some((1, Pick::Showing)));
         assert_eq!(reveal_window(&[], 0, Some("b")), None, "no window: a new one");
+        // No window shows c: the one that showed it last, not the frontmost.
+        let moved = [w(0, "a", &[("c", 2), ("a", 9)]), w(0, "b", &[("c", 5), ("b", 9)]), w(0, "d", &[("d", 9)])];
+        assert_eq!(reveal_window(&moved, 0, Some("c")), Some((1, Pick::ShowedLast)));
+        assert_eq!(reveal_window(&moved, 1, Some("c")), Some((0, Pick::Frontmost)), "c of another host: none on it");
+        // Never shown anywhere: a window on its host, else the frontmost.
+        assert_eq!(reveal_window(&windows, 1, Some("z")), Some((2, Pick::OnHost)));
+        assert_eq!(reveal_window(&windows, 7, Some("z")), Some((0, Pick::Frontmost)));
+        // A window connecting shows the session it is about to.
+        let connecting = [w(0, "a", &[]), Some(Shows { host: 0, session: Some("c".into()), recent: Vec::new() })];
+        assert_eq!(reveal_window(&connecting, 0, Some("c")), Some((1, Pick::Showing)));
+    }
+
+    #[test]
+    fn shown_sessions_are_remembered_most_recent_last() {
+        let t0 = std::time::Instant::now();
+        let mut shown = Vec::new();
+        crate::workspace::remember_shown(&mut shown, 0, "a", t0);
+        crate::workspace::remember_shown(&mut shown, 0, "b", t0 + std::time::Duration::from_secs(1));
+        crate::workspace::remember_shown(&mut shown, 0, "a", t0 + std::time::Duration::from_secs(2));
+        let order: Vec<_> = shown.iter().map(|(_, s, _)| s.as_str()).collect();
+        assert_eq!(order, ["b", "a"], "one entry per session, refreshed");
+        for i in 0..40 {
+            crate::workspace::remember_shown(&mut shown, 1, &format!("s{i}"), t0);
+        }
+        assert_eq!(shown.len(), 32, "bounded");
+        assert_eq!(shown.last().unwrap().1, "s39");
     }
 
     #[test]

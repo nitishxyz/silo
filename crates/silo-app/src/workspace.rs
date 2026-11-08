@@ -72,6 +72,10 @@ pub struct Workspace {
     pub(crate) wanted_session: Option<String>,
     /// Block to focus once the host connects (a clicked notification).
     wanted_block: Option<String>,
+    /// Sessions this window showed and when last (host, session), most
+    /// recent last: a notification for a session no window shows any more
+    /// opens in the window that showed it last (`hosts_state::reveal`).
+    pub(crate) shown: Vec<(usize, String, Instant)>,
     /// Every block's pane, of every kind (`blocks.rs`).
     pub(crate) blocks: crate::blocks::Blocks,
     /// The server's focused block of the active window, as last applied.
@@ -303,6 +307,7 @@ impl Workspace {
             divider_drag: None,
             wanted_session,
             wanted_block: None,
+            shown: Vec::new(),
             blocks: crate::blocks::Blocks::default(),
             server_focus: None,
             focus_asked: None,
@@ -936,16 +941,21 @@ impl Workspace {
     /// read through its handle (`is_own_window`). Not while drawing (see
     /// `other_windows`).
     pub(crate) fn window_sessions(&self, window: &Window, cx: &Context<Self>) -> Vec<(gpui::AnyWindowHandle, crate::hosts_state::WindowShows)> {
-        cx.window_stack()
-            .unwrap_or_else(|| cx.windows())
+        workspace_windows(cx)
             .into_iter()
-            .filter(|w| w.downcast::<Self>().is_some() && !self.is_own_window(*w, window, cx))
+            .map(|w| w.into())
+            .filter(|w: &gpui::AnyWindowHandle| !self.is_own_window(*w, window, cx))
             .map(|w| {
-                let shown =
-                    w.downcast::<Self>().and_then(|h| h.read(cx).ok()).map(|ws| (ws.active_host, ws.view.as_ref().map(|v| v.session.id.clone())));
+                let shown = w.downcast::<Self>().and_then(|h| h.read(cx).ok()).map(|ws| (ws.active_host, ws.shown_session()));
                 (w, shown)
             })
             .collect()
+    }
+
+    /// The session this window shows: its view's, else (connecting, its
+    /// view not there yet) the one it is about to show.
+    pub(crate) fn shown_session(&self) -> Option<String> {
+        self.view.as_ref().map(|v| v.session.id.clone()).or_else(|| self.wanted_session.clone())
     }
 
     pub(crate) fn active_window(&self) -> Option<&WindowInfo> {
@@ -1020,6 +1030,7 @@ impl Workspace {
             let id = view.session.id.clone();
             self.shared.update(cx, |shared, cx| shared.update_state(|s| s.last_session = Some(id), cx));
         }
+        remember_shown(&mut self.shown, self.active_host, &view.session.id, Instant::now());
         self.track_motion(&view, window, cx);
         let live = self.control().is_some();
         if live && let Some(old) = &self.view {
@@ -1881,6 +1892,32 @@ fn tab_index(index: usize, tabs: usize) -> usize {
 
 /// Bring Silo window `handle` forward and focus it, then `block` (host,
 /// session, block) in it. Deferred: not inside another window's update.
+/// Record that a window shows `session` on `host` now (most recent last,
+/// at most [`SHOWN_MAX`] kept).
+pub(crate) fn remember_shown(shown: &mut Vec<(usize, String, Instant)>, host: usize, session: &str, now: Instant) {
+    shown.retain(|(h, s, _)| !(*h == host && s == session));
+    shown.push((host, session.to_owned(), now));
+    if shown.len() > SHOWN_MAX {
+        shown.remove(0);
+    }
+}
+
+/// Sessions a window remembers having shown.
+const SHOWN_MAX: usize = 32;
+
+/// Every Silo window, front to back: the platform's window order, then any
+/// window it leaves out (gpui lists only the windows macOS orders; a
+/// window it misses must still be found).
+pub(crate) fn workspace_windows(cx: &App) -> Vec<gpui::WindowHandle<Workspace>> {
+    let mut all: Vec<_> = cx.window_stack().unwrap_or_default().into_iter().filter_map(|w| w.downcast::<Workspace>()).collect();
+    for w in cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()) {
+        if !all.iter().any(|a| a.window_id() == w.window_id()) {
+            all.push(w);
+        }
+    }
+    all
+}
+
 pub(crate) fn bring_forward(handle: gpui::AnyWindowHandle, block: Option<(usize, String, String)>, cx: &mut App) {
     cx.defer(move |cx| {
         let _ = handle.update(cx, |root, window, cx| {
