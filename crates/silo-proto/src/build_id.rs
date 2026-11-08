@@ -2,7 +2,9 @@
 //! this crate's tests.
 //!
 //! Hashed, relative to the workspace root:
-//! - the root `Cargo.toml`, `Cargo.lock` and `GHOSTTY_REV`;
+//! - the root `Cargo.toml` and `GHOSTTY_REV`, and `Cargo.lock` by its
+//!   SHA-256 (so a sandbox that hides the lockfile, as corgi's does, can
+//!   pass the digest in instead);
 //! - for every workspace member (`crates/*` with a `Cargo.toml`) except
 //!   [`EXCLUDED`]: its `Cargo.toml`, its `build.rs`, and every `*.rs`,
 //!   `*.toml`, `*.c` and `*.h` under its `src/`.
@@ -57,17 +59,28 @@ pub fn sources(root: &Path) -> std::io::Result<Sources> {
     Ok(Sources { files, dirs })
 }
 
-/// 16 hex chars of SHA-256 over each file's relative path and contents.
-pub fn hash(root: &Path, files: &[PathBuf]) -> std::io::Result<String> {
+/// 16 hex chars of SHA-256 over each file's relative path and contents
+/// (for the root `Cargo.lock`, its hex SHA-256: `lock_sha256` when given,
+/// else computed from the file).
+pub fn hash(root: &Path, files: &[PathBuf], lock_sha256: Option<&str>) -> std::io::Result<String> {
     let mut hash = Sha256::new();
     for file in files {
-        let bytes = std::fs::read(file)?;
-        hash.update(relative(root, file).as_bytes());
+        let rel = relative(root, file);
+        let bytes = match (rel.as_str(), lock_sha256) {
+            ("Cargo.lock", Some(digest)) => digest.as_bytes().to_vec(),
+            ("Cargo.lock", None) => hex(&Sha256::digest(std::fs::read(file)?)).into_bytes(),
+            _ => std::fs::read(file)?,
+        };
+        hash.update(rel.as_bytes());
         hash.update([0]);
         hash.update((bytes.len() as u64).to_le_bytes());
         hash.update(&bytes);
     }
-    Ok(hash.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hex(&hash.finalize()[..8]))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `file` relative to `root`, `/`-separated.
@@ -108,7 +121,7 @@ mod tests {
     }
 
     fn id(root: &Path) -> String {
-        hash(root, &sources(root).unwrap().files).unwrap()
+        hash(root, &sources(root).unwrap().files, None).unwrap()
     }
 
     #[test]
@@ -131,6 +144,10 @@ mod tests {
         let base = id(&root);
         assert_eq!(base.len(), 16);
         assert_eq!(id(&root), base, "deterministic");
+        // A lockfile digest passed in stands for reading the file.
+        let lock = hex(&Sha256::digest(b"lock"));
+        assert_eq!(hash(&root, &sources(&root).unwrap().files, Some(&lock)).unwrap(), base);
+        assert_ne!(hash(&root, &sources(&root).unwrap().files, Some(&hex(&Sha256::digest(b"other")))).unwrap(), base);
         let watched = sources(&root).unwrap().dirs;
         assert!(watched.contains(&root.join("crates/x/src/a")) && !watched.contains(&root.join("crates/silo-app/src")));
 
@@ -146,7 +163,9 @@ mod tests {
         assert_eq!(id(&root), base);
 
         // Real sources change it.
-        for (rel, text) in [("crates/x/src/lib.rs", "pub fn f2() {}"), ("crates/x/src/a/adapter.h", "int y;"), ("GHOSTTY_REV", "rev2")] {
+        for (rel, text) in
+            [("crates/x/src/lib.rs", "pub fn f2() {}"), ("crates/x/src/a/adapter.h", "int y;"), ("GHOSTTY_REV", "rev2"), ("Cargo.lock", "lock2")]
+        {
             write(&root, rel, text);
             let next = id(&root);
             assert_ne!(next, base, "{rel}");

@@ -92,7 +92,7 @@ async fn cost_gate() {
     }
     let (control, mut events) = Control::connect(&paths::socket(home.path()), "cost-gate").await.unwrap();
     control.subscribe().await.unwrap();
-    let repo = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let repo = "../..";
     let main: Created =
         control.call(Method::SessionCreate { name: None, spawn: SpawnSpec::default(), kind: BlockKind::Terminal, url: None }).await.unwrap();
     let cases = [

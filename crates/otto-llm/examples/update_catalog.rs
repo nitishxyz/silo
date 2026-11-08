@@ -14,7 +14,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if providers.len() != PROVIDERS.len() || providers.values().any(|p| p.models.is_empty()) {
         return Err("models.dev feed is missing supported providers or chat models".into());
     }
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/snapshot.json");
+    // `cargo run` sets CARGO_MANIFEST_DIR at run time; read it there rather
+    // than compiling in an absolute path.
+    let manifest = std::env::var_os("CARGO_MANIFEST_DIR").ok_or("run with `cargo run --example update_catalog`")?;
+    let path = std::path::Path::new(&manifest).join("catalog/snapshot.json");
     std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&providers)?))?;
     println!("Wrote {} ({} models)", path.display(), providers.values().map(|p| p.models.len()).sum::<usize>());
     Ok(())

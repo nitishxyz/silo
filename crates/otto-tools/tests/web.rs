@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn fixture(name: &str) -> String {
-    std::fs::read_to_string(format!("{}/tests/fixtures/web/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    std::fs::read_to_string(format!("tests/fixtures/web/{name}")).unwrap()
 }
 
 struct FakeRenderer {

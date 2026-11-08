@@ -139,7 +139,7 @@ pub(crate) fn wait(fd: &OwnedFd, stop: &Arc<AtomicBool>) -> Option<Option<i32>> 
 #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
 pub(crate) static INIT: unsafe extern "C" fn(c_int, *const *const c_char, *const *const c_char) = init;
 
-unsafe extern "C" fn init(argc: c_int, argv: *const *const c_char, _envp: *const *const c_char) {
+pub(crate) unsafe extern "C" fn init(argc: c_int, argv: *const *const c_char, _envp: *const *const c_char) {
     // SAFETY: the loader passes the process's argc/argv.
     unsafe {
         if argc >= 6 && !argv.is_null() && CStr::from_ptr(*argv.add(1)).to_bytes() == ARG.as_bytes() {

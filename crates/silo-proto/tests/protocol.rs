@@ -15,7 +15,9 @@ use silo_proto::{
     upload::{UploadEntry, UploadHello, Uploaded},
 };
 
-const FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/protocol.json");
+/// Relative: tests run from the package directory (cargo and corgi alike),
+/// and a compiled-in absolute path would tie the binary to one checkout.
+const FILE: &str = "protocol.json";
 
 /// Schemas without prose (doc comments may change freely), keys sorted
 /// (`serde_json` may preserve insertion order in workspace builds). Only
@@ -48,7 +50,7 @@ fn properties(value: Value) -> Value {
 /// `pub const NAME: u8 = 0x..;` of `pub mod kind` in `src/lib.rs`, up to
 /// the module's closing brace.
 fn frame_kinds() -> Map<String, Value> {
-    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs")).unwrap();
+    let source = std::fs::read_to_string("src/lib.rs").unwrap();
     let body = &source[source.find("pub mod kind {").expect("kind module")..];
     body.lines()
         .take_while(|line| *line != "}")

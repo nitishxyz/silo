@@ -18,7 +18,11 @@ async fn main() -> anyhow::Result<()> {
     let report = silo_latency::bench(&rtts, keys).await?;
     print!("{}", report.table());
     let encoded = serde_json::to_string_pretty(&report)?;
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/latency");
+    // `cargo run` sets CARGO_MANIFEST_DIR at run time; read it there rather
+    // than compiling in an absolute path. Without it, ./target.
+    let dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map_or_else(|| std::path::PathBuf::from("target"), |m| std::path::Path::new(&m).join("../../target"))
+        .join("latency");
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("report.json"), &encoded)?;
     std::fs::write(dir.join("report.md"), report.markdown())?;

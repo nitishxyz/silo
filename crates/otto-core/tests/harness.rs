@@ -955,7 +955,7 @@ async fn a_view_taken_mid_call_holds_the_input_streamed_so_far() {
 
 /// Decode a recorded Anthropic stream (otto-llm's fixtures) into the events a model returns.
 async fn anthropic_fixture(name: &str) -> Vec<StreamEvent> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../otto-llm/tests/fixtures/anthropic").join(name);
+    let path = Path::new("../otto-llm/tests/fixtures/anthropic").join(name);
     let raw = std::fs::read(path).unwrap();
     testing::collect_events(anthropic::stream::decode(testing::chunked(&raw, 3), "claude-opus-5-5")).await
 }

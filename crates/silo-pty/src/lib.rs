@@ -183,8 +183,11 @@ impl Pty {
     /// # Errors
     /// PTY allocation or spawn failures.
     pub fn spawn(config: &SpawnConfig, size: PtySize, on_exit: impl FnOnce(Option<ExitStatus>) + Send + 'static) -> io::Result<Self> {
-        // Keeps the host constructor linked into every binary that spawns.
-        std::hint::black_box(&host::INIT);
+        // Keeps the host constructor linked into every binary that spawns:
+        // `init` shares its object with `INIT`. Not `&INIT` itself: lld
+        // (corgi links with it) rejects references into __mod_init_func
+        // once it rewrites constructors to init offsets.
+        std::hint::black_box(host::init as unsafe extern "C" fn(_, _, _));
         let master = open_master()?;
         grantpt(&master).map_err(step("grantpt"))?;
         unlockpt(&master).map_err(step("unlockpt"))?;

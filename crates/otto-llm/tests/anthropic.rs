@@ -453,7 +453,7 @@ async fn live_and_optional_recording() {
         bytes.extend_from_slice(&chunk.unwrap());
     }
     if std::env::var("OTTO_RECORD").as_deref() == Ok("1") {
-        std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/anthropic/live.sse"), &bytes).unwrap();
+        std::fs::write("tests/fixtures/anthropic/live.sse", &bytes).unwrap();
     }
     let events = testing::collect_events(stream::decode(testing::chunked(&bytes, 0), req.model)).await;
     assert!(matches!(events.last(), Some(StreamEvent::Finish { .. })));

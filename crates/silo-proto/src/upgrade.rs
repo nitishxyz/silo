@@ -340,7 +340,8 @@ mod tests {
     /// `SILO_UPDATE_UPGRADE=1 cargo test -p silo-proto frozen_schema`.
     #[test]
     fn frozen_schema() {
-        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/upgrade.json");
+        // Relative to the package directory, where tests run.
+        let file = "upgrade.json";
         let current = serde_json::to_string_pretty(&upgrade_schema()).unwrap() + "\n";
         if std::env::var_os("SILO_UPDATE_UPGRADE").is_some() {
             std::fs::write(file, &current).unwrap();

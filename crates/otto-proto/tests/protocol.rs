@@ -4,7 +4,9 @@ use otto_proto::{ClientHello, Event, Frame, METHODS, PROTOCOL, RpcError, ServerH
 use schemars::schema_for;
 use serde_json::{Map, Value, json};
 
-const FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/protocol.json");
+/// Relative: tests run from the package directory (cargo and corgi alike),
+/// and a compiled-in absolute path would tie the binary to one checkout.
+const FILE: &str = "protocol.json";
 
 fn plain(value: Value) -> Value {
     match value {

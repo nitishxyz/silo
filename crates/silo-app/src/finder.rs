@@ -1227,7 +1227,7 @@ mod tests {
         assert_eq!(icons, ["file-text", "search", "layers", "laptop", "split-right", "agent", "terminal", "settings", "globe", "git-diff"]);
         for scope in CATEGORIES {
             assert!(!scope.hint().is_empty() && scope.placeholder() != PLACEHOLDER, "{scope:?}");
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/");
+            let path = "assets/icons/";
             assert!(Path::new(&format!("{path}{}.svg", scope.icon())).exists(), "{scope:?}");
         }
     }

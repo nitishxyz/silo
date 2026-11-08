@@ -1,7 +1,8 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // At run time, not env!(): see silo-proto/build.rs.
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let root = manifest.join("../..");
     let rev_file = root.join("GHOSTTY_REV");
     println!("cargo:rerun-if-changed={}", rev_file.display());

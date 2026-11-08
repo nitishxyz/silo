@@ -28,7 +28,8 @@ fn main() {
     let lib = match env::var_os("SILO_NEEDLE_LIB") {
         Some(path) => PathBuf::from(path),
         None => {
-            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            // At run time, not env!(): see silo-proto/build.rs.
+            let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR")).join("../..");
             let dir = root.join(format!("target/needle/{REV}/macos-arm64"));
             let lib = dir.join("libneedle.a");
             if sha256(&lib).as_deref() != Some(SHA256) {
