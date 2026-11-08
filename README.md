@@ -94,6 +94,8 @@ open target/debug/SiloDev.app
 
 `SiloDev` keeps its own data (`~/Library/Application Support/silo-dev`) apart from an installed Silo. Run `scripts/check.sh` before sending a change (fmt, clippy, and the tests of what changed; `--all` runs everything). Linux builds only the CLI and server; see [`packaging/linux`](packaging/linux/README.md).
 
+For faster local builds of everything but the app, [corgi](https://corgi.build) works with a machine-wide cache; see [`AGENTS.md`](AGENTS.md).
+
 <details>
 <summary>How it's put together</summary>
 
