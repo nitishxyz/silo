@@ -293,9 +293,16 @@ impl Tools {
             "files_show" => self.show(&input, anchor).await?,
             "changes_show" => self.changes_show(&input, anchor).await?,
             "terminal_close" => {
-                self.control
-                    .call_value(Method::BlockClose { block_id: self.block(&input, anchor)?, force: input["force"].as_bool().unwrap_or(false) })
-                    .await?
+                let block_id = self.block(&input, anchor)?;
+                // What it was (terminal, browser, files…), for the agent and
+                // the transcript's "Closed browser"; best effort, looked up
+                // before it is gone.
+                let kind = self.control.call::<BlockView>(Method::BlockView { block_id: block_id.clone() }).await.ok().map(|v| v.block.kind);
+                self.control.call_value(Method::BlockClose { block_id, force: input["force"].as_bool().unwrap_or(false) }).await?;
+                match kind {
+                    Some(kind) => json!({ "kind": kind }),
+                    None => json!({}),
+                }
             }
             "session_list" => self.control.call_value(Method::SessionList {}).await?,
             "notify" => {

@@ -1417,7 +1417,9 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
             Some((kind, run, done, field)) => {
                 let subject = field.and_then(|f| subject_at(input, f)).unwrap_or_default();
                 let subject = if field == Some("url") { host(&subject) } else { clip(&subject, 60) };
-                if other == "browser_navigate" && subject.is_empty() {
+                if other == "terminal_close" {
+                    (kind, run, closed_label(text), subject)
+                } else if other == "browser_navigate" && subject.is_empty() {
                     let how = ["back", "forward", "reload"].into_iter().find(|k| input[*k].as_bool() == Some(true));
                     match how {
                         Some("back") => (kind, "Going back", "Went back", subject),
@@ -1508,6 +1510,20 @@ fn with_command(command: &str, output: Option<Detail>) -> Detail {
     }
 }
 
+/// `terminal_close`'s done verb from its result's `kind`: "Closed browser",
+/// "Closed files"…; "Closed block" when the tool did not say (older silo).
+fn closed_label(result: &str) -> &'static str {
+    let kind = serde_json::from_str::<Value>(result).ok().and_then(|v| v["kind"].as_str().map(str::to_owned));
+    match kind.as_deref() {
+        Some("terminal") => "Closed terminal",
+        Some("browser") => "Closed browser",
+        Some("agent") => "Closed agent",
+        Some("files") => "Closed files",
+        Some("changes") => "Closed changes",
+        _ => "Closed block",
+    }
+}
+
 /// Silo tools: kind, running and done verbs, and the input field naming the subject.
 fn silo(name: &str) -> Option<(Kind, &'static str, &'static str, Option<&'static str>)> {
     use Kind::{Browser, Other, Terminal};
@@ -1517,7 +1533,8 @@ fn silo(name: &str) -> Option<(Kind, &'static str, &'static str, Option<&'static
         "terminal_read" => (Terminal, "Reading terminal", "Read terminal", None),
         "terminal_wait" => (Terminal, "Waiting for terminal", "Waited for terminal", None),
         "block_list" | "terminal_list" => (Terminal, "Listing blocks", "Listed blocks", None),
-        "terminal_close" => (Terminal, "Closing terminal", "Closed terminal", None),
+        // Any kind of block; the result names it (`closed_label`).
+        "terminal_close" => (Terminal, "Closing block", "Closed block", None),
         "browser_open" => (Browser, "Opening browser", "Opened browser", Some("url")),
         "browser_navigate" => (Browser, "Navigating to", "Navigated to", Some("url")),
         "browser_snapshot" => (Browser, "Reading page", "Read page", None),
@@ -2760,6 +2777,24 @@ mod tests {
         assert_eq!(line.detail, Some(Detail::Mono("$ ls\n\nout".into())));
         let line = tool("p", "shell", &json!({"command": "rm -rf build"}), None, None, &cx);
         assert_eq!((line.title.as_str(), line.status), ("Running rm -rf build", Status::Pending));
+    }
+
+    #[test]
+    fn closing_names_the_kind_of_block() {
+        let (times, jobs, files) = (Times::default(), HashMap::new(), HashMap::new());
+        let cx = Ctx { cwd: None, home: None, times: &times, now: 0, running: true, stopped: false, jobs: &jobs, files: &files, media: None };
+        let input = json!({"block_id": "b1"});
+        let live = ToolState { status: ToolStatus::Running, ..ToolState::default() };
+        assert_eq!(tool("c", "terminal_close", &input, Some(&live), None, &cx).title, "Closing block");
+        for (result, title) in [
+            (r#"{"kind":"browser"}"#, "Closed browser"),
+            (r#"{"kind":"terminal"}"#, "Closed terminal"),
+            (r#"{"kind":"files"}"#, "Closed files"),
+            // Older silo: an empty result.
+            ("{}", "Closed block"),
+        ] {
+            assert_eq!(tool("c", "terminal_close", &input, None, Some(&(result.to_owned(), false)), &cx).title, title);
+        }
     }
 
     #[test]
