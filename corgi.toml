@@ -1,0 +1,82 @@
+# corgi (https://corgi.build): cargo-compatible builds with a machine-wide
+# cache. Build scripts and tests run sandboxed: no network, a whitelist of
+# environment variables, and only the files declared here beyond each
+# package's own sources. Build scripts never see target/, .git or
+# Cargo.lock. cargo ignores this file and keeps working unchanged.
+
+# Native inputs cargo keeps under target/ (built or fetched by the build
+# scripts themselves) are staged into .corgi-inputs/ by scripts/corgi-env.sh,
+# which corgi runs outside the sandbox before building.
+[env.SILO_GHOSTTY_RUNTIME]
+command = "bash scripts/corgi-env.sh ghostty-runtime"
+packages = ["silo-vt"]
+
+[env.SILO_NEEDLE_LIB]
+command = "bash scripts/corgi-env.sh needle-lib"
+packages = ["silo-voice"]
+
+# BUILD hashes Cargo.lock (silo-proto/src/build_id.rs).
+[env.SILO_CARGO_LOCK_SHA256]
+command = "bash scripts/corgi-env.sh lock-sha256"
+packages = ["silo-proto"]
+
+[env.SILO_CHANNEL]
+inherit = true
+packages = ["silo-channel"]
+
+# CMake-built native dependencies (silo-app only: whisper through
+# silo-voice, and CEF). Sandboxed build scripts can only run pinned tools
+# (not /usr/bin/make), so cmake drives a pinned ninja. Not enough yet:
+# CMake still wants install_name_tool, which corgi's toolchain lacks, and
+# CEF_PATH points outside the workspace; silo-app builds with cargo.
+[tools.cmake]
+version = "4.4.5"
+url = "https://github.com/Kitware/CMake/releases/download/v4.4.5/cmake-4.4.5-macos-universal.tar.gz"
+sha256 = "679e77a96b9ef9484cc6c1445255fc4f84206b48a65420efbedf16bdab55fbff"
+bin = "cmake-4.4.5-macos-universal/CMake.app/Contents/bin/cmake"
+env = "CMAKE"
+command = "cmake"
+packages = ["whisper-rs-sys", "cef-dll-sys"]
+
+[tools.ninja]
+version = "1.13.2"
+url = "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-mac.zip"
+sha256 = "c99048673aa765960a99cf10c6ddb9f1fad506099ff0a0e137ad8960a88f321b"
+bin = "ninja"
+env = "NINJA"
+command = "ninja"
+packages = ["whisper-rs-sys", "cef-dll-sys"]
+
+[env.CMAKE_GENERATOR]
+command = "echo Ninja"
+packages = ["whisper-rs-sys", "cef-dll-sys"]
+
+[extra-inputs]
+silo-vt = [
+    "../../GHOSTTY_REV",
+    "src/*.c",
+    "src/*.h",
+    "../../.corgi-inputs/ghostty/runtime/silo-*",
+    "../../.corgi-inputs/ghostty/runtime/lib/libghostty-vt.a",
+    "../../.corgi-inputs/ghostty/runtime/include/**",
+]
+silo-voice = ["../../.corgi-inputs/needle/*/libneedle.a"]
+# BUILD hashes the sources of most workspace members (src/build_id.rs).
+silo-proto = [
+    "../../Cargo.toml",
+    "../../GHOSTTY_REV",
+    "../*/Cargo.toml",
+    "../*/build.rs",
+    "../*/src/**",
+    "protocol.json",
+    "upgrade.json",
+]
+silo-client = ["service/*"]
+silo-menubar = ["assets/*"]
+silo-app = ["assets/**", "src/**"]
+otto-llm = ["catalog/*.json", "tests/fixtures/**"]
+otto-media = ["tests/fixtures/**"]
+otto-proto = ["protocol.json"]
+otto-tools = ["tests/fixtures/**"]
+otto-core = ["../otto-llm/tests/fixtures/**"]
+otto-cli = ["../otto-media/tests/fixtures/**"]

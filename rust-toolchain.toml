@@ -1,0 +1,7 @@
+[toolchain]
+# An exact release: corgi (corgi.toml) requires one and builds with exactly
+# this compiler, which keeps its shared cache valid across checkouts and
+# machines. rustup (and so CI) follows it too; Homebrew's cargo ignores it.
+# Bump deliberately; `rust-version` in Cargo.toml stays the MSRV.
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
