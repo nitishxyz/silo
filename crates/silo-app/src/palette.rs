@@ -336,7 +336,7 @@ impl Workspace {
             }
             Command::NewAgent => {
                 if let Some(block) = block {
-                    self.new_agent(block, cx);
+                    self.new_agent(block, window, cx);
                 }
             }
             Command::NewFiles => {

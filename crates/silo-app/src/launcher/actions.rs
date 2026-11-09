@@ -192,7 +192,7 @@ impl Workspace {
                 match row {
                     Row::Kind(Kind::Terminal, _) => self.split_block(block, side.axis(), window, cx),
                     Row::Kind(Kind::Browser, _) => self.create_browser(method, window, cx),
-                    Row::Kind(Kind::Agent, _) => self.create_agent(method, cx),
+                    Row::Kind(Kind::Agent, _) => self.create_agent(method, window, cx),
                     Row::Kind(Kind::Files | Kind::Changes, _) | Row::Open { .. } => self.call(method),
                     Row::Path(_) => self.open_files_path(method, cx),
                     Row::Run(command) => self.launch_command(method, command, cx),

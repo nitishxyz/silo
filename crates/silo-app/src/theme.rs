@@ -588,6 +588,15 @@ pub fn success() -> u32 {
 pub fn warning() -> u32 {
     current().effective.config.palette[3]
 }
+/// Selected rows of a focused list: the accent, deep enough to stand out,
+/// muted enough that the row's own text (ink) stays readable on it, in
+/// light and dark themes alike. Not [`selection`]: that is the terminal's
+/// text highlight, often too bright behind light text.
+#[must_use]
+pub fn list_selection() -> u32 {
+    let bg = background();
+    mix(bg, accent(), if luminance(bg) > 0.5 { 0.22 } else { 0.34 })
+}
 #[must_use]
 pub fn selection() -> u32 {
     current().effective.selection

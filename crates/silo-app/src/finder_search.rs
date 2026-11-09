@@ -152,7 +152,7 @@ impl Workspace {
         let spawn = SpawnSpec { cwd: self.cwd_of(&block, cx), command: Vec::new(), size: None };
         let axis = self.auto_axis(&block);
         let agent = Some(AgentState { session_id: Some(session), title });
-        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent, ids: None }, cx);
+        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent, ids: None }, window, cx);
     }
 
     /// Show changed file `path` in Changes block `block`.

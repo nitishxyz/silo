@@ -65,6 +65,8 @@ pub struct Workspace {
     /// Terminal blocks laid out before the server made them (feature
     /// `instant_blocks`): their panes wait for the creation's ticket.
     pub(crate) pending_blocks: std::collections::HashSet<String>,
+    /// Requests about a pending block, sent once the server made it.
+    pub(crate) after_created: std::collections::HashMap<String, Vec<AfterCreated>>,
     /// Split ratios applied locally but not yet sent (window, path, ratio);
     /// `ratio_flush` sends them once resizing pauses.
     pub(crate) pending_ratios: Vec<crate::palette::PendingRatio>,
@@ -318,6 +320,7 @@ impl Workspace {
             view: None,
             ahead_of: None,
             pending_blocks: std::collections::HashSet::new(),
+            after_created: std::collections::HashMap::new(),
             pending_ratios: Vec::new(),
             ratio_flush: None,
             divider_drag: None,
@@ -1039,7 +1042,7 @@ impl Workspace {
         self.blocks.insert(block.to_owned(), crate::blocks::BlockPane::Terminal(pane), subscription);
     }
 
-    fn set_view(&mut self, view: SessionView, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn set_view(&mut self, view: SessionView, window: &mut Window, cx: &mut Context<Self>) {
         self.ahead_of = None;
         if self.view.as_ref().is_none_or(|old| old.session.id != view.session.id) {
             tracing::info!(session = %view.session.id, windows = view.session.windows.len(), "session shown");
@@ -1388,17 +1391,11 @@ impl Workspace {
         let Some(view) = &self.view else { return };
         let session_id = view.session.id.clone();
         let cwd = self.new_block_folder(window, cx);
-        if self.instant_terminal(Place::Tab, cwd.clone(), window, cx) {
-            return;
+        let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
+        let method = Method::WindowCreate { session_id, spawn, kind: BlockKind::Terminal, url: None, background: false, ids: None };
+        if let Err(method) = self.instant_block(method, window, cx) {
+            self.call(method);
         }
-        self.call(Method::WindowCreate {
-            session_id,
-            spawn: SpawnSpec { cwd, command: Vec::new(), size: None },
-            kind: BlockKind::Terminal,
-            url: None,
-            background: false,
-            ids: None,
-        });
     }
 
     pub(crate) fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
@@ -1412,47 +1409,45 @@ impl Workspace {
     pub(crate) fn split_block(&mut self, block: String, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
         let cwd = self.cwd_of(&block, cx);
         tracing::debug!(%block, ?axis, "split block");
-        if self.instant_terminal(Place::Split { block: block.clone(), axis }, cwd.clone(), window, cx) {
-            return;
+        let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
+        let method = Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Terminal, url: None, agent: None, ids: None };
+        if let Err(method) = self.instant_block(method, window, cx) {
+            self.call(method);
         }
-        self.call(Method::BlockSplit {
-            block_id: block,
-            axis,
-            spawn: SpawnSpec { cwd, command: Vec::new(), size: None },
-            kind: BlockKind::Terminal,
-            url: None,
-            agent: None,
-            ids: None,
-        });
     }
 
-    /// A new terminal (a split or a tab) shown at once: laid out locally
-    /// with ids chosen here, then made on the server, whose answer brings
-    /// the ticket the pane attaches with (feature `instant_blocks`). On a
-    /// remote host the block no longer waits a round trip to appear, and
-    /// its prompt one less. False (nothing done) where the host can't, or
-    /// for a float: the caller asks the server the old way.
-    fn instant_terminal(&mut self, place: Place, cwd: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.host_supports(silo_proto::compat::feature::INSTANT_BLOCKS) {
-            return false;
+    /// A new block (a split or a tab of a terminal or an agent) shown at
+    /// once: laid out here with ids chosen here, then made on the server
+    /// (feature `instant_blocks`), whose answer brings a terminal the
+    /// ticket it attaches with. Nothing waits on the network to appear.
+    /// `Ok(block id)`, or the method back (untouched) where the host
+    /// can't, for other kinds, or a block in a float: the caller sends it
+    /// the old way.
+    #[allow(clippy::result_large_err)] // the method handed back as is, on a cold path
+    pub(crate) fn instant_block(&mut self, method: Method, window: &mut Window, cx: &mut Context<Self>) -> Result<String, Method> {
+        let kind = match &method {
+            Method::BlockSplit { kind, ids: None, .. } | Method::WindowCreate { kind, ids: None, background: false, .. } => *kind,
+            _ => return Err(method),
+        };
+        if !matches!(kind, BlockKind::Terminal | BlockKind::Agent) || !self.host_supports(silo_proto::compat::feature::INSTANT_BLOCKS) {
+            return Err(method);
         }
-        let (Some(control), Some(old)) = (self.control(), self.view.clone()) else { return false };
+        let (Some(control), Some(old)) = (self.control(), self.view.clone()) else { return Err(method) };
         let block_id = fresh_id('b');
         let mut view = old.clone();
         let session_id = view.session.id.clone();
-        let spawn = SpawnSpec { cwd: cwd.clone(), command: Vec::new(), size: None };
-        let method = match &place {
-            Place::Split { block, axis } => {
-                let Some(w) = view.session.windows.iter_mut().find(|w| w.layout.contains(block)) else { return false };
-                if !w.layout.split(block, block_id.clone(), *axis) {
-                    return false;
-                }
+        let method = match method {
+            Method::BlockSplit { block_id: anchor, axis, spawn, kind, url, agent, .. } => {
+                let Some(w) = view.session.windows.iter_mut().find(|w| w.layout.contains(&anchor)) else {
+                    return Err(Method::BlockSplit { block_id: anchor, axis, spawn, kind, url, agent, ids: None });
+                };
+                w.layout.split(&anchor, block_id.clone(), axis);
                 w.zoomed = false;
                 w.focused.clone_from(&block_id);
                 let ids = ClientIds { block_id: block_id.clone(), window_id: None };
-                Method::BlockSplit { block_id: block.clone(), axis: *axis, spawn, kind: BlockKind::Terminal, url: None, agent: None, ids: Some(ids) }
+                Method::BlockSplit { block_id: anchor, axis, spawn, kind, url, agent, ids: Some(ids) }
             }
-            Place::Tab => {
+            Method::WindowCreate { session_id: sid, spawn, kind, url, background, .. } => {
                 let window_id = fresh_id('w');
                 view.session.windows.push(WindowInfo {
                     id: window_id.clone(),
@@ -1464,48 +1459,100 @@ impl Workspace {
                 });
                 view.session.active_window.clone_from(&window_id);
                 let ids = ClientIds { block_id: block_id.clone(), window_id: Some(window_id) };
-                Method::WindowCreate {
-                    session_id: session_id.clone(),
-                    spawn,
-                    kind: BlockKind::Terminal,
-                    url: None,
-                    background: false,
-                    ids: Some(ids),
-                }
+                Method::WindowCreate { session_id: sid, spawn, kind, url, background, ids: Some(ids) }
             }
+            other => return Err(other),
         };
-        view.blocks.push(placeholder_info(&block_id, &session_id, cwd));
+        let (cwd, agent) = match &method {
+            Method::BlockSplit { spawn, agent, .. } => (spawn.cwd.clone(), agent.clone()),
+            Method::WindowCreate { spawn, .. } => (spawn.cwd.clone(), None),
+            _ => (None, None),
+        };
+        let mut info = placeholder_info(&block_id, &session_id, cwd);
+        info.kind = kind;
+        if kind == BlockKind::Agent {
+            info.agent = Some(agent.unwrap_or_default());
+            // Its composer takes focus as soon as the pane exists (below).
+            self.composer_pending = Some(block_id.clone());
+        }
+        view.blocks.push(info);
         let base = old.session.revision;
         self.pending_blocks.insert(block_id.clone());
         self.set_view(view, window, cx);
         // Snapshots up to `base` predate the block; the server's next one has it.
         self.ahead_of = Some(base);
         cx.notify();
+        // Split off a block the server hasn't made yet: sent once it has.
+        let anchor = match &method {
+            Method::BlockSplit { block_id, .. } if self.pending_blocks.contains(block_id) => Some(block_id.clone()),
+            _ => None,
+        };
+        let id = block_id.clone();
+        let send =
+            move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| this.send_create(id, kind, method, control, old, base, window, cx);
+        match anchor {
+            Some(anchor) => self.after_created.entry(anchor).or_default().push(Box::new(send)),
+            None => send(self, window, cx),
+        }
+        Ok(block_id)
+    }
+
+    /// Make block `id` on the server (laid out already by
+    /// [`Self::instant_block`]): attach a terminal with the ticket, then
+    /// send what waited on it; undo the layout if it fails.
+    #[allow(clippy::too_many_arguments)]
+    fn send_create(
+        &mut self,
+        id: String,
+        kind: BlockKind,
+        method: Method,
+        control: Control,
+        old: SessionView,
+        base: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let task = self.rt.spawn(async move { control.call::<Created>(method).await });
         cx.spawn_in(window, async move |this, cx| {
             let created = task.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update_in(cx, |this, window, cx| {
-                this.pending_blocks.remove(&block_id);
+                this.pending_blocks.remove(&id);
+                let deferred = this.after_created.remove(&id).unwrap_or_default();
                 match created {
                     Ok(created) => {
-                        if let Some(pane) = this.blocks.terminal(&block_id).cloned() {
+                        if let Some(pane) = this.blocks.terminal(&id).cloned() {
                             pane.update(cx, |pane, cx| pane.attach_created(created.ticket.map(|t| t.ticket), cx));
+                        }
+                        for then in deferred {
+                            then(this, window, cx);
                         }
                     }
                     Err(error) => {
                         tracing::warn!("new block: {error:#}");
+                        // What waited on it is moot: it never existed.
+                        drop(deferred);
                         // Undo, unless a newer snapshot replaced the guess already.
                         if this.ahead_of == Some(base) && this.view.as_ref().is_some_and(|v| v.session.id == old.session.id) {
                             this.set_view(old, window, cx);
                         }
-                        this.flash(this.failed(&error, "Couldn't open a new terminal"), cx);
+                        let what = if kind == BlockKind::Agent { "Couldn't open an agent" } else { "Couldn't open a new terminal" };
+                        this.flash(this.failed(&error, what), cx);
                     }
                 }
                 cx.notify();
             });
         })
         .detach();
-        true
+    }
+
+    /// `method` about `block`, held until the server has made it if it is
+    /// still pending ([`Self::instant_block`]): sent at once otherwise.
+    pub(crate) fn call_for(&mut self, block: &str, method: Method) {
+        if self.pending_blocks.contains(block) {
+            self.after_created.entry(block.to_owned()).or_default().push(Box::new(move |this, _, _| this.call(method)));
+        } else {
+            self.call(method);
+        }
     }
 
     pub(crate) fn close_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2116,6 +2163,9 @@ fn session_folder(candidates: &[(String, bool)]) -> Option<String> {
     first(true).or_else(|| first(false))
 }
 
+/// What waits for a pending block to exist on the server.
+pub(crate) type AfterCreated = Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
+
 /// How often the shown connection info is read.
 const LINK_TICK: Duration = Duration::from_secs(1);
 
@@ -2128,12 +2178,6 @@ pub(crate) enum Link {
     Remote(silo_client::transport::PathInfo),
     /// Not connected (reconnecting).
     Down,
-}
-
-/// Where [`Workspace::instant_terminal`] puts a new terminal.
-enum Place {
-    Split { block: String, axis: Axis },
-    Tab,
 }
 
 /// An id in the server's format (`b`/`w` and 8 hex digits), for blocks

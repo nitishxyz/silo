@@ -143,17 +143,19 @@ impl crate::workspace::Workspace {
             match event {
                 AgentPaneEvent::Activated => this.pane_activated(block),
                 AgentPaneEvent::Session { session_id, title } => {
-                    this.call(Method::AgentSet { block_id: block, session_id: Some(session_id.clone()), title: Some(title.clone()), cwd: None });
+                    let method =
+                        Method::AgentSet { block_id: block.clone(), session_id: Some(session_id.clone()), title: Some(title.clone()), cwd: None };
+                    this.call_for(&block, method);
                 }
                 AgentPaneEvent::Project { cwd } => {
-                    this.call(Method::AgentSet { block_id: block, session_id: None, title: None, cwd: Some(cwd.clone()) });
+                    this.call_for(&block.clone(), Method::AgentSet { block_id: block, session_id: None, title: None, cwd: Some(cwd.clone()) });
                 }
                 AgentPaneEvent::Moved { cwd, session_id, title } => {
                     let (session_id, title, cwd) = (Some(session_id.clone()), Some(title.clone()), Some(cwd.clone()));
-                    this.call(Method::AgentSet { block_id: block, session_id, title, cwd });
+                    this.call_for(&block.clone(), Method::AgentSet { block_id: block, session_id, title, cwd });
                 }
                 AgentPaneEvent::Status(status, summary) => {
-                    this.call(report(block, *status, summary.clone()));
+                    this.call_for(&block.clone(), report(block.clone(), *status, summary.clone()));
                     // A finished turn may have changed files: Changes blocks reviewing it list its turns again.
                     if matches!(status, AgentStatus::Done | AgentStatus::Error)
                         && let Some(session) = pane.read(cx).session().map(str::to_owned)
@@ -223,26 +225,31 @@ impl crate::workspace::Workspace {
         let axis = self.auto_axis(&block);
         // The block shows the session from its first frame.
         let agent = Some(AgentState { session_id: Some(session), title });
-        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent, ids: None }, cx);
+        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent, ids: None }, window, cx);
     }
 
     /// New Agent: an agent block beside `block` in its cwd, composer focused.
-    pub(crate) fn new_agent(&mut self, block: String, cx: &mut gpui::Context<Self>) {
+    pub(crate) fn new_agent(&mut self, block: String, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let spawn = SpawnSpec { cwd: self.cwd_of(&block, cx), command: Vec::new(), size: None };
         let axis = self.auto_axis(&block);
-        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent: None, ids: None }, cx);
+        self.create_agent(Method::BlockSplit { block_id: block, axis, spawn, kind: BlockKind::Agent, url: None, agent: None, ids: None }, window, cx);
     }
 
     /// New Agent Tab: a tab holding an agent block in the focused block's cwd.
-    pub(crate) fn new_agent_tab(&mut self, window: &gpui::Window, cx: &mut gpui::Context<Self>) {
+    pub(crate) fn new_agent_tab(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let Some(view) = &self.view else { return };
         let session_id = view.session.id.clone();
         let cwd = self.new_block_folder(window, cx);
         let spawn = SpawnSpec { cwd, command: Vec::new(), size: None };
-        self.create_agent(Method::WindowCreate { session_id, spawn, kind: BlockKind::Agent, url: None, background: false, ids: None }, cx);
+        self.create_agent(Method::WindowCreate { session_id, spawn, kind: BlockKind::Agent, url: None, background: false, ids: None }, window, cx);
     }
 
-    pub(crate) fn create_agent(&mut self, method: Method, cx: &mut gpui::Context<Self>) {
+    pub(crate) fn create_agent(&mut self, method: Method, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        // Shown at once where the host can; its composer focuses as it appears.
+        let method = match self.instant_block(method, window, cx) {
+            Ok(_) => return,
+            Err(method) => method,
+        };
         let Some(control) = self.control() else { return };
         let task = self.rt.spawn(async move { control.call::<Created>(method).await });
         cx.spawn(async move |this, cx| {

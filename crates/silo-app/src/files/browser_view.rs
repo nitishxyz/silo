@@ -342,7 +342,7 @@ impl FilesPane {
                     let row = rows[ix].clone();
                     let selected = picked.contains(&row.path);
                     let fill = if selected && focused {
-                        Some(rgb(theme::selection()))
+                        Some(rgb(theme::list_selection()))
                     } else if selected {
                         Some(theme::row_fill())
                     } else {

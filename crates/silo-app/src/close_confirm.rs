@@ -10,7 +10,7 @@
 use gpui::{AnyElement, Context, FocusHandle, FontWeight, KeyDownEvent, Window, div, prelude::*, px, rgb};
 use silo_proto::{
     control::{BusyBlock, BusyBlocks, Method, RpcError},
-    model::{BlockInfo, BlockKind},
+    model::{BlockInfo, BlockKind, SessionView},
 };
 
 use crate::{commands::Command, status::Status, theme, tooltip::Tooltip, workspace::Workspace};
@@ -182,10 +182,59 @@ impl Workspace {
             }
         }
         let host = self.active_host;
-        if !self.confirm_close() {
+        // Only a terminal runs programs a close would end: anything else
+        // closes without asking the server first.
+        let terminal = matches!(&target, CloseTarget::Pane(b) if self.block_info(b).is_none_or(|i| i.kind == BlockKind::Terminal));
+        if !self.confirm_close() || matches!(target, CloseTarget::Pane(_)) && !terminal {
             return self.send_close(host, target, true, window, cx);
         }
+        // A terminal not known to be busy closes at once: the server still
+        // refuses a busy `force: false` close, which brings the pane back
+        // with the dialog. Only a known-busy one is asked about first.
+        if let CloseTarget::Pane(block) = &target
+            && self.host_supports(silo_proto::compat::feature::STATUS)
+            && !self.block_status(block).is_some_and(|s| s.busy.is_some())
+        {
+            return self.send_close(host, target, false, window, cx);
+        }
         self.when_idle(target.clone(), window, cx, move |this, window, cx| this.send_close(host, target, false, window, cx));
+    }
+
+    /// A closing pane leaves the layout at once (its neighbours take its
+    /// room); the server's snapshot confirms it. The old view to put back
+    /// if the server refuses (busy) or fails.
+    fn close_locally(&mut self, target: &CloseTarget, window: &mut Window, cx: &mut Context<Self>) -> Option<(SessionView, u64)> {
+        let CloseTarget::Pane(block) = target else { return None };
+        let old = self.view.clone()?;
+        let mut view = old.clone();
+        let w = view.session.windows.iter_mut().find(|w| w.layout.contains(block))?;
+        let blocks = w.layout.blocks();
+        // The last block takes its tab with it, if the session has another.
+        if blocks.len() < 2 {
+            if !w.floats.is_empty() || view.session.windows.len() < 2 {
+                return None;
+            }
+            let i = view.session.windows.iter().position(|w| w.layout.contains(block))?;
+            let gone = view.session.windows.remove(i);
+            if view.session.active_window == gone.id {
+                let next = &view.session.windows[i.min(view.session.windows.len() - 1)];
+                view.session.active_window.clone_from(&next.id);
+            }
+            let base = old.session.revision;
+            self.set_view(view, window, cx);
+            self.ahead_of = Some(base);
+            return Some((old, base));
+        }
+        let i = blocks.iter().position(|b| b == block)?;
+        let next = blocks.get(i + 1).or_else(|| blocks.get(i.wrapping_sub(1)))?.clone();
+        w.layout = w.layout.clone().remove(block)?;
+        if &w.focused == block {
+            w.focused = next;
+        }
+        let base = old.session.revision;
+        self.set_view(view, window, cx);
+        self.ahead_of = Some(base);
+        Some((old, base))
     }
 
     /// Ask the server what `target` would end: the dialog if anything
@@ -235,6 +284,17 @@ impl Workspace {
             CloseTarget::Pane(_) | CloseTarget::Tab(_) | CloseTarget::Session { .. } => crate::sound::play(crate::sound::Sound::Close),
         }
         let method = target.method(force);
+        let undo = if host == self.active_host { self.close_locally(&target, window, cx) } else { None };
+        // Not on the server yet (just opened): closed once it is.
+        if let CloseTarget::Pane(block) = &target
+            && host == self.active_host
+            && self.pending_blocks.contains(block)
+        {
+            let block = block.clone();
+            self.call_for(&block, target.method(true));
+            cx.notify();
+            return;
+        }
         let task = self.rt.spawn(async move {
             let result = control.call_value(method).await;
             if let Some(paused) = paused
@@ -247,6 +307,14 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update_in(cx, |this, window, cx| {
+                // Refused or failed: the pane comes back (unless a newer snapshot came).
+                if (refused(&result).is_some() || result.is_err())
+                    && let Some((old, base)) = undo
+                    && this.ahead_of == Some(base)
+                {
+                    this.ahead_of = None;
+                    this.set_view(old, window, cx);
+                }
                 if let Some(busy) = refused(&result) {
                     if matches!(target, CloseTarget::StopServer | CloseTarget::RestartServer) {
                         this.clear_status();

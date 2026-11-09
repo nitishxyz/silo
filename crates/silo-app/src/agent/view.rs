@@ -294,14 +294,7 @@ fn chevron(open: f32, size: f32, color: u32) -> gpui::Svg {
 
 /// A centered empty state: the agent mark, a title and an optional subtitle.
 fn empty_state(title: impl Into<SharedString>, subtitle: Option<String>) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .items_center()
-        .text_center()
-        .child(icon("agent", 22.0, theme::muted()))
-        .child(div().mt(px(10.0)).text_size(px(15.0)).font_weight(FontWeight::MEDIUM).child(title.into()))
-        .children(subtitle.map(|s| div().mt(px(6.0)).text_size(px(12.5)).text_color(rgb(theme::muted())).child(s)))
+    crate::block_state::view("agent", title, subtitle)
 }
 
 /// A muted note under a popover's list.

@@ -209,6 +209,9 @@ pub struct Pane {
     active: bool,
     attempt: u64,
     stream_task: Option<Task<()>>,
+    /// Has had something on screen (a cached mirror, or an attach): until
+    /// then its state shows in the middle (`blank`).
+    shown: bool,
     /// The block's finished commands with a non-zero exit, by index: their
     /// D rows get the gutter tick.
     failed: std::collections::BTreeMap<u64, CommandRecord>,
@@ -275,6 +278,7 @@ impl Pane {
             cx.notify();
         })
         .detach();
+        let shown = restored.is_some();
         let mut mirror = restored.unwrap_or_default();
         mirror.set_local_config(theme::terminal_config());
         let cell = CellMetrics::for_window(window).grid(1.0, 1.0);
@@ -331,6 +335,7 @@ impl Pane {
             active: false,
             attempt: 0,
             stream_task: None,
+            shown,
             failed: std::collections::BTreeMap::new(),
             last_command: None,
             hovered_command: None,
@@ -559,6 +564,7 @@ impl Pane {
         self.predictor.begin(&stream.welcome);
         self.sender = Some(stream.sender());
         self.status = Status::Live;
+        self.shown = true;
         self.send_config();
         self.send_size();
         self.own_requested = None;
@@ -640,14 +646,21 @@ impl Pane {
         true
     }
 
-    /// Failed commands' D rows in the viewport.
+    /// Failed commands' rows in the viewport: the last line the command
+    /// left (its error, or the command itself when it printed nothing),
+    /// not its D mark, which sits on the next prompt's line.
     fn failed_rows(&mut self) -> Vec<(u64, u16)> {
         if self.failed.is_empty() {
             return Vec::new();
         }
         let mut marks = self.mirror.command_marks();
         marks.retain(|(record, _)| self.failed.contains_key(record));
-        marks
+        if marks.is_empty() {
+            return marks;
+        }
+        let screen = self.mirror.screen_text();
+        let lines: Vec<&str> = screen.split('\n').collect();
+        marks.into_iter().filter_map(|(record, y)| last_line_above(&lines, y).map(|row| (record, row))).collect()
     }
 
     /// Track the pointer over the gutter ticks.
@@ -1749,9 +1762,17 @@ impl Pane {
         }
         match &self.status {
             Status::Live => None,
+            // Nothing on screen yet: the centered state says it instead.
+            Status::Connecting if self.blank() => None,
             Status::Connecting => Some("attaching…".into()),
             Status::Lost => Some("reconnecting…".into()),
         }
+    }
+
+    /// Connecting with nothing to show (a new block, a first attach): the
+    /// pane's middle says so, like any block's state.
+    fn blank(&self) -> bool {
+        !self.shown
     }
 
     fn lifecycle_text(&self) -> Option<String> {
@@ -1767,6 +1788,12 @@ impl Pane {
             && self.info.as_ref().is_some_and(|i| i.owner.is_some())
             && !self.is_owner()
     }
+}
+
+/// The last non-blank viewport row above `y` (a D mark's row), skipping
+/// the blank lines a prompt may print first; None when it is out of view.
+fn last_line_above(lines: &[&str], y: u16) -> Option<u16> {
+    (0..y).rev().find(|&row| lines.get(usize::from(row)).is_some_and(|l| !l.trim().is_empty()))
 }
 
 fn send_frames(block: &str, sender: &DataSender, frames: Vec<ClientData>) {
@@ -1839,6 +1866,7 @@ impl Render for Pane {
         let selection = rgb(theme::selection()).opacity(0.55);
         let status = self.status_text();
         let lifecycle = self.lifecycle_text();
+        let attaching = self.status == Status::Connecting && self.blank() && self.control.as_ref().is_some_and(|c| !c.is_closed());
         let sized_elsewhere = self.sized_elsewhere();
         // A view link never owns the size.
         let can_size =
@@ -2019,6 +2047,13 @@ impl Render for Pane {
                             this.drop_paths(paths.paths().to_vec(), cx);
                         })),
                 )
+                .when(attaching, |el| {
+                    el.child(div().absolute().inset_0().flex().items_center().justify_center().child(crate::block_state::view(
+                        "terminal",
+                        "Attaching\u{2026}",
+                        self.host.clone(),
+                    )))
+                })
                 .when_some(status.filter(|_| lifecycle.is_none()), |el, text| {
                     el.child(
                         div()
@@ -2299,6 +2334,17 @@ impl EntityInputHandler for Pane {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_failed_command_is_marked_on_its_last_line() {
+        let lines = ["$ git status", "fatal: not a git repository", "$ "];
+        assert_eq!(super::last_line_above(&lines, 2), Some(1), "the error, not the next prompt");
+        let lines = ["$ git status", "fatal: nope", "", "~/term main", "$ "];
+        assert_eq!(super::last_line_above(&lines, 3), Some(1), "past a prompt's blank line");
+        assert_eq!(super::last_line_above(&["$ false", "$ "], 1), Some(0), "no output: the command line");
+        assert_eq!(super::last_line_above(&["$ "], 0), None, "above the viewport");
+    }
+
     use silo_proto::model::{BlockKind, Lifecycle, TermSize};
 
     use super::*;

@@ -256,6 +256,24 @@ where
         }
     };
     tokio::pin!(join_deadline);
+    let (slow_lane, mut slow_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, bool, Method)>();
+    let slow_worker = {
+        let (server, ctx, tx) = (server.clone(), ctx.clone(), tx.clone());
+        tokio::spawn(async move {
+            while let Some((id, approval, method)) = slow_rx.recv().await {
+                let started = std::time::Instant::now();
+                let name = silo_proto::api::method_name(&method);
+                let shutdown = matches!(method, Method::ServerShutdown { .. } | Method::ServerRestart { .. });
+                let result = run(&server, &ctx, approval, method).await;
+                if started.elapsed() > SLOW_REQUEST {
+                    tracing::info!(method = %name, ms = started.elapsed().as_millis() as u64, "slow request");
+                }
+                let done = result.is_ok();
+                respond(&tx, id, result);
+                after(&server, shutdown && done);
+            }
+        })
+    };
     let result = loop {
         tokio::select! {
             frame = frames.recv() => {
@@ -323,20 +341,25 @@ where
                     });
                     continue;
                 }
+                // Disk, git, the app or a human may take seconds: they queue
+                // in their own lane (in order among themselves), so creating,
+                // closing and laying out blocks never waits behind them.
+                if gate.approval || slow(&request.method) {
+                    if slow_lane.send((id, gate.approval, request.method)).is_err() {
+                        respond(&tx, id, Err(RpcError::new("closed", "connection closing")));
+                    }
+                    continue;
+                }
                 let result = run(&server, &ctx, gate.approval, request.method).await;
                 let done = result.is_ok();
                 respond(&tx, id, result);
-                if !server.registry.lock().unwrap().gone.is_empty() {
-                    server.settle_grants();
-                }
-                if shutdown && done {
-                    server.shutdown.notify_one();
-                }
+                after(&server, shutdown && done);
             }
             _ = &mut close_rx => break Ok(()),
             () = &mut join_deadline => break Ok(()),
         }
     };
+    slow_worker.abort();
     server.registry.lock().unwrap().remove_client(client_id);
     server.stand_ins.client_gone(client_id).await;
     server.touch();
@@ -374,7 +397,118 @@ fn browser(server: &Server, block_id: &str, command: BrowserCommand) -> Result<V
     Ok(json!({}))
 }
 
+/// What follows any answered request: grants of what it closed settle,
+/// and an agreed shutdown starts.
+fn after(server: &Server, shutdown: bool) {
+    if !server.registry.lock().unwrap().gone.is_empty() {
+        server.settle_grants();
+    }
+    if shutdown {
+        server.shutdown.notify_one();
+    }
+}
+
+/// A slow-lane request taking longer than this is logged.
+const SLOW_REQUEST: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Requests that may take seconds (disk, git, a search, a probe, or
+/// waiting on the app): the connection's slow lane runs them, in order,
+/// beside everything else. Not `files.set`/`changes.set` (block state,
+/// ordered with layout) nor `app.reply` (what forwarded requests wait on).
+fn slow(method: &Method) -> bool {
+    use Method as M;
+    matches!(
+        method,
+        M::AppAppearance { .. }
+            | M::AppConnectionInfo { .. }
+            | M::AppCopy { .. }
+            | M::AppCopyOutput { .. }
+            | M::AppFullScreen { .. }
+            | M::AppHide { .. }
+            | M::AppHideOthers { .. }
+            | M::AppHostsAdd { .. }
+            | M::AppHostsList { .. }
+            | M::AppHostsRemove { .. }
+            | M::AppHostsRename { .. }
+            | M::AppJumpPrompt { .. }
+            | M::AppOpenShare { .. }
+            | M::AppPalette { .. }
+            | M::AppPaneHeaders { .. }
+            | M::AppPaste { .. }
+            | M::AppPermissionsShow { .. }
+            | M::AppQuit { .. }
+            | M::AppSelectAll { .. }
+            | M::AppSelectOutput { .. }
+            | M::AppSessionStep { .. }
+            | M::AppSettingsGet { .. }
+            | M::AppSettingsOpen { .. }
+            | M::AppSettingsOpenFile { .. }
+            | M::AppSettingsReload { .. }
+            | M::AppSettingsSet { .. }
+            | M::AppShowAll { .. }
+            | M::AppSwitcher { .. }
+            | M::AppUpdateCheck { .. }
+            | M::AppWindowClose { .. }
+            | M::AppWindowCycle { .. }
+            | M::AppWindowNew { .. }
+            | M::BlockCommands { .. }
+            | M::BrowserClick(_)
+            | M::BrowserConsole(_)
+            | M::BrowserDialog(_)
+            | M::BrowserEval(_)
+            | M::BrowserFetch(_)
+            | M::BrowserFill(_)
+            | M::BrowserFillForm(_)
+            | M::BrowserFind(_)
+            | M::BrowserHover(_)
+            | M::BrowserNetwork(_)
+            | M::BrowserPress(_)
+            | M::BrowserScreenshot(_)
+            | M::BrowserScroll(_)
+            | M::BrowserSnapshot(_)
+            | M::BrowserType(_)
+            | M::BrowserWaitFor(_)
+            | M::ChangesAbort(_)
+            | M::ChangesCommit(_)
+            | M::ChangesConflict(_)
+            | M::ChangesContinue(_)
+            | M::ChangesDiff(_)
+            | M::ChangesFetch(_)
+            | M::ChangesPr(_)
+            | M::ChangesPrCreate(_)
+            | M::ChangesPull(_)
+            | M::ChangesPush(_)
+            | M::ChangesResolve(_)
+            | M::ChangesRevert(_)
+            | M::ChangesRoot(_)
+            | M::ChangesStage(_)
+            | M::ChangesStatus(_)
+            | M::ChangesUnstage(_)
+            | M::FilesCopy(_)
+            | M::FilesCreate(_)
+            | M::FilesDiff(_)
+            | M::FilesFind(_)
+            | M::FilesGit(_)
+            | M::FilesList(_)
+            | M::FilesMkdir(_)
+            | M::FilesMove(_)
+            | M::FilesRead(_)
+            | M::FilesReadImage(_)
+            | M::FilesRename(_)
+            | M::FilesRoot(_)
+            | M::FilesSearch(_)
+            | M::FilesTrash(_)
+            | M::FilesWrite(_)
+            | M::PermissionsRequest { .. }
+            | M::SearchFiles(_)
+            | M::SearchGrep(_)
+            | M::SearchOpened(_)
+            | M::TerminalCommandOutput { .. }
+    )
+}
+
 /// A control connection's caller.
+#[derive(Clone)]
 pub struct Ctx {
     pub id: u64,
     pub principal: Principal,
