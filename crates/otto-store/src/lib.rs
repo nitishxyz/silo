@@ -484,6 +484,30 @@ impl Store {
         tool_rows(&self.connection, Some(session_id), false)
     }
 
+    /// The session's items of `role` (by the indexed column, without reading the others).
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn items_of_role(&self, session_id: &str, role: otto_llm::types::Role) -> Result<Vec<Item>> {
+        let conn = &self.connection;
+        let mut stmt = conn.prepare("SELECT json FROM items WHERE session_id=? AND role=? ORDER BY seq,item_id")?;
+        Ok(stmt
+            .query_map(params![session_id, enum_name(&role)?], |r| refs::decode(conn, &r.get::<_, String>(0)?))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every session's finished calls that started a background job (`shell` and `generate_*` calls whose output's
+    /// metadata names a `job_id`), in [`Store::tool_calls`] order: what a restart reports as stopped, found
+    /// without reading every call.
+    /// # Errors
+    /// Returns database or decoding errors.
+    pub fn job_calls(&self) -> Result<Vec<ToolCall>> {
+        let conn = &self.connection;
+        let mut stmt = conn.prepare(
+            "SELECT session_id,call_id,name,input,status,output,started_at,finished_at FROM tool_calls WHERE status='done' AND (name='shell' OR name LIKE 'generate%') AND json_extract(output,'$.metadata.job_id') IS NOT NULL ORDER BY session_id,started_at,call_id",
+        )?;
+        Ok(stmt.query_map([], |r| tool_row(conn, r))?.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The session's events of `kinds` in order, without payloads: kind, time,
     /// item id (`item_id`, else `item.id`) and call id.
     /// # Errors
@@ -966,25 +990,25 @@ fn session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
 }
 fn tool_rows(conn: &Connection, session: Option<&str>, unfinished: bool) -> Result<Vec<ToolCall>> {
     let mut stmt = conn.prepare("SELECT session_id,call_id,name,input,status,output,started_at,finished_at FROM tool_calls WHERE (?1 IS NULL OR session_id=?1) AND (NOT ?2 OR status IN ('intent','running')) ORDER BY session_id,started_at,call_id")?;
-    Ok(stmt
-        .query_map(params![session, unfinished], |r| {
-            let status: String = r.get(4)?;
-            let status = serde_json::from_value(Value::String(status))
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e)))?;
-            let output: Option<String> = r.get(5)?;
-            let output = output.map(|s| refs::decode(conn, &s)).transpose()?;
-            Ok(ToolCall {
-                session_id: r.get(0)?,
-                call_id: r.get(1)?,
-                name: r.get(2)?,
-                input: refs::decode(conn, &r.get::<_, String>(3)?)?,
-                status,
-                output,
-                started_at: r.get(6)?,
-                finished_at: r.get(7)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?)
+    Ok(stmt.query_map(params![session, unfinished], |r| tool_row(conn, r))?.collect::<rusqlite::Result<_>>()?)
+}
+/// A `tool_calls` row selected as `session_id,call_id,name,input,status,output,started_at,finished_at`.
+fn tool_row(conn: &Connection, r: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCall> {
+    let status: String = r.get(4)?;
+    let status = serde_json::from_value(Value::String(status))
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e)))?;
+    let output: Option<String> = r.get(5)?;
+    let output = output.map(|s| refs::decode(conn, &s)).transpose()?;
+    Ok(ToolCall {
+        session_id: r.get(0)?,
+        call_id: r.get(1)?,
+        name: r.get(2)?,
+        input: refs::decode(conn, &r.get::<_, String>(3)?)?,
+        status,
+        output,
+        started_at: r.get(6)?,
+        finished_at: r.get(7)?,
+    })
 }
 fn json_column<T: serde::de::DeserializeOwned>(r: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T> {
     let text: String = r.get(index)?;

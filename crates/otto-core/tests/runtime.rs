@@ -648,6 +648,9 @@ async fn all_crash_windows_reconciled_at_startup() {
             vec![Part::ToolCall { call_id: "c".into(), name: "write".into(), input: serde_json::json!({}), kind: CallKind::Function, opaque: None }],
         );
         let event = || otto_store::EventRecord { turn: 1, step: 1, kind: "test".into(), payload: serde_json::Value::Null };
+        // A crash comes mid-turn: the turn is running and the session busy.
+        store.append(&session.id, event(), otto_store::Projection::TurnStatus(otto_store::TurnStatus::Running)).unwrap();
+        store.update_session(&session.id, otto_store::SessionUpdate { status: Some("busy".into()), ..Default::default() }).unwrap();
         store.append(&session.id, event(), otto_store::Projection::PutItem(item)).unwrap();
         if point != "not_started" {
             store

@@ -854,10 +854,19 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             };
             config.services.insert("otto".into(), otto_service(config.home.clone()));
             // Replace a daemon in this otto home serving another Silo (or an
-            // older one) now, not at the first agent.
-            let silo_home = config.home.clone();
+            // older one) now, not at the first agent; a server that stays up
+            // (the app's, launchd's) also starts it now when otto has been
+            // used here, so the first agent block finds it ready instead of
+            // waiting for its start.
+            let (silo_home, otto_home) = (config.home.clone(), otto_proto::paths::home());
+            let start = idle_exit.is_none() && otto_proto::paths::db(&otto_home).exists();
             tokio::spawn(async move {
-                if let Err(error) = otto_claim(&silo_home, &otto_proto::paths::home()).await {
+                let result = if start {
+                    otto_socket(&silo_home, &otto_home).await.map(drop)
+                } else {
+                    otto_start(&silo_home, &otto_home, false).await.map(drop)
+                };
+                if let Err(error) = result {
                     tracing::warn!("otto: {error:#}");
                 }
             });
@@ -1663,8 +1672,9 @@ fn hand_back(session: String) {
 }
 
 /// The `otto` tunnel service: this silo's own otto daemon (`silo otto server
-/// --daemon`, told this server's home), started on demand in its own otto
-/// home (`otto_proto::paths::home`, one per Silo home), after [`otto_claim`].
+/// --daemon`, told this server's home), in its own otto home
+/// (`otto_proto::paths::home`, one per Silo home), after [`otto_claim`]:
+/// started with a long-lived server once otto has been used, else on demand.
 fn otto_service(silo_home: PathBuf) -> silo_server::ServiceFn {
     std::sync::Arc::new(move || {
         let silo_home = silo_home.clone();
@@ -1673,7 +1683,18 @@ fn otto_service(silo_home: PathBuf) -> silo_server::ServiceFn {
 }
 
 async fn otto_socket(silo_home: &std::path::Path, home: &std::path::Path) -> anyhow::Result<PathBuf> {
-    if !otto_claim(silo_home, home).await? {
+    otto_start(silo_home, home, true).await?;
+    Ok(otto_proto::paths::socket(home))
+}
+
+/// [`otto_claim`], then (with `start`) start the daemon unless one of ours runs.
+/// One at a time in this server: the claim at its start and the first agent's
+/// call raced, one stopping an old daemon while the other, finding none to
+/// connect to yet but its lock still held, waited out the start timeout and failed.
+async fn otto_start(silo_home: &std::path::Path, home: &std::path::Path, start: bool) -> anyhow::Result<()> {
+    static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = ONE.lock().await;
+    if !otto_claim(silo_home, home).await? && start {
         let exe = std::env::current_exe().context("locate silo executable")?;
         otto_client::ensure_started(
             home,
@@ -1687,7 +1708,7 @@ async fn otto_socket(silo_home: &std::path::Path, home: &std::path::Path) -> any
             bail!("otto here serves another Silo");
         }
     }
-    Ok(otto_proto::paths::socket(home))
+    Ok(())
 }
 
 /// Make the daemon in otto `home`, if any, this server's (at server start and
