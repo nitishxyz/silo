@@ -315,13 +315,13 @@ impl Providers {
         if !force && !self.catalog.read().unwrap_or_else(|e| e.into_inner()).needs_refresh() {
             return Ok(false);
         }
-        Catalog::refresh(HttpClient::new()?.client(), &self.state_dir)
+        let changed = Catalog::refresh(HttpClient::new()?.client(), &self.state_dir)
             .await
             .map_err(|error| LlmError::new(ErrorClass::Other, format!("catalog refresh: {error}")))?;
         let catalog = Catalog::load(Some(&self.state_dir));
         crate::catalog::install(catalog.clone());
         *self.catalog.write().unwrap_or_else(|e| e.into_inner()) = catalog;
-        Ok(true)
+        Ok(changed)
     }
 
     /// Fetch the model list of every [`REMOTE`] provider signed in with a subscription whose list

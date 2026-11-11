@@ -144,7 +144,13 @@ impl otto_core::ModelResolver for Services {
         self.models(None)
     }
     fn refresh_models(&self) -> futures::future::BoxFuture<'_, bool> {
-        Box::pin(self.providers.refresh_remote(false))
+        Box::pin(async {
+            // models.dev and the sign-in policy, when the cache is due (6 h); a failure keeps what's loaded.
+            let catalog = std::env::var_os("OTTO_SILO_OFFLINE").is_none()
+                && self.providers.refresh_catalog().await.inspect_err(|error| tracing::debug!(%error, "model catalog refresh")).unwrap_or(false);
+            let remote = self.providers.refresh_remote(false).await;
+            catalog || remote
+        })
     }
 }
 

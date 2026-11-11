@@ -23,9 +23,12 @@ pub enum AuthMode {
 }
 
 pub const SOURCE: &str = "https://models.dev/api.json";
+/// The sign-in policy (`overlay.json`) as on `main`, fetched with the feed so a new subscription model or default
+/// needs no release. Its format is shared with released builds: a breaking change moves the file.
+pub const POLICY_SOURCE: &str = "https://raw.githubusercontent.com/nitishxyz/silo/main/crates/otto-llm/catalog/overlay.json";
 pub const SNAPSHOT: &str = include_str!("../../catalog/snapshot.json");
 const OVERLAY: &str = include_str!("../../catalog/overlay.json");
-const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 /// models.dev providers otto has a transport for. Ollama and custom servers
 /// are not in models.dev; their models come from the server itself.
 pub const PROVIDERS: [&str; 10] = ["anthropic", "openai", "google", "xai", "openrouter", "deepseek", "moonshotai", "zai", "minimax", "lmstudio"];
@@ -115,6 +118,49 @@ struct Cache {
     providers: Providers,
 }
 
+/// The fetched [`POLICY_SOURCE`], as it came.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PolicyCache {
+    fetched_at: u64,
+    overlay: Value,
+}
+
+/// The providers of a fetched policy this build knows (`known`), each that parses; others keep the bundled one.
+fn policy_entries(overlay: &Value, known: impl Fn(&str) -> bool) -> BTreeMap<String, Overlay> {
+    overlay
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(id, _)| known(id))
+        .filter_map(|(id, value)| Some((id.clone(), serde_json::from_value::<Overlay>(value.clone()).ok()?)))
+        .collect()
+}
+
+/// A fetched policy worth keeping: the main providers' entries all parse.
+#[cfg(feature = "client")]
+fn valid_policy(overlay: &Value) -> bool {
+    let parsed = policy_entries(overlay, |_| true);
+    REQUIRED.iter().all(|id| parsed.contains_key(*id))
+}
+
+/// Write `value` to `dir/name` through a temporary file, so a reader never sees half of it.
+#[cfg(feature = "client")]
+fn write_atomic(dir: &Path, name: &str, value: &impl Serialize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec_pretty(value)?;
+    let temp = dir.join(format!(".{name}-{}-{}.tmp", std::process::id(), rand::random::<u64>()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, dir.join(name))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    Ok(result?)
+}
+
 #[derive(Clone, Debug)]
 pub struct Catalog {
     providers: Providers,
@@ -176,6 +222,14 @@ impl Catalog {
                 catalog.refreshed_at = UNIX_EPOCH.checked_add(Duration::from_secs(cache.refreshed_at));
             }
         }
+        // A fetched policy replaces the bundled one provider by provider, for providers this build has.
+        if let Some(policy) = cache_dir
+            .and_then(|dir| std::fs::read(dir.join("catalog/policy.json")).ok())
+            .and_then(|bytes| serde_json::from_slice::<PolicyCache>(&bytes).ok())
+        {
+            let known: Vec<String> = catalog.overlay.keys().cloned().collect();
+            catalog.overlay.extend(policy_entries(&policy.overlay, |id| known.iter().any(|k| k == id)));
+        }
         for (id, overlay) in &catalog.overlay {
             if let Some(provider) = catalog.providers.get_mut(id) {
                 provider.models.extend(overlay.manual.clone());
@@ -199,35 +253,46 @@ impl Catalog {
         self.refreshed_at.and_then(|at| at.elapsed().ok()).is_none_or(|age| age >= MAX_AGE)
     }
 
-    /// Fetch and atomically cache a trimmed feed. Does not mutate existing catalog instances.
-    /// Reload with `load` after success; failures leave the previous cache intact.
+    /// Fetch the feed and the sign-in policy and cache them atomically (the policy only when it can be read).
+    /// Does not mutate existing catalog instances: reload with `load` after success; failures leave the previous
+    /// cache intact. Returns whether either differs from what was cached.
     ///
     /// # Errors
     /// Returns network, validation, or filesystem errors; callers may ignore them and retain the loaded catalog.
     #[cfg(feature = "client")]
-    pub async fn refresh(http: &reqwest::Client, cache_dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use std::io::Write;
-        let feed = http.get(SOURCE).timeout(Duration::from_secs(60)).send().await?.error_for_status()?.json().await?;
+    pub async fn refresh(http: &reqwest::Client, cache_dir: &Path) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let policy = async {
+            let response = http.get(POLICY_SOURCE).timeout(Duration::from_secs(30)).send().await.ok()?.error_for_status().ok()?;
+            response.json::<Value>().await.ok()
+        };
+        let feed = async { http.get(SOURCE).timeout(Duration::from_secs(60)).send().await?.error_for_status()?.json::<Value>().await };
+        let (feed, policy) = futures::join!(feed, policy);
+        Self::store(cache_dir, feed?, policy)
+    }
+
+    /// Cache a fetched `feed` and `policy` (see [`Self::refresh`]); whether either changed.
+    ///
+    /// # Errors
+    /// An incomplete feed, or the cache can't be written.
+    #[cfg(feature = "client")]
+    pub fn store(cache_dir: &Path, feed: Value, policy: Option<Value>) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let providers = trim_feed(feed)?;
         if REQUIRED.iter().any(|id| providers.get(*id).is_none_or(|p| p.models.is_empty())) {
             return Err("models.dev returned an incomplete catalog".into());
         }
-        let cache = Cache { refreshed_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(), providers };
-        let bytes = serde_json::to_vec_pretty(&cache)?;
         let dir = cache_dir.join("catalog");
         std::fs::create_dir_all(&dir)?;
-        let temp = dir.join(format!(".models-{}-{}.tmp", std::process::id(), rand::random::<u64>()));
-        let result = (|| -> std::io::Result<()> {
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            std::fs::rename(&temp, dir.join("models.json"))
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temp);
+        let read = |name: &str| std::fs::read(dir.join(name)).ok();
+        let old = read("models.json").and_then(|b| serde_json::from_slice::<Cache>(&b).ok()).and_then(|c| serde_json::to_value(c.providers).ok());
+        let mut changed = old != Some(serde_json::to_value(&providers)?);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        write_atomic(&dir, "models.json", &Cache { refreshed_at: now, providers })?;
+        if let Some(overlay) = policy.filter(valid_policy) {
+            let old = read("policy.json").and_then(|b| serde_json::from_slice::<PolicyCache>(&b).ok());
+            changed |= old.is_none_or(|old| old.overlay != overlay);
+            write_atomic(&dir, "policy.json", &PolicyCache { fetched_at: now, overlay })?;
         }
-        result?;
-        Ok(())
+        Ok(changed)
     }
 
     #[must_use]

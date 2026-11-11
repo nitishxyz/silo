@@ -191,6 +191,47 @@ fn cache_precedence_overlay_and_staleness() {
 }
 
 #[test]
+fn a_fetched_policy_replaces_the_bundled_one_per_provider() {
+    let dir = TempDir::new();
+    let mut feed = snapshot();
+    let mut model = feed["openai"]["models"]["gpt-6.1-sol"].clone();
+    model["id"] = json!("gpt-future");
+    feed["openai"]["models"]["gpt-future"] = model;
+    let overlay: Value = serde_json::from_str(include_str!("../catalog/overlay.json")).unwrap();
+    assert!(Catalog::store(&dir.0, feed.clone(), Some(overlay.clone())).unwrap(), "the first fetch is a change");
+    assert!(!Catalog::store(&dir.0, feed.clone(), Some(overlay.clone())).unwrap(), "the same feed and policy again: no change");
+    assert!(!Catalog::load(Some(&dir.0)).supports("openai", "gpt-future", AuthMode::Subscription));
+
+    // `main` grants the new model to ChatGPT sign-in and makes it the default.
+    let mut policy = overlay.clone();
+    policy["openai"]["auth"]["subscription_ids"].as_array_mut().unwrap().push(json!("gpt-future"));
+    policy["openai"]["defaults"]["subscription"] = json!("gpt-future");
+    // A provider this build has no transport for, and a broken entry, are ignored.
+    policy["newco"] = json!({"name": "NewCo", "auth": {"default": ["api_key"]}, "manual": {"m": {"id": "m", "name": "M"}}});
+    policy["deepseek"] = json!({"auth": "not a policy"});
+    assert!(Catalog::store(&dir.0, feed.clone(), Some(policy)).unwrap(), "a policy change is a change");
+    let catalog = Catalog::load(Some(&dir.0));
+    assert!(catalog.supports("openai", "gpt-future", AuthMode::Subscription));
+    assert_eq!(catalog.default_model("openai", AuthMode::Subscription).as_deref(), Some("gpt-future"));
+    assert!(!catalog.providers().iter().any(|p| p.id == "newco"));
+    assert_eq!(
+        catalog.default_model("deepseek", AuthMode::ApiKey),
+        Catalog::global().default_model("deepseek", AuthMode::ApiKey),
+        "deepseek keeps the bundled policy"
+    );
+    assert!(catalog.default_model("deepseek", AuthMode::ApiKey).is_some());
+    assert_eq!(catalog.default_model("anthropic", AuthMode::ApiKey), Catalog::global().default_model("anthropic", AuthMode::ApiKey));
+
+    // A policy that can't be read is not kept: the last good one stays.
+    assert!(!Catalog::store(&dir.0, feed.clone(), Some(json!({"openai": {}}))).unwrap());
+    assert!(!Catalog::store(&dir.0, feed.clone(), None).unwrap());
+    assert!(Catalog::load(Some(&dir.0)).supports("openai", "gpt-future", AuthMode::Subscription));
+    // A changed feed is a change.
+    feed["openai"]["models"]["gpt-future"]["name"] = json!("GPT Future");
+    assert!(Catalog::store(&dir.0, feed, None).unwrap());
+}
+
+#[test]
 fn cache_merges_per_id_and_corrupt_cache_falls_back() {
     let dir = TempDir::new();
     let mut feed = snapshot();
