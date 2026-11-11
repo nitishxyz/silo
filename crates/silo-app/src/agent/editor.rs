@@ -67,6 +67,18 @@ pub struct Editor {
     /// `@` mention chips over the text: whole tokens for the caret and backspace.
     chips: Vec<Chip>,
     grow: Rc<Cell<Grow>>,
+    history: crate::undo::History<Snapshot>,
+    /// The next paint scrolls the caret into view (an edit or caret move; not a wheel scroll).
+    reveal: bool,
+}
+
+/// The editor's state for undo.
+#[derive(Clone)]
+struct Snapshot {
+    text: String,
+    chips: Vec<Chip>,
+    selection: Range<usize>,
+    reversed: bool,
 }
 
 /// The shown line count and the height it eases from.
@@ -153,7 +165,30 @@ impl Editor {
             multiline: false,
             chips: Vec::new(),
             grow: Rc::default(),
+            history: crate::undo::History::default(),
+            reveal: true,
         }
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot { text: self.text.clone(), chips: self.chips.clone(), selection: self.selection.clone(), reversed: self.reversed }
+    }
+
+    /// ⌘Z, or ⇧⌘Z (`again`).
+    fn undo(&mut self, again: bool, cx: &mut Context<Self>) {
+        if self.read_only || self.marked.is_some() {
+            return;
+        }
+        let current = self.snapshot();
+        let Some(s) = (if again { self.history.redo(current) } else { self.history.undo(current) }) else { return };
+        self.text = s.text;
+        self.chips = s.chips;
+        self.selection = s.selection.start.min(self.text.len())..s.selection.end.min(self.text.len());
+        self.reversed = s.reversed;
+        self.blink.reset();
+        self.reveal = true;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
     }
 
     /// The height is still easing to a new line count.
@@ -212,6 +247,8 @@ impl Editor {
         self.marked = None;
         self.scroll = px(0.0);
         self.hscroll = px(0.0);
+        self.history.clear();
+        self.reveal = true;
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
@@ -234,6 +271,7 @@ impl Editor {
         let spaced = self.text[range.end..].starts_with(char::is_whitespace);
         let label = format!("@{}", chip.target);
         let text = if chip.folder() || spaced { label } else { format!("{label} ") };
+        self.history.record(self.snapshot(), crate::undo::Kind::Other, Instant::now());
         self.edit(range, &text);
         let caret = if spaced && !chip.folder() { chip.range.end + 1 } else { chip.range.start + text.len() };
         self.chips.push(chip);
@@ -251,6 +289,8 @@ impl Editor {
         self.selection = offset..offset;
         self.reversed = false;
         self.blink.reset();
+        self.history.seal();
+        self.reveal = true;
         cx.emit(EditorEvent::Moved);
         cx.notify();
     }
@@ -266,6 +306,8 @@ impl Editor {
             self.selection = self.selection.end..self.selection.start;
         }
         self.blink.reset();
+        self.history.seal();
+        self.reveal = true;
         cx.emit(EditorEvent::Moved);
         cx.notify();
     }
@@ -278,6 +320,21 @@ impl Editor {
     fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
         if self.read_only {
             return;
+        }
+        // An IME composition was recorded when it began; its commit is part of that step.
+        if self.marked.is_none() {
+            use crate::undo::Kind;
+            let kind = if text.is_empty() {
+                if self.text.get(range.clone()).is_some_and(|t| t.chars().count() == 1) { Kind::Delete } else { Kind::Other }
+            } else if range.is_empty() {
+                crate::undo::typed(text)
+            } else {
+                Kind::Other
+            };
+            self.history.record(self.snapshot(), kind, Instant::now());
+            if crate::undo::ends_word(text) {
+                self.history.seal();
+            }
         }
         self.edit(range, text);
         cx.emit(EditorEvent::Changed);
@@ -300,6 +357,7 @@ impl Editor {
         self.reversed = false;
         self.marked = None;
         self.blink.reset();
+        self.reveal = true;
     }
 
     fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -400,6 +458,7 @@ impl Editor {
                     self.replace(range, "", cx);
                 }
             }
+            "z" if m.platform && !m.alt && !m.control => self.undo(m.shift, cx),
             "a" if m.control => self.go(line_start(&self.text, cursor), m.shift, cx),
             "e" if m.control => self.go(line_end(&self.text, cursor), m.shift, cx),
             "k" if m.control => {
@@ -772,10 +831,17 @@ impl Element for EditorElement {
         let (selection, scroll, hscroll, show_caret) = self.editor.update(cx, |e, cx| {
             let caret = if empty { point(px(0.0), px(0.0)) } else { layout.position(e.disp(e.cursor())) };
             let max = (layout.height() - bounds.size.height).max(px(0.0));
-            if caret.y < e.scroll {
-                e.scroll = caret.y;
-            } else if caret.y + line_height > e.scroll + bounds.size.height {
-                e.scroll = caret.y + line_height - bounds.size.height;
+            // Follow the caret after an edit or a move (through any growth), but leave a wheel
+            // scroll where it is even with the caret out of view.
+            if e.reveal {
+                if caret.y < e.scroll {
+                    e.scroll = caret.y;
+                } else if caret.y + line_height > e.scroll + bounds.size.height {
+                    e.scroll = caret.y + line_height - bounds.size.height;
+                }
+                if !e.growing(Instant::now(), reduce) {
+                    e.reveal = false;
+                }
             }
             e.scroll = e.scroll.clamp(px(0.0), max);
             // A single line keeps the caret in view sideways.
@@ -885,6 +951,10 @@ impl EntityInputHandler for Editor {
             return;
         }
         let range = range.as_ref().map(|r| self.range_from_utf16(r)).or(self.marked.clone()).unwrap_or(self.selection.clone());
+        if self.marked.is_none() {
+            self.history.record(self.snapshot(), crate::undo::Kind::Other, Instant::now());
+        }
+        self.reveal = true;
         shift(&mut self.chips, range.clone(), text);
         self.text.replace_range(range.clone(), text);
         self.marked = (!text.is_empty()).then(|| range.start..range.start + text.len());
@@ -993,6 +1063,80 @@ fn snap(chips: &[Chip], offset: usize, forward: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window with nothing but a three-line editor in it.
+    struct Host(Entity<Editor>);
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let c = gpui::black();
+            let colors = EditorColors { text: c, placeholder: c, caret: c, selection: c };
+            div().w(px(400.0)).child(Editor::element(&self.0, 3, colors, cx))
+        }
+    }
+
+    fn host(cx: &mut gpui::TestAppContext) -> (Entity<Editor>, &mut gpui::VisualTestContext) {
+        let (host, cx) = cx.add_window_view(|_, cx| Host(cx.new(|cx| Editor::new("Ask anything", cx))));
+        let editor = host.read_with(cx, |h, _| h.0.clone());
+        (editor, cx)
+    }
+
+    fn press(editor: &Entity<Editor>, keys: &str, cx: &mut gpui::VisualTestContext) {
+        for k in keys.split(' ') {
+            let event = KeyDownEvent { keystroke: gpui::Keystroke::parse(k).unwrap(), is_held: false, prefer_character_input: false };
+            assert!(editor.update(cx, |e, cx| e.key(&event, cx)), "{k} is an editing key");
+        }
+    }
+
+    #[gpui::test]
+    fn a_wheel_scroll_stays_put_until_the_caret_moves(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = host(cx);
+        let text = (1..=20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        editor.update(cx, |e, cx| e.set_text(text, cx));
+        cx.run_until_parked();
+        let (scroll, max, at) = editor.read_with(cx, |e, _| {
+            let l = e.layout.as_ref().unwrap();
+            (e.scroll, l.height() - l.bounds.size.height, l.bounds.center())
+        });
+        assert!(max > px(0.0) && scroll == max, "the caret at the end shows the last lines: {scroll:?} of {max:?}");
+        // Scroll up by the wheel: it stays there through later frames.
+        cx.simulate_event(ScrollWheelEvent { position: at, delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(1000.0))), ..Default::default() });
+        cx.run_until_parked();
+        editor.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.scroll), px(0.0), "scrolled to the top, away from the caret");
+        // Moving the caret brings it back into view.
+        press(&editor, "cmd-down", cx);
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.scroll), max);
+    }
+
+    #[gpui::test]
+    fn undo_and_redo_take_typing_a_word_at_a_time(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = host(cx);
+        editor.update_in(cx, |e, window, cx| {
+            for c in "fix the bug".chars() {
+                e.replace_text_in_range(None, &c.to_string(), window, cx);
+            }
+        });
+        press(&editor, "backspace backspace", cx);
+        assert_eq!(editor.read_with(cx, |e, _| e.text.clone()), "fix the b");
+        press(&editor, "cmd-z", cx);
+        assert_eq!(editor.read_with(cx, |e, _| e.text.clone()), "fix the bug", "both backspaces at once");
+        press(&editor, "cmd-z", cx);
+        assert_eq!(editor.read_with(cx, |e, _| e.text.clone()), "fix the ");
+        press(&editor, "cmd-z", cx);
+        assert_eq!(editor.read_with(cx, |e, _| e.text.clone()), "fix ");
+        press(&editor, "cmd-shift-z", cx);
+        assert_eq!(editor.read_with(cx, |e, _| (e.text.clone(), e.cursor())), ("fix the ".into(), 8));
+        // A new edit drops the redo; putting back a draft drops the history.
+        editor.update_in(cx, |e, window, cx| e.replace_text_in_range(None, "x", window, cx));
+        press(&editor, "cmd-shift-z", cx);
+        assert_eq!(editor.read_with(cx, |e, _| e.text.clone()), "fix the x");
+        editor.update(cx, |e, cx| e.set_text("", cx));
+        press(&editor, "cmd-z", cx);
+        assert_eq!(editor.read_with(cx, |e, _| e.text.clone()), "");
+    }
 
     #[test]
     fn caret_motion() {

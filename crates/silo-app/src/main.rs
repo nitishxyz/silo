@@ -77,6 +77,7 @@ mod text_field;
 mod theme;
 mod titlebar;
 mod tooltip;
+mod undo;
 mod updater;
 mod voice;
 mod web;

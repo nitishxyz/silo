@@ -46,6 +46,8 @@ pub struct TextField {
     pub typed: bool,
     /// Shown after the text, selected, until an edit; not part of `text`.
     completion: String,
+    /// Text and select-all before each step.
+    history: crate::undo::History<(String, bool)>,
 }
 
 /// One edit of the field's text.
@@ -96,6 +98,7 @@ impl TextField {
             submit_mods: gpui::Modifiers::default(),
             typed: false,
             completion: String::new(),
+            history: crate::undo::History::default(),
         }
     }
 
@@ -116,6 +119,7 @@ impl TextField {
     /// Make the completion part of the text.
     fn accept_completion(&mut self, cx: &mut Context<Self>) {
         let completion = std::mem::take(&mut self.completion);
+        self.history.record((self.text.clone(), self.all), crate::undo::Kind::Other, Instant::now());
         self.text.push_str(&completion);
         self.typed = false;
         cx.emit(FieldEvent::Changed(self.text.clone()));
@@ -146,6 +150,7 @@ impl TextField {
         self.text = text.into();
         self.all = false;
         self.completion.clear();
+        self.history.clear();
         self.blink.reset();
         cx.notify();
     }
@@ -154,6 +159,7 @@ impl TextField {
         self.text = text.into();
         self.all = false;
         self.completion.clear();
+        self.history.clear();
         self.typed = false;
         self.blink.reset();
         cx.emit(FieldEvent::Changed(self.text.clone()));
@@ -173,9 +179,37 @@ impl TextField {
 
     /// Apply `edit`, `typed` if it is a typed character.
     fn edit_as(&mut self, edit: Edit<'_>, typed: bool, cx: &mut Context<Self>) {
+        use crate::undo::Kind;
+        let kind = match edit {
+            _ if self.all => Kind::Other,
+            Edit::Insert(s) if typed => crate::undo::typed(s),
+            Edit::DeleteChar => Kind::Delete,
+            _ => Kind::Other,
+        };
+        let before = (self.text.clone(), self.all);
+        let ends_word = matches!(edit, Edit::Insert(s) if crate::undo::ends_word(s));
         self.completion.clear();
         self.typed = typed;
         apply(&mut self.text, &mut self.all, edit);
+        if self.text != before.0 {
+            self.history.record(before, kind, Instant::now());
+            if ends_word {
+                self.history.seal();
+            }
+        }
+        self.blink.reset();
+        cx.emit(FieldEvent::Changed(self.text.clone()));
+        cx.notify();
+    }
+
+    /// ⌘Z, or ⇧⌘Z (`again`).
+    fn undo(&mut self, again: bool, cx: &mut Context<Self>) {
+        let current = (self.text.clone(), self.all);
+        let Some((text, all)) = (if again { self.history.redo(current) } else { self.history.undo(current) }) else { return };
+        self.text = text;
+        self.all = all;
+        self.completion.clear();
+        self.typed = false;
         self.blink.reset();
         cx.emit(FieldEvent::Changed(self.text.clone()));
         cx.notify();
@@ -272,6 +306,10 @@ impl TextField {
                 return true;
             }
             _ if m.platform || m.control => {
+                if m.platform && !m.alt && !m.control && k.key == "z" {
+                    self.undo(m.shift, cx);
+                    return true;
+                }
                 if m.platform && k.key == "v" {
                     if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
                         self.edit(Edit::Insert(&text), cx);
@@ -375,6 +413,34 @@ impl Render for TextField {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn cmd_z_undoes_and_redoes(cx: &mut gpui::TestAppContext) {
+        let (field, cx) = cx.add_window_view(|_, cx| TextField::new("", cx));
+        let press = |keys: &str, cx: &mut gpui::VisualTestContext| {
+            for k in keys.split(' ') {
+                let mut keystroke = gpui::Keystroke::parse(k).unwrap();
+                if !keystroke.modifiers.modified() && keystroke.key_char.is_none() {
+                    keystroke.key_char = Some(if keystroke.key == "space" { " ".into() } else { keystroke.key.clone() });
+                }
+                let event = KeyDownEvent { keystroke, is_held: false, prefer_character_input: false };
+                field.update(cx, |f, cx| f.key(&event, cx));
+            }
+        };
+        press("m a i n space o", cx);
+        assert_eq!(field.read_with(cx, |f, _| f.text.clone()), "main o");
+        field.update(cx, |f, cx| f.select_all(cx));
+        press("backspace", cx);
+        assert_eq!(field.read_with(cx, |f, _| f.text.clone()), "");
+        press("cmd-z", cx);
+        assert_eq!(field.read_with(cx, |f, _| (f.text.clone(), f.all)), ("main o".into(), true), "the cleared text comes back selected");
+        press("cmd-z", cx);
+        assert_eq!(field.read_with(cx, |f, _| f.text.clone()), "main ");
+        press("cmd-z cmd-z", cx);
+        assert_eq!(field.read_with(cx, |f, _| f.text.clone()), "");
+        press("cmd-shift-z", cx);
+        assert_eq!(field.read_with(cx, |f, _| f.text.clone()), "main ");
+    }
 
     #[test]
     fn edits_replace_a_select_all() {
