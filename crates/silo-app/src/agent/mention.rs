@@ -268,7 +268,7 @@ pub fn paint(chips: &[Chip], pos: impl Fn(usize) -> Option<Point<Pixels>>, line_
     let tint: Hsla = rgb(self::tint()).into();
     let size = window.text_style().font_size.to_pixels(window.rem_size());
     for c in chips {
-        let (Some(a), Some(b)) = (pos(c.range.start), pos(c.range.end)) else { continue };
+        let Some((a, b)) = span(c.range.clone(), &pos) else { continue };
         let tile = (line_height - px(7.0)).min(px(15.0)).max(px(10.0));
         let top = a.y + (line_height - tile) / 2.0;
         let path = format!("icons/{}.svg", c.icon(cx));
@@ -307,6 +307,25 @@ pub fn paint(chips: &[Chip], pos: impl Fn(usize) -> Option<Point<Pixels>>, line_
     }
 }
 
+/// Where a chip's text starts and ends (`pos` as for [`paint`]). Laid-out text puts an index on a wrap at the end
+/// of the line before, so a chip the wrap put wholly on the next line would read as broken; it starts at that
+/// line's left edge (the text's, where index 0 is) instead.
+fn span(range: Range<usize>, pos: &impl Fn(usize) -> Option<Point<Pixels>>) -> Option<(Point<Pixels>, Point<Pixels>)> {
+    let (a, b) = (pos(range.start)?, pos(range.end)?);
+    // The `@` is one byte: its successor shows which line the chip's first glyph is on.
+    let a = match pos(range.start + 1) {
+        Some(next) if range.len() > 1 && next.y > a.y + px(1.0) => point(pos(0)?.x, next.y),
+        _ => a,
+    };
+    Some((a, b))
+}
+
+/// A chip's text in a bubble: laid out wider and clear, [`paint`] draws the badge in its place. Faded out, not a
+/// clear colour: gpui blends a highlight's colour over the text's, so a transparent one changes nothing.
+fn hidden() -> HighlightStyle {
+    HighlightStyle { fade_out: Some(1.0), font_weight: Some(LAYOUT_WEIGHT), ..Default::default() }
+}
+
 /// `text` with its chips inline (a sent message's bubble), `selected` (a range, its colour) highlighted; and
 /// its layout.
 pub fn inline(text: &str, chips: &[Chip], selected: Option<(Range<usize>, Hsla)>) -> (AnyElement, gpui::TextLayout) {
@@ -315,9 +334,7 @@ pub fn inline(text: &str, chips: &[Chip], selected: Option<(Range<usize>, Hsla)>
     chips.dedup_by(|b, a| b.range.start < a.range.end);
     let mut highlights = Vec::new();
     for c in &chips {
-        // Laid out wider and clear: [`paint`] draws the badge in its place.
-        let style = HighlightStyle { color: Some(gpui::transparent_black()), font_weight: Some(LAYOUT_WEIGHT), ..Default::default() };
-        highlights.push((c.range.clone(), style));
+        highlights.push((c.range.clone(), hidden()));
     }
     if let Some((range, bg)) = selected {
         highlights = super::select::overlay(highlights, range, bg);
@@ -341,6 +358,27 @@ mod tests {
 
     fn chip(at: usize, kind: MentionKind, target: &str) -> Chip {
         Chip::new(at, kind, target.into())
+    }
+
+    #[test]
+    fn a_chip_s_text_is_hidden_under_its_badge() {
+        let ink = gpui::TextStyle { color: gpui::black(), ..Default::default() };
+        assert_eq!(ink.clone().highlight(hidden()).color.a, 0.0);
+        assert_eq!(ink.clone().highlight(hidden()).font_weight, LAYOUT_WEIGHT);
+        // What it was: a clear colour blends to the text's own.
+        let clear = HighlightStyle { color: Some(gpui::transparent_black()), ..Default::default() };
+        assert_eq!(ink.highlight(clear).color.a, 1.0);
+    }
+
+    #[test]
+    fn a_chip_the_wrap_moved_to_the_next_line_is_whole_there() {
+        // Laid out from x 100, 8 px a glyph, wrapped at 10: index 10 reads as the end of the first line.
+        let pos =
+            |i: usize| Some(if i <= 10 { point(px(100.0 + 8.0 * i as f32), px(0.0)) } else { point(px(100.0 + 8.0 * (i - 10) as f32), px(20.0)) });
+        let at = |x: f32, y: f32| point(px(x), px(y));
+        assert_eq!(span(10..20, &pos), Some((at(100.0, 20.0), at(180.0, 20.0))), "starts at the second line's left edge");
+        assert_eq!(span(2..8, &pos), Some((at(116.0, 0.0), at(164.0, 0.0))));
+        assert_eq!(span(8..14, &pos), Some((at(164.0, 0.0), at(132.0, 20.0))), "one really broken keeps both ends");
     }
 
     #[test]

@@ -469,6 +469,10 @@ pub struct AgentPane {
     previews: HashSet<String>,
     /// Open `›` details' box heights as last laid out (a live window's budget makes room for exactly that).
     detail_h: std::rc::Rc<std::cell::RefCell<HashMap<String, f32>>>,
+    /// Long user messages the user expanded (shown whole), by row key.
+    users_open: HashSet<String>,
+    /// User messages laid out taller than their collapsed height (they get Show more), by row key.
+    users_tall: std::rc::Rc<std::cell::RefCell<HashSet<String>>>,
     /// Live groups' windows following their newest line (scrolled up in one, it stays put).
     live_pins: HashMap<String, scroll::Pin>,
     /// Line reveal of streaming text rows, by row key (kept until the last line faded in).
@@ -681,6 +685,8 @@ impl AgentPane {
             previews: HashSet::new(),
             live_pins: HashMap::new(),
             detail_h: std::rc::Rc::default(),
+            users_open: HashSet::new(),
+            users_tall: std::rc::Rc::default(),
             reveals: HashMap::new(),
             scroll,
             attachments: Vec::new(),
@@ -1109,6 +1115,8 @@ impl AgentPane {
         self.details.clear();
         self.previews.clear();
         self.detail_h.borrow_mut().clear();
+        self.users_open.clear();
+        self.users_tall.borrow_mut().clear();
         self.anims.clear();
         self.line_status.clear();
         self.streams.clear();

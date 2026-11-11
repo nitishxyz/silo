@@ -15,6 +15,12 @@ use crate::{
     theme::{self, Continuous as _},
 };
 
+/// A user message's line height, and the lines a long one shows until Show more.
+const USER_LINE_H: f32 = 21.0;
+pub(super) const USER_COLLAPSED_LINES: usize = 8;
+#[allow(clippy::cast_precision_loss)]
+const USER_COLLAPSED_H: f32 = USER_LINE_H * USER_COLLAPSED_LINES as f32;
+
 /// A file for the next prompt, uploaded to otto when it is sent (`attachment.put`).
 #[derive(Clone)]
 pub(super) struct Attachment {
@@ -131,8 +137,16 @@ pub(super) fn chip(thumb: Option<Arc<gpui::Image>>, mime: &str, name: String) ->
 }
 
 impl AgentPane {
+    /// Measure row `key` again (its height changed in place).
+    pub(super) fn remeasure_row(&mut self, key: &str) {
+        if let Some(ix) = self.rows.iter().position(|r| r.key() == key) {
+            self.list.remeasure_items(ix..ix + 1);
+        }
+    }
+
     /// The user's message: its files' chips, then the bubble (its mentions as chips inline), its hover
-    /// actions (Branch) to the bubble's left.
+    /// actions (Branch) to the bubble's left. A long one shows its first [`USER_COLLAPSED_LINES`] lines and
+    /// Show more.
     pub(super) fn render_user(
         &mut self,
         key: &str,
@@ -148,6 +162,8 @@ impl AgentPane {
                 chip(thumb, &f.mime, f.name.clone())
             })
             .collect();
+        let expanded = self.users_open.contains(key);
+        let tall = self.users_tall.borrow().contains(key);
         let bubble = (!text.is_empty()).then(|| {
             div()
                 .max_w(relative(0.8))
@@ -156,11 +172,59 @@ impl AgentPane {
                 .continuous(14.0)
                 .bg(rgb(ink(0.06)))
                 .text_color(rgb(ink(0.85)))
-                .line_height(px(21.0))
+                .line_height(px(USER_LINE_H))
                 .map(|el| {
                     // Selectable as the row's one leaf; mentions show as chips inline.
                     let (text_el, layout) = super::mention::inline(text, mentions, super::select::selected(super::select::USER));
-                    el.child(super::select::register(super::select::USER, 0, None, &layout, text_el))
+                    // Laid out whole, then measured: taller than the collapsed height, it gets Show more.
+                    let measure = {
+                        let (seen, key, layout, pane) = (self.users_tall.clone(), key.to_owned(), layout.clone(), cx.entity().downgrade());
+                        gpui::canvas(
+                            move |_, _, cx| {
+                                let over = f32::from(layout.bounds().size.height) > USER_COLLAPSED_H + 1.0;
+                                let changed = if over { seen.borrow_mut().insert(key.clone()) } else { seen.borrow_mut().remove(&key) };
+                                if changed {
+                                    cx.defer(move |cx| {
+                                        let _ = pane.update(cx, |this, cx| {
+                                            this.remeasure_row(&key);
+                                            cx.notify();
+                                        });
+                                    });
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_0()
+                    };
+                    el.child(
+                        div()
+                            .relative()
+                            .when(!expanded, |el| el.max_h(px(USER_COLLAPSED_H)).overflow_hidden())
+                            .child(super::select::register(super::select::USER, 0, None, &layout, text_el))
+                            .child(measure),
+                    )
+                })
+                .when(tall, |el| {
+                    let key = key.to_owned();
+                    el.child(
+                        div()
+                            .id(gpui::ElementId::Name(format!("user-more-{key}").into()))
+                            .mt(px(4.0))
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .text_color(rgb(theme::muted()))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(rgb(ink(0.85))))
+                            .child(if expanded { "Show less" } else { "Show more" })
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                if !this.users_open.remove(&key) {
+                                    this.users_open.insert(key.clone());
+                                }
+                                this.remeasure_row(&key);
+                                cx.notify();
+                            })),
+                    )
                 })
         });
         let group = gpui::SharedString::from(format!("user-{key}"));
