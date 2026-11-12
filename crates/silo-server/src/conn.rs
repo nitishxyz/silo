@@ -344,6 +344,18 @@ where
                 // Disk, git, the app or a human may take seconds: they queue
                 // in their own lane (in order among themselves), so creating,
                 // closing and laying out blocks never waits behind them.
+                // Reads go on at once, each on its own and with a deadline: one
+                // that hangs (a sleeping disk, a prompt on the host's screen)
+                // holds up nothing else, and its caller hears so.
+                if let Some(limit) = (!gate.approval).then(|| parallel(&request.method)).flatten() {
+                    let (server, ctx, tx) = (server.clone(), ctx.clone(), tx.clone());
+                    tokio::spawn(async move {
+                        let name = silo_proto::api::method_name(&request.method);
+                        let result = deadline(&name, limit, run(&server, &ctx, false, request.method)).await;
+                        respond(&tx, id, result);
+                    });
+                    continue;
+                }
                 if gate.approval || slow(&request.method) {
                     if slow_lane.send((id, gate.approval, request.method)).is_err() {
                         respond(&tx, id, Err(RpcError::new("closed", "connection closing")));
@@ -408,8 +420,73 @@ fn after(server: &Server, shutdown: bool) {
     }
 }
 
-/// A slow-lane request taking longer than this is logged.
+/// A slow-lane or parallel request taking longer than this is logged.
 const SLOW_REQUEST: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long a quick read (a listing, a file, git marks) may take.
+const READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a search over a folder may take.
+const SEARCH_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Requests that only read: run beside everything else, each on its own
+/// (their order doesn't matter), with how long they may take.
+fn parallel(method: &Method) -> Option<std::time::Duration> {
+    use Method as M;
+    match method {
+        M::FilesList(_)
+        | M::FilesRead(_)
+        | M::FilesReadImage(_)
+        | M::FilesRoot(_)
+        | M::FilesGit(_)
+        | M::FilesDiff(_)
+        | M::ChangesStatus(_)
+        | M::ChangesDiff(_)
+        | M::ChangesRoot(_)
+        | M::BlockCommands { .. }
+        | M::TerminalCommandOutput { .. } => Some(READ_LIMIT),
+        M::FilesFind(_) | M::FilesSearch(_) | M::SearchFiles(_) | M::SearchGrep(_) | M::SearchOpened(_) => Some(SEARCH_LIMIT),
+        _ => None,
+    }
+}
+
+/// `call`'s answer, or a `timeout` error once it has taken `limit`
+/// (the work itself may go on: a blocked read can't be stopped).
+async fn deadline(
+    method: &str,
+    limit: std::time::Duration,
+    call: impl std::future::Future<Output = Result<Value, RpcError>>,
+) -> Result<Value, RpcError> {
+    let started = tokio::time::Instant::now();
+    let result = tokio::time::timeout(limit, call).await.unwrap_or_else(|_| {
+        tracing::warn!(method, secs = limit.as_secs(), "request timed out");
+        Err(RpcError::new(
+            "timeout",
+            format!("{method} took longer than {} s on the host; it may be waiting on its disk or a prompt on its screen", limit.as_secs()),
+        ))
+    });
+    if started.elapsed() > SLOW_REQUEST {
+        tracing::info!(method, ms = started.elapsed().as_millis() as u64, "slow request");
+    }
+    result
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_read_that_never_ends_answers_timeout() {
+        let stuck = deadline("files.list", READ_LIMIT, std::future::pending()).await.unwrap_err();
+        assert_eq!(stuck.code, "timeout");
+        assert!(stuck.message.contains("files.list took longer than 30 s"), "{}", stuck.message);
+        assert_eq!(deadline("files.list", READ_LIMIT, async { Ok(json!([])) }).await.unwrap(), json!([]));
+        // Only reads run this way, each with its limit.
+        let list = Method::FilesList(silo_proto::control::FilesListParams { block_id: "b".into(), path: String::new() });
+        assert_eq!(parallel(&list), Some(READ_LIMIT));
+        let write = Method::FilesTrash(silo_proto::control::FilesTrashParams { block_id: "b".into(), paths: vec![] });
+        assert_eq!(parallel(&write), None);
+    }
+}
 
 /// Requests that may take seconds (disk, git, a search, a probe, or
 /// waiting on the app): the connection's slow lane runs them, in order,

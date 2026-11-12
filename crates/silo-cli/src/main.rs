@@ -3,6 +3,7 @@
 mod attach;
 mod disclaim;
 mod generated;
+mod log_cap;
 mod permissions;
 mod run;
 
@@ -665,10 +666,14 @@ fn daemonize_to(report: bool, log: Option<std::fs::File>) -> Option<std::fs::Fil
     }
 }
 
+/// The default log filter.
+const QUIET: &str = "info,fff_search=error,iroh::net_report=error";
+
 fn init_tracing() {
     // fff (search) logs every query at info and every folder outside a
-    // repo as a warning.
-    let filter = tracing_subscriber::EnvFilter::try_from_env("SILO_LOG").unwrap_or_else(|_| "info,fff_search=error".into());
+    // repo as a warning; iroh's net report warns on every probe that the
+    // address it sees varies (most NATs), filling the log.
+    let filter = tracing_subscriber::EnvFilter::try_from_env("SILO_LOG").unwrap_or_else(|_| QUIET.into());
     let _ = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stderr().is_terminal()).with_writer(std::io::stderr).try_init();
 }
 
@@ -828,6 +833,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
         Command::Server { daemon, idle_exit, takeover, adopt, relay, no_mdns, port } => {
             init_tracing();
             let home = paths::home();
+            log_cap::spawn(&home);
             let takeover = takeover || (adopt && silo_client::mismatch::server_lock_held(&home));
             tracing::info!(daemon, takeover, adopt, ?idle_exit, pid = std::process::id(), "silo server starting");
             silo_server::upgrade::clean_stale_beside_exe();

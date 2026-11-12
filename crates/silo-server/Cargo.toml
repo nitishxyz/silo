@@ -73,5 +73,9 @@ name = "app_requests"
 path = "tests/app_requests.rs"
 
 [[test]]
+name = "lanes"
+path = "tests/lanes.rs"
+
+[[test]]
 name = "tools"
 path = "tests/tools.rs"

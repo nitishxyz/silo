@@ -433,9 +433,16 @@ pub fn open_window(session: Option<(usize, String)>, cx: &mut App) -> anyhow::Re
 /// `SILO_LOG` (default `info`) with GPUI's per-face font warnings muted,
 /// unless the spec names that target itself.
 fn log_filter(spec: Option<String>) -> String {
-    const FONTS: &str = "gpui_macos::text_system";
-    let spec = spec.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "info".into());
-    if spec.contains(FONTS) { spec } else { format!("{spec},{FONTS}=error") }
+    // Fonts warn per glyph lookup; iroh's net report on every probe whose
+    // address varies (most NATs), which pushed all else out of the capped log.
+    const QUIET: [&str; 2] = ["gpui_macos::text_system", "iroh::net_report"];
+    let mut spec = spec.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "info".into());
+    for target in QUIET {
+        if !spec.contains(target) {
+            spec = format!("{spec},{target}=error");
+        }
+    }
+    spec
 }
 
 /// What a `silo://` URL opens.
