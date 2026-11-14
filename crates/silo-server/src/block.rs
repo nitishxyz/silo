@@ -2333,12 +2333,17 @@ impl Actor {
             self.driver = Some(client);
         }
         if mode == OwnMode::Take || self.owner.is_none() {
-            if self.owner != Some(client) {
-                self.owner = Some(client);
-                self.publish();
-            }
+            // The new owner and its size go out together: publishing the
+            // owner first would show it, for a moment, at the old size.
+            let changed = self.owner != Some(client);
+            self.owner = Some(client);
+            let before = self.size;
             if let Some(size) = self.desired.get(&client).map(|d| d.size) {
                 self.apply_size(size);
+            }
+            // `apply_size` publishes when the size changed.
+            if changed && self.size == before {
+                self.publish();
             }
         }
         self.reconfigure();
