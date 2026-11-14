@@ -6143,7 +6143,7 @@ dependencies = [
 
 [[package]]
 name = "otto-cli"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6175,7 +6175,7 @@ dependencies = [
 
 [[package]]
 name = "otto-client"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "otto-proto",
  "serde",
@@ -6187,7 +6187,7 @@ dependencies = [
 
 [[package]]
 name = "otto-core"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6211,7 +6211,7 @@ dependencies = [
 
 [[package]]
 name = "otto-llm"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6238,7 +6238,7 @@ dependencies = [
 
 [[package]]
 name = "otto-mcp"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6261,7 +6261,7 @@ dependencies = [
 
 [[package]]
 name = "otto-media"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6284,7 +6284,7 @@ dependencies = [
 
 [[package]]
 name = "otto-proto"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "otto-llm",
  "schemars",
@@ -6296,7 +6296,7 @@ dependencies = [
 
 [[package]]
 name = "otto-server"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "async-trait",
  "futures",
@@ -6317,7 +6317,7 @@ dependencies = [
 
 [[package]]
 name = "otto-silo-tools"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6334,7 +6334,7 @@ dependencies = [
 
 [[package]]
 name = "otto-store"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "base64 0.22.1",
  "otto-llm",
@@ -6349,7 +6349,7 @@ dependencies = [
 
 [[package]]
 name = "otto-tools"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -8112,7 +8112,7 @@ dependencies = [
 
 [[package]]
 name = "silo-app"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -8175,7 +8175,7 @@ dependencies = [
 
 [[package]]
 name = "silo-channel"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "schemars",
  "serde",
@@ -8184,7 +8184,7 @@ dependencies = [
 
 [[package]]
 name = "silo-cli"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "clap",
@@ -8210,7 +8210,7 @@ dependencies = [
 
 [[package]]
 name = "silo-client"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -8232,7 +8232,7 @@ dependencies = [
 
 [[package]]
 name = "silo-latency"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "rand 0.9.5",
@@ -8247,7 +8247,7 @@ dependencies = [
 
 [[package]]
 name = "silo-menubar"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "objc2 0.6.5",
@@ -8263,7 +8263,7 @@ dependencies = [
 
 [[package]]
 name = "silo-proto"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "data-encoding",
  "iroh",
@@ -8280,7 +8280,7 @@ dependencies = [
 
 [[package]]
 name = "silo-pty"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "libc",
  "rustix 1.1.5",
@@ -8288,7 +8288,7 @@ dependencies = [
 
 [[package]]
 name = "silo-render"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "gpui",
  "silo-vt",
@@ -8296,7 +8296,7 @@ dependencies = [
 
 [[package]]
 name = "silo-server"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -8327,7 +8327,7 @@ dependencies = [
 
 [[package]]
 name = "silo-store"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "chacha20poly1305",
  "libc",
@@ -8337,7 +8337,7 @@ dependencies = [
 
 [[package]]
 name = "silo-tools"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "regex",
@@ -8354,7 +8354,7 @@ dependencies = [
 
 [[package]]
 name = "silo-transport"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -8370,7 +8370,7 @@ dependencies = [
 
 [[package]]
 name = "silo-voice"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -8389,14 +8389,14 @@ dependencies = [
 
 [[package]]
 name = "silo-vt"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "silo-web"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "anyhow",
  "cef",
