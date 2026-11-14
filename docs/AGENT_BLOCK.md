@@ -136,7 +136,10 @@ See §8 for status.
   counts cached input; `cached` = `cache_read / (input + cache_read + cache_write)`, omitted without a hit), the
   tooltip a line per kind (input, cache read, cache write, output, reasoning, total, hit rate, cost).
 - **Approvals and questions:** a card pinned above the composer (the one other framed element), keyboard: ⏎ allow,
-  esc deny, plus "Always" when the decision supports it; questions show options + free text.
+  esc deny, plus "Always" when the decision supports it; questions show options + free text. An MCP server's
+  question (elicitation) is headed `plug MCP server · <name>` and shows its form instead: one input per field
+  (text, number, a switch, a choice row), `*` on required ones, defaults filled in, Submit (⏎, enabled once
+  required fields are set; values that do not fit show under the fields), Decline, Cancel (esc).
 - **Scroll:** follows new activity while at the bottom; scrolling up (anywhere, including into an open group) stops
   following and shows `↓ New activity`; scrolling back to the bottom or the pill resumes. Opening or closing a group
   or detail doesn't change following (at the bottom it keeps following; scrolled up, the rows above stay put). "At

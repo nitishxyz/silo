@@ -25,7 +25,7 @@ mod undo;
 mod usage;
 pub use otto_tools::attachments;
 pub use runtime::*;
-pub use session::SessionHandle;
+pub use session::{QuestionReply, SessionHandle};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

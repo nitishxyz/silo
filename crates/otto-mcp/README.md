@@ -47,8 +47,11 @@ ones. `Mcp::add`/`update`/`remove` edit the files (`settings`), keeping other ke
   (`login_complete`), finishes it. Tokens are stored in an `otto_llm` credential
   store at `token_dir` keyed by server URL, refreshed before expiry and after a `401`.
   A configured `Authorization` header disables OAuth for that server.
-- Server requests: `ping`, `roots/list` (the projects the server serves), elicitation
-  declined, sampling refused with a JSON-RPC error, others "method not found".
+- Server requests: `ping`, `roots/list` (the projects the server serves),
+  `elicitation/create` in form mode (asked through the `otto_proto::Elicitor` that
+  otto-core puts in the calling tool's `ToolCx::services`, on a task of its own;
+  declined without one, cancelled when the call ends or after 10 minutes), sampling
+  refused with a JSON-RPC error, others "method not found".
 - Resources and prompts: `mcp__<server>__list_resources`, `read_resource {uri}` and
   `get_prompt {name, arguments}` (its description lists the prompts) when the server
   declares the capability; a server tool of the same name wins.
@@ -68,7 +71,7 @@ ones. `Mcp::add`/`update`/`remove` edit the files (`settings`), keeping other ke
 
 Hand-written JSON-RPC client (protocol `2025-06-18`); the official `rmcp` SDK was
 not used because this workspace builds offline. No legacy HTTP+SSE transport, no
-sampling, elicitation always declined, prompts are a tool rather than slash commands,
+sampling, no URL-mode elicitation, prompts are a tool rather than slash commands,
 no pre-registered OAuth clients (dynamic registration only).
 
 ## Tests

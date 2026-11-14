@@ -2,6 +2,7 @@
 //! streamable HTTP ([`crate::http`]: POST with JSON or SSE responses, `Mcp-Session-Id`,
 //! the GET notification stream, OAuth).
 use crate::{config::ServerConfig, http::Http, oauth::TokenStore};
+use otto_proto::{Elicitation, Elicitor, FormReply, QuestionAction, QuestionForm};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -16,6 +17,8 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
+/// Longest otto waits for the user to answer an elicitation before cancelling it.
+pub const ELICIT_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug)]
 pub enum CallError {
@@ -61,6 +64,15 @@ pub(crate) enum Transport {
 /// Shared with the server: the folders it may work in (`roots/list`).
 pub type Roots = Arc<Mutex<BTreeSet<PathBuf>>>;
 
+/// A request in flight whose session can answer the server's questions.
+#[derive(Clone)]
+struct Asker {
+    id: u64,
+    elicitor: Arc<Elicitor>,
+    /// Cancelled when the request ends: its questions are cancelled with it.
+    done: CancellationToken,
+}
+
 pub struct Client {
     next: AtomicU64,
     pub(crate) pending: Mutex<HashMap<u64, oneshot::Sender<Reply>>>,
@@ -75,6 +87,8 @@ pub struct Client {
     pub capabilities: Mutex<Value>,
     /// Ends background readers (the HTTP notification stream).
     pub(crate) stop: CancellationToken,
+    /// Requests that can answer `elicitation/create`, oldest first.
+    askers: Mutex<Vec<Asker>>,
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -94,6 +108,7 @@ impl Client {
             hook,
             capabilities: Mutex::new(Value::Null),
             stop: CancellationToken::new(),
+            askers: Mutex::new(Vec::new()),
         })
     }
 
@@ -111,7 +126,8 @@ impl Client {
         }
     }
 
-    /// A server request's reply: `ping`, `roots/list`; sampling and elicitation are declined.
+    /// A server request's reply: `ping`, `roots/list`; sampling is refused
+    /// (elicitation is [`Client::elicit`]).
     fn answer(&self, method: &str, id: Value) -> Value {
         let result = match method {
             "ping" => json!({}),
@@ -125,7 +141,6 @@ impl Client {
                     .collect();
                 json!({"roots":roots})
             }
-            "elicitation/create" => json!({"action":"decline"}),
             "sampling/createMessage" => {
                 return json!({"jsonrpc":"2.0","id":id,"error":{"code":-1,"message":"otto does not let MCP servers use its model (sampling is not supported)"}});
             }
@@ -169,6 +184,20 @@ impl Client {
     pub(crate) fn incoming(self: &Arc<Self>, message: Value) -> futures::future::BoxFuture<'static, ()> {
         let client = self.clone();
         Box::pin(async move {
+            // Waiting for the user must not hold up the connection's other messages.
+            if message["method"] == "elicitation/create"
+                && let Some(id) = message.get("id").cloned()
+            {
+                tokio::spawn(async move {
+                    let stop = client.stop.clone();
+                    let reply = tokio::select! {
+                        reply = client.elicit(&message["params"]) => reply,
+                        () = stop.cancelled() => return,
+                    };
+                    let _ = client.send(json!({"jsonrpc":"2.0","id":id,"result":reply})).await;
+                });
+                return;
+            }
             if let Some(reply) = client.dispatch(message) {
                 let _ = client.send(reply).await;
             }
@@ -196,12 +225,59 @@ impl Client {
         }
     }
 
+    /// The answer to `elicitation/create` (form mode): the user's, through the session of
+    /// the newest request in flight that can ask (servers send no request id with it).
+    /// `decline` when nobody can answer; `cancel` when that request ends or the user
+    /// does not answer within [`ELICIT_TIMEOUT`].
+    async fn elicit(&self, params: &Value) -> Value {
+        let reply = |reply: FormReply| match reply.content.filter(|_| reply.action == QuestionAction::Accept) {
+            Some(content) => json!({"action":"accept","content":content}),
+            None => json!({"action": if reply.action == QuestionAction::Cancel { "cancel" } else { "decline" }}),
+        };
+        let asker = lock(&self.askers).last().cloned();
+        let Some(asker) = asker.filter(|_| params["mode"].as_str().is_none_or(|m| m == "form")) else {
+            tracing::debug!(server=%self.name, "MCP elicitation declined: no session to ask");
+            return reply(FormReply::decline());
+        };
+        let form = match QuestionForm::from_schema(&params["requestedSchema"]) {
+            Ok(form) => form,
+            Err(error) => {
+                tracing::debug!(server=%self.name, %error, "MCP elicitation declined: unsupported form");
+                return reply(FormReply::decline());
+            }
+        };
+        let message = params["message"].as_str().unwrap_or_default().to_owned();
+        let ask = asker.elicitor.ask(Elicitation { server: self.name.clone(), message, form });
+        reply(tokio::select! {
+            reply = ask => reply,
+            () = tokio::time::sleep(ELICIT_TIMEOUT) => FormReply::cancel(),
+            () = asker.done.cancelled() => FormReply::cancel(),
+        })
+    }
+
     /// One request; on timeout or cancel the server gets `notifications/cancelled`.
     pub async fn request(self: &Arc<Self>, method: &str, params: Value, timeout: Duration, cancel: &CancellationToken) -> Reply {
+        self.request_asking(method, params, timeout, cancel, None).await
+    }
+
+    /// [`Client::request`] whose session answers the server's elicitations meanwhile.
+    pub async fn request_asking(
+        self: &Arc<Self>,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        cancel: &CancellationToken,
+        elicitor: Option<Arc<Elicitor>>,
+    ) -> Reply {
         if !self.alive() {
             return Err(CallError::Closed("not running".into()));
         }
         let id = self.next.fetch_add(1, Ordering::SeqCst);
+        let _asking = elicitor.map(|elicitor| {
+            let done = CancellationToken::new();
+            lock(&self.askers).push(Asker { id, elicitor, done: done.clone() });
+            Asking { client: self, id, done }
+        });
         let (tx, rx) = oneshot::channel();
         lock(&self.pending).insert(id, tx);
         self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})).await?;
@@ -235,6 +311,19 @@ impl Client {
     }
 }
 
+/// Unregisters a request's [`Asker`] when it ends, cancelling its open questions.
+struct Asking<'a> {
+    client: &'a Client,
+    id: u64,
+    done: CancellationToken,
+}
+impl Drop for Asking<'_> {
+    fn drop(&mut self) {
+        self.done.cancel();
+        lock(&self.client.askers).retain(|a| a.id != self.id);
+    }
+}
+
 /// How a connection reaches the rest of otto.
 pub struct Connect {
     pub tokens: Arc<TokenStore>,
@@ -253,7 +342,8 @@ pub async fn connect(name: &str, config: &ServerConfig, cx: Connect) -> Result<A
         return Err(CallError::Closed(format!("unsupported transport {}", config.kind.as_deref().unwrap_or_default())));
     };
     let timeout = Duration::from_millis(config.startup_timeout.unwrap_or(30_000));
-    let capabilities = json!({"roots":{"listChanged":true}});
+    // Form-mode elicitation (2025-06-18 declares it as an empty object).
+    let capabilities = json!({"roots":{"listChanged":true},"elicitation":{}});
     let params =
         json!({"protocolVersion":PROTOCOL_VERSION,"capabilities":capabilities,"clientInfo":{"name":"otto","version":env!("CARGO_PKG_VERSION")}});
     match client.request("initialize", params, timeout, &CancellationToken::new()).await {

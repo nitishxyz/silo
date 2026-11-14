@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use otto_client::{Connection, SessionCreateOptions, SessionFollower, SessionMirror};
 use otto_llm::Role;
-use otto_proto::{ApprovalDecision, Delivery, InputPart, Method, Part, SessionInfo, TurnStatus};
+use otto_proto::{ApprovalDecision, Delivery, InputPart, Method, Part, QuestionAction, QuestionForm, SessionInfo, TurnStatus};
 use std::{
     collections::{HashMap, HashSet},
     io::{self, IsTerminal, Write},
@@ -260,6 +260,17 @@ async fn watch(
                 if !answered.insert(question.question_id.clone()) {
                     continue;
                 }
+                if let Some(form) = &question.form {
+                    let server = question.server.as_deref().unwrap_or("An MCP server");
+                    let (action, content) = if io::stdin().is_terminal() {
+                        fill_form(server, &question.question, form).await?
+                    } else {
+                        eprintln!("Declined {server}'s question (answering needs a TTY): {}", question.question);
+                        (QuestionAction::Decline, None)
+                    };
+                    c.question_reply(&session.id, &question.question_id, action, String::new(), content).await?;
+                    continue;
+                }
                 let answer = if io::stdin().is_terminal() {
                     crate::prompt(&format!("{} {}", question.question, question.options.join(" / ")), false).await?
                 } else {
@@ -300,6 +311,58 @@ async fn watch(
         tokio::select! {
             changed = changes.changed() => { changed?; },
             event = events.recv(), if options.json => { print_wire(&event??, &session.id)?; },
+        }
+    }
+}
+/// An MCP server's form on the terminal: accept, decline or cancel, then one prompt per
+/// field (Enter keeps the default), asked again until the values fit.
+async fn fill_form(server: &str, message: &str, form: &QuestionForm) -> Result<(QuestionAction, Option<serde_json::Map<String, serde_json::Value>>)> {
+    eprintln!("{server} asks: {message}");
+    let verb = if form.fields.is_empty() { "a=accept" } else { "a=answer" };
+    let action = match crate::prompt(&format!("[{verb} / d=decline / c=cancel]"), false).await?.to_ascii_lowercase().as_str() {
+        "a" | "y" | "yes" | "accept" | "answer" | "" => QuestionAction::Accept,
+        "d" | "n" | "no" | "decline" => QuestionAction::Decline,
+        _ => QuestionAction::Cancel,
+    };
+    if action != QuestionAction::Accept {
+        return Ok((action, None));
+    }
+    loop {
+        let mut content = serde_json::Map::new();
+        for field in &form.fields {
+            let mut label = field.label().to_owned();
+            if let Some(description) = &field.description {
+                label.push_str(&format!(" ({description})"));
+            }
+            if !field.choices.is_empty() {
+                label.push_str(&format!(" [{}]", field.choices.iter().map(|c| c.label()).collect::<Vec<_>>().join(" / ")));
+            } else if field.kind == otto_proto::FieldKind::Boolean {
+                label.push_str(" [yes / no]");
+            }
+            let default = field.default_text();
+            if !default.is_empty() {
+                label.push_str(&format!(" (default {default})"));
+            }
+            if field.required {
+                label.push('*');
+            }
+            loop {
+                let typed = crate::prompt(&label, false).await?;
+                let typed = if typed.is_empty() { default.clone() } else { typed };
+                match field.parse(&typed) {
+                    Ok(value) => {
+                        if let Some(value) = value {
+                            content.insert(field.name.clone(), value);
+                        }
+                        break;
+                    }
+                    Err(problem) => eprintln!("{problem}"),
+                }
+            }
+        }
+        match form.validate(&content) {
+            Ok(content) => return Ok((action, Some(content))),
+            Err(problem) => eprintln!("{problem}"),
         }
     }
 }

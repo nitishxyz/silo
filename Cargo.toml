@@ -29,7 +29,10 @@ gpui = { git = "https://github.com/nitishxyz/zed", rev = "ce0d2699bcdd0b4f447e66
 gpui_platform = { git = "https://github.com/nitishxyz/zed", rev = "ce0d2699bcdd0b4f447e6685376c735847898937", default-features = false, features = ["font-kit"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# "preserve_order": a JSON object keeps its keys' order in every build (form
+# fields come in a schema's order). The app's dependencies turn it on in a
+# workspace build; without it here, `-p` builds sorted keys instead.
+serde_json = { version = "1", features = ["preserve_order"] }
 schemars = "1"
 # "full": one tokio feature set for every crate, so tokio and everything
 # above it is not rebuilt per feature combination.

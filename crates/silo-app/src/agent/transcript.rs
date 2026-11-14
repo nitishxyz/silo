@@ -1777,7 +1777,10 @@ pub fn status_summary(
                 let options = q.options.iter().map(|o| o.trim()).filter(|o| !o.is_empty()).collect::<Vec<_>>();
                 if options.is_empty() { q.question.clone() } else { format!("{}\n{}", q.question.trim(), options.join(" · ")) }
             });
-            summary("Asks you", question)
+            match questions.first().and_then(|q| q.server.as_deref()) {
+                Some(server) => summary(&format!("{server} asks"), question),
+                None => summary("Asks you", question),
+            }
         }
         AgentStatus::Blocked { question: false } => match approvals.first() {
             Some(a) => {
@@ -2132,9 +2135,20 @@ mod tests {
             call_id: "c".into(),
             question: "Which model?".into(),
             options: vec!["Kling".into(), " ".into(), "Seedance".into()],
+            ..Default::default()
         };
         let asks = status_summary(AgentStatus::Blocked { question: true }, &items, &[], &[question], None);
         assert_eq!((asks.title.as_deref(), asks.message.as_deref()), (Some("Asks you"), Some("Which model? Kling · Seedance")));
+        // An MCP server's question says who asks.
+        let form = otto_proto::QuestionForm::from_schema(&json!({"properties":{"name":{"type":"string"}}})).unwrap();
+        let elicited = otto_proto::model::PendingQuestion {
+            question: "Your name?".into(),
+            server: Some("github".into()),
+            form: Some(form),
+            ..Default::default()
+        };
+        let asks = status_summary(AgentStatus::Blocked { question: true }, &items, &[], &[elicited], None);
+        assert_eq!((asks.title.as_deref(), asks.message.as_deref()), (Some("github asks"), Some("Your name?")));
         let approval = otto_proto::model::PendingApproval {
             approval_id: "a".into(),
             call_id: "c".into(),

@@ -547,6 +547,7 @@ mod tests {
             call_id: "c1".into(),
             question: "Image generation needs a provider. Connect one to continue.".into(),
             options: options.iter().map(|o| (*o).to_owned()).collect(),
+            ..Default::default()
         }
     }
 

@@ -105,6 +105,40 @@
         ],
         "type": "string"
       },
+      "FieldChoice": {
+        "properties": {
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
+      "FieldKind": {
+        "oneOf": [
+          {
+            "enum": [
+              "text",
+              "number",
+              "integer",
+              "boolean"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "choice",
+            "type": "string"
+          }
+        ]
+      },
       "ForkOrigin": {
         "properties": {
           "at_seq": {
@@ -118,6 +152,79 @@
         "required": [
           "session_id",
           "at_seq"
+        ],
+        "type": "object"
+      },
+      "FormField": {
+        "properties": {
+          "choices": {
+            "items": {
+              "$ref": "#/$defs/FieldChoice"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/$defs/FieldKind"
+          },
+          "max_length": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maximum": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "min_length": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "minimum": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "kind"
         ],
         "type": "object"
       },
@@ -833,6 +940,36 @@
       },
       "ProviderId": {
         "type": "string"
+      },
+      "QuestionAction": {
+        "oneOf": [
+          {
+            "const": "accept",
+            "type": "string"
+          },
+          {
+            "const": "decline",
+            "type": "string"
+          },
+          {
+            "const": "cancel",
+            "type": "string"
+          }
+        ]
+      },
+      "QuestionForm": {
+        "properties": {
+          "fields": {
+            "items": {
+              "$ref": "#/$defs/FormField"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "fields"
+        ],
+        "type": "object"
       },
       "QueuedInput": {
         "properties": {
@@ -1654,6 +1791,16 @@
               "call_id": {
                 "type": "string"
               },
+              "form": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/QuestionForm"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "options": {
                 "items": {
                   "type": "string"
@@ -1665,6 +1812,12 @@
               },
               "question_id": {
                 "type": "string"
+              },
+              "server": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1690,6 +1843,16 @@
         "properties": {
           "data": {
             "properties": {
+              "action": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/QuestionAction"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "answer": {
                 "type": "string"
               },
@@ -2736,6 +2899,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -3121,6 +3300,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -3595,6 +3790,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -4006,6 +4217,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -4486,6 +4713,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -4875,6 +5118,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -5270,6 +5529,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -5659,6 +5934,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -6093,6 +6384,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -6509,6 +6816,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -7074,6 +7397,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -7449,6 +7788,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -7901,6 +8256,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -8276,6 +8647,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -8720,6 +9107,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -9125,6 +9528,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -9510,6 +9929,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -9887,6 +10322,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -10300,6 +10751,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -10679,6 +11146,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -11116,6 +11599,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -11721,6 +12220,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -12310,6 +12825,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -12732,6 +13263,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -13107,6 +13654,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -13700,6 +14263,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -14082,6 +14661,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -14472,6 +15067,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -15085,6 +15696,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -15618,6 +16245,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -16093,6 +16736,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -16604,6 +17263,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -17218,6 +17893,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -17585,6 +18276,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -18030,6 +18737,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -18427,6 +19150,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -18837,6 +19576,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -18856,8 +19611,25 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/QuestionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "answer": {
             "type": "string"
+          },
+          "content": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "question_id": {
             "type": "string"
@@ -19220,6 +19992,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -19687,6 +20475,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -20054,6 +20858,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -20437,6 +21257,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -20816,6 +21652,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -21191,6 +22043,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -21948,6 +22816,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -22651,6 +23535,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -23026,6 +23926,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -23736,6 +24652,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -24134,6 +25066,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -24513,6 +25461,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -24904,6 +25868,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -25287,6 +26267,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -25666,6 +26662,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -26069,6 +27081,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -26444,6 +27472,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -27186,6 +28230,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -27327,6 +28387,40 @@
             ],
             "type": "string"
           },
+          "FieldChoice": {
+            "properties": {
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "type": "object"
+          },
+          "FieldKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "text",
+                  "number",
+                  "integer",
+                  "boolean"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "choice",
+                "type": "string"
+              }
+            ]
+          },
           "ForkOrigin": {
             "properties": {
               "at_seq": {
@@ -27340,6 +28434,79 @@
             "required": [
               "session_id",
               "at_seq"
+            ],
+            "type": "object"
+          },
+          "FormField": {
+            "properties": {
+              "choices": {
+                "items": {
+                  "$ref": "#/$defs/FieldChoice"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "format": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "$ref": "#/$defs/FieldKind"
+              },
+              "max_length": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "maximum": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "min_length": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "minimum": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "required": {
+                "type": "boolean"
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "kind"
             ],
             "type": "object"
           },
@@ -28010,6 +29177,16 @@
               "call_id": {
                 "type": "string"
               },
+              "form": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/QuestionForm"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "options": {
                 "items": {
                   "type": "string"
@@ -28021,6 +29198,12 @@
               },
               "question_id": {
                 "type": "string"
+              },
+              "server": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -28074,6 +29257,20 @@
           },
           "ProviderId": {
             "type": "string"
+          },
+          "QuestionForm": {
+            "properties": {
+              "fields": {
+                "items": {
+                  "$ref": "#/$defs/FormField"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "fields"
+            ],
+            "type": "object"
           },
           "QueuedInput": {
             "properties": {
@@ -28941,6 +30138,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -29320,6 +30533,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -29723,6 +30952,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -30117,6 +31362,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -30535,6 +31796,22 @@
               }
             ]
           },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
           "TextStyle": {
             "oneOf": [
               {
@@ -30941,6 +32218,22 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
                 "type": "string"
               }
             ]
@@ -31723,6 +33016,16 @@
                   "call_id": {
                     "type": "string"
                   },
+                  "form": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/QuestionForm"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "options": {
                     "items": {
                       "type": "string"
@@ -31734,6 +33037,12 @@
                   },
                   "question_id": {
                     "type": "string"
+                  },
+                  "server": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -31759,6 +33068,16 @@
             "properties": {
               "data": {
                 "properties": {
+                  "action": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/QuestionAction"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "answer": {
                     "type": "string"
                   },
@@ -32253,6 +33572,40 @@
           }
         ]
       },
+      "FieldChoice": {
+        "properties": {
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
+      "FieldKind": {
+        "oneOf": [
+          {
+            "enum": [
+              "text",
+              "number",
+              "integer",
+              "boolean"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "choice",
+            "type": "string"
+          }
+        ]
+      },
       "ForkOrigin": {
         "properties": {
           "at_seq": {
@@ -32266,6 +33619,79 @@
         "required": [
           "session_id",
           "at_seq"
+        ],
+        "type": "object"
+      },
+      "FormField": {
+        "properties": {
+          "choices": {
+            "items": {
+              "$ref": "#/$defs/FieldChoice"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/$defs/FieldKind"
+          },
+          "max_length": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maximum": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "min_length": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "minimum": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "kind"
         ],
         "type": "object"
       },
@@ -32981,6 +34407,36 @@
       },
       "ProviderId": {
         "type": "string"
+      },
+      "QuestionAction": {
+        "oneOf": [
+          {
+            "const": "accept",
+            "type": "string"
+          },
+          {
+            "const": "decline",
+            "type": "string"
+          },
+          {
+            "const": "cancel",
+            "type": "string"
+          }
+        ]
+      },
+      "QuestionForm": {
+        "properties": {
+          "fields": {
+            "items": {
+              "$ref": "#/$defs/FormField"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "fields"
+        ],
+        "type": "object"
       },
       "QueuedInput": {
         "properties": {
@@ -33894,6 +35350,16 @@
                   "call_id": {
                     "type": "string"
                   },
+                  "form": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/QuestionForm"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "options": {
                     "items": {
                       "type": "string"
@@ -33905,6 +35371,12 @@
                   },
                   "question_id": {
                     "type": "string"
+                  },
+                  "server": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -33930,6 +35402,16 @@
             "properties": {
               "data": {
                 "properties": {
+                  "action": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/QuestionAction"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "answer": {
                     "type": "string"
                   },

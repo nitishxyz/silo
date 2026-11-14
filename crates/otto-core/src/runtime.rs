@@ -857,6 +857,9 @@ impl Runtime {
     pub async fn answer_question(&self, id: &str, question: &str, answer: String) -> Result<()> {
         self.session(id).await?.answer_question(question, answer).await
     }
+    pub async fn reply_question(&self, id: &str, question: &str, reply: crate::QuestionReply) -> Result<()> {
+        self.session(id).await?.reply_question(question, reply).await
+    }
     pub async fn compact(&self, id: &str) -> Result<()> {
         self.session(id).await?.compact().await
     }

@@ -407,13 +407,15 @@ impl SessionMirror {
                     self.info.status = SessionStatus::Busy;
                 }
             }
-            Event::QuestionAsked { question_id, call_id, question, options } => {
+            Event::QuestionAsked { question_id, call_id, question, options, server, form } => {
                 self.pending_questions.retain(|q| q.question_id != *question_id);
                 self.pending_questions.push(PendingQuestion {
                     question_id: question_id.clone(),
                     call_id: call_id.clone(),
                     question: question.clone(),
                     options: options.clone(),
+                    server: server.clone(),
+                    form: form.clone(),
                 });
             }
             Event::QuestionResolved { question_id, .. } => self.pending_questions.retain(|q| q.question_id != *question_id),

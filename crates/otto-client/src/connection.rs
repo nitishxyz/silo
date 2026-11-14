@@ -407,7 +407,27 @@ impl Connection {
         self.call_typed(Method::ApprovalAnswer { session_id: session_id.into(), approval_id: approval_id.into(), decision, note }).await
     }
     pub async fn question_answer(&self, session_id: &str, question_id: &str, answer: String) -> Result<Empty> {
-        self.call_typed(Method::QuestionAnswer { session_id: session_id.into(), question_id: question_id.into(), answer }).await
+        self.call_typed(Method::QuestionAnswer {
+            session_id: session_id.into(),
+            question_id: question_id.into(),
+            answer,
+            action: None,
+            content: None,
+        })
+        .await
+    }
+    /// Answer a question with fields (an MCP server's form): `accept` with `content`, `decline`
+    /// or `cancel`. `answer` is the text a server without forms takes instead.
+    pub async fn question_reply(
+        &self,
+        session_id: &str,
+        question_id: &str,
+        action: QuestionAction,
+        answer: String,
+        content: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Empty> {
+        let method = Method::QuestionAnswer { session_id: session_id.into(), question_id: question_id.into(), answer, action: Some(action), content };
+        self.call_typed(method).await
     }
     pub async fn auth_status(&self) -> Result<Vec<AuthStatus>> {
         self.call_typed(Method::AuthStatus {}).await

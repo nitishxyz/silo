@@ -30,8 +30,11 @@ impl Inner {
         let id = message.get("id")?.clone();
         let params = &message["params"];
         let result = match method.as_str() {
-            "initialize" => json!({"protocolVersion":"2025-06-18","serverInfo":{"name":"fake","version":"1"},
-                "capabilities":{"tools":{"listChanged":true},"resources":{},"prompts":{}}}),
+            "initialize" => {
+                self.state().initialize = Some(params.clone());
+                json!({"protocolVersion":"2025-06-18","serverInfo":{"name":"fake","version":"1"},
+                    "capabilities":{"tools":{"listChanged":true},"resources":{},"prompts":{}}})
+            }
             "ping" => json!({}),
             "tools/list" => json!({"tools":tools(self.state().grown)}),
             "tools/call" => self.call(params).await,

@@ -167,7 +167,7 @@ pub fn examples() -> Vec<Method> {
         M::JobList { session_id: "s1".into() },
         M::JobKill { session_id: "s1".into(), job_id: "job-1".into() },
         M::ApprovalAnswer { session_id: "s1".into(), approval_id: "a1".into(), decision: ApprovalDecision::Allow, note: None },
-        M::QuestionAnswer { session_id: "s1".into(), question_id: "q1".into(), answer: "Yes".into() },
+        M::QuestionAnswer { session_id: "s1".into(), question_id: "q1".into(), answer: "Yes".into(), action: None, content: None },
         M::ModelList { provider: None },
         M::AuthStatus {},
         M::AuthLogin { provider: "openai".into(), mode: AuthMode::Subscription, api_key: None, device: true, base_url: None, paste: false },

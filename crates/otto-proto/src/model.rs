@@ -494,12 +494,19 @@ pub struct PendingApproval {
     pub effects: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PendingQuestion {
     pub question_id: String,
     pub call_id: String,
     pub question: String,
     pub options: Vec<String>,
+    /// Who asks when it is not the model: the MCP server's name (elicitation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Fields to fill in; answered with `question.answer` `action` and `content`.
+    /// Clients without forms answer with text (see `QuestionForm::text_answer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<crate::form::QuestionForm>,
 }
 
 /// A pending input. `queue.changed` and `SessionView.queue` list pending steers

@@ -37,7 +37,7 @@ pub(crate) enum Command {
     Approval(String, ApprovalDecision, Option<String>, oneshot::Sender<Result<()>>),
     Tools(oneshot::Sender<Result<Vec<ToolInfo>>>),
     SetMode(ApprovalMode, oneshot::Sender<Result<()>>),
-    Question(String, String, oneshot::Sender<Result<()>>),
+    Question(String, QuestionReply, oneshot::Sender<Result<()>>),
     Compact(oneshot::Sender<Result<()>>),
 }
 impl SessionHandle {
@@ -103,8 +103,13 @@ impl SessionHandle {
         rx.await.map_err(|_| Error::Closed)?
     }
     pub async fn answer_question(&self, id: &str, answer: String) -> Result<()> {
+        self.reply_question(id, QuestionReply { answer, ..Default::default() }).await
+    }
+    /// Answer with an action and a form's values (`question.answer` `action`/`content`);
+    /// values that do not fit the form are an error and the question stays pending.
+    pub async fn reply_question(&self, id: &str, reply: QuestionReply) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Command::Question(id.into(), answer, tx)).await.map_err(|_| Error::Closed)?;
+        self.tx.send(Command::Question(id.into(), reply, tx)).await.map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)?
     }
     pub async fn compact(&self) -> Result<()> {
@@ -113,9 +118,48 @@ impl SessionHandle {
         rx.await.map_err(|_| Error::Closed)?
     }
 }
+/// A client's answer to a question (`question.answer`).
+#[derive(Clone, Debug, Default)]
+pub struct QuestionReply {
+    pub answer: String,
+    /// `None`: an answer (accept).
+    pub action: Option<QuestionAction>,
+    /// A form's values; without them a form question takes `answer` as text.
+    pub content: Option<serde_json::Map<String, serde_json::Value>>,
+}
+/// What the asker hears.
+#[derive(Debug)]
+pub(crate) struct Answered {
+    pub action: QuestionAction,
+    /// The answer text (for a form: a summary of the values, or `Declined` / `Cancelled`).
+    pub text: String,
+    pub content: Option<serde_json::Map<String, serde_json::Value>>,
+}
+/// `reply` to `question`: a form's values checked against it; the problem otherwise.
+pub(crate) fn answered(question: &PendingQuestion, reply: QuestionReply) -> std::result::Result<Answered, String> {
+    let action = reply.action.unwrap_or_default();
+    match (action, &question.form) {
+        (QuestionAction::Accept, Some(form)) => {
+            let content = match &reply.content {
+                Some(content) => form.validate(content)?,
+                None => form.text_answer(&reply.answer)?,
+            };
+            Ok(Answered { action, text: form.summary(&content), content: Some(content) })
+        }
+        (QuestionAction::Accept, None) => Ok(Answered { action, text: reply.answer, content: None }),
+        (action, _) => {
+            let text = if reply.answer.trim().is_empty() {
+                if action == QuestionAction::Decline { "Declined" } else { "Cancelled" }.to_owned()
+            } else {
+                reply.answer
+            };
+            Ok(Answered { action, text, content: None })
+        }
+    }
+}
 pub(crate) struct Pending {
     pub approvals: HashMap<String, (PendingApproval, oneshot::Sender<ApprovalDecision>)>,
-    pub questions: HashMap<String, (PendingQuestion, oneshot::Sender<String>)>,
+    pub questions: HashMap<String, (PendingQuestion, oneshot::Sender<Answered>)>,
     pub steer: Vec<QueuedInput>,
     /// Steering input handed to the live model stream and not yet committed by it.
     pub native: Vec<QueuedInput>,
@@ -430,7 +474,7 @@ async fn actor(
                 Command::Cancel(user)=>{if user&&subagent&&active.is_some()&&!cancel.is_cancelled(){user_stopped=true;crate::subagents::mark(&cx,true).await;}cancel.cancel();wake_pending=false;state.wake=false;let queued=!state.snapshot().is_empty();state.queue.clear();state.steer.clear();state.native.clear();if queued{let _=cx.commit(Event::QueueChanged{queued:vec![]},Projection::None,turn,0).await;}crate::subagents::cancel_children(&cx).await;}
                 Command::View(window,reply)=>{let id=cx.row.id.clone();let pending=&state;let approvals=pending.approvals.values().map(|p|p.0.clone()).collect();let questions=pending.questions.values().map(|p|p.0.clone()).collect();let queued=pending.snapshot();let busy=active.is_some();let waiting=!pending.approvals.is_empty()||!pending.questions.is_empty();let result=cx.runtime.db(move|s|crate::runtime::build_view(s,&id,window,crate::runtime::ViewState{busy,waiting,approvals,questions,queued})).await;let _=reply.send(result);}
                 Command::Approval(id,decision,note,reply)=>{if !state.approvals.contains_key(&id){let _=reply.send(Err(Error::Invalid("unknown approval".into())));continue;}else if let Some(note)=note{let item=otto_llm::Item::new(crate::id(),otto_llm::Role::System,vec![otto_llm::Part::System{text:format!("Approval {id} note: {note}")}]);if let Err(error)=cx.commit(Event::ItemDone{item:item.clone()},Projection::PutItem(item),turn,0).await{let _=reply.send(Err(error));continue;}}let pending=state.approvals.remove(&id);let result=if let Some((_,tx))=pending{match cx.commit_status(Event::ApprovalResolved{approval_id:id,decision},Projection::None,turn,0,Some(if state.approvals.is_empty()&&state.questions.is_empty(){"busy"}else{"waiting_approval"})).await{Ok(_)=>{let _=tx.send(decision);Ok(())},Err(e)=>Err(e)}}else{Err(Error::Invalid("unknown approval".into()))};let _=reply.send(result);}
-                Command::Question(id,answer,reply)=>{let pending=state.questions.remove(&id);let result=if let Some((_,tx))=pending{match cx.commit_status(Event::QuestionResolved{question_id:id,answer:answer.clone()},Projection::None,turn,0,Some(if state.approvals.is_empty()&&state.questions.is_empty(){"busy"}else{"waiting_approval"})).await{Ok(_)=>{let _=tx.send(answer);Ok(())},Err(e)=>Err(e)}}else{Err(Error::Invalid("unknown question".into()))};let _=reply.send(result);}
+                Command::Question(id,answer,reply)=>{let answered=match state.questions.get(&id){Some((q,_))=>answered(q,answer).map_err(Error::Invalid),None=>Err(Error::Invalid("unknown question".into()))};let result=match answered{Err(e)=>Err(e),Ok(answered)=>{let form=state.questions.remove(&id).map(|(q,tx)|(q.form.is_some(),tx));match form{None=>Err(Error::Invalid("unknown question".into())),Some((form,tx))=>{let action=(form||answered.action!=QuestionAction::Accept).then_some(answered.action);match cx.commit_status(Event::QuestionResolved{question_id:id,answer:answered.text.clone(),action},Projection::None,turn,0,Some(if state.approvals.is_empty()&&state.questions.is_empty(){"busy"}else{"waiting_approval"})).await{Ok(_)=>{let _=tx.send(answered);Ok(())},Err(e)=>Err(e)}}}}};let _=reply.send(result);}
                 Command::Compact(reply)=>{*busy.lock().expect("busy mutex")=true;let result=if active.is_some(){Err(Error::Invalid("session busy".into()))}else{{let c=cx.clone();let token=CancellationToken::new();let mut task=tokio::spawn(async move{crate::compaction::compact(&c,&token,turn,"manual").await});loop{tokio::select!{Some(op)=state_rx.recv()=>op(&mut state),result=&mut task=>break result.unwrap_or(Err(Error::Closed)),Some(entry)=journal.recv()=>{let result=cx.commit(entry.event,entry.projection,entry.turn,entry.step).await;let _=entry.reply.send(result);}}}}};let _=reply.send(result);}
             }}
         }

@@ -229,12 +229,23 @@ impl Server {
 
     /// One request to the running (or started) server, as a tool sees it.
     pub(crate) async fn request(&self, method: &str, params: Value, cancel: &CancellationToken) -> Result<Value, ToolError> {
+        self.request_asking(method, params, cancel, None).await
+    }
+
+    /// [`Server::request`] during which the server may ask the user through `elicitor`.
+    pub(crate) async fn request_asking(
+        &self,
+        method: &str,
+        params: Value,
+        cancel: &CancellationToken,
+        elicitor: Option<Arc<otto_proto::Elicitor>>,
+    ) -> Result<Value, ToolError> {
         let client = {
             let mut state = self.state.lock().await;
             self.client(&mut state).await.map_err(ToolError::failed)?
         };
         let timeout = Duration::from_millis(self.config.timeout.unwrap_or(600_000));
-        client.request(method, params, timeout, cancel).await.map_err(|error| match error {
+        client.request_asking(method, params, timeout, cancel, elicitor).await.map_err(|error| match error {
             CallError::Cancelled => ToolError::new(ToolErrorKind::Cancelled, "cancelled; the MCP server was asked to stop"),
             CallError::Timeout => {
                 ToolError::new(ToolErrorKind::Timeout, format!("no answer from MCP server {} within {}s", self.name, timeout.as_secs()))
@@ -357,6 +368,9 @@ impl Tool for McpTool {
     }
     async fn call(&self, input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
         let arguments = if input.is_object() { input } else { json!({}) };
-        Ok(output(&self.server.request("tools/call", json!({"name":self.remote,"arguments":arguments}), &cx.cancel).await?))
+        // The session's way to ask the user (otto-core sets it); without one, elicitations are declined.
+        let elicitor = cx.services.and_then(|s| s.downcast::<otto_proto::Elicitor>().ok());
+        let params = json!({"name":self.remote,"arguments":arguments});
+        Ok(output(&self.server.request_asking("tools/call", params, &cx.cancel, elicitor).await?))
     }
 }

@@ -877,6 +877,14 @@ async fn execute(
     tcx.cancel = cancel.clone();
     tcx.project_root = cx.root();
     tcx.approver = Some(bridge.clone());
+    // MCP tools ask the user through it (elicitation).
+    tcx.services = Some({
+        let (bridge, call_id) = (bridge.clone(), call_id.clone());
+        Arc::new(otto_proto::Elicitor::new(move |elicitation| {
+            let (bridge, call_id) = (bridge.clone(), call_id.clone());
+            async move { bridge.elicit(&call_id, elicitation).await }
+        }))
+    });
     tcx.spill_dir = Some(cx.runtime.0.config.state_dir.join("outputs").join(&cx.row.id));
     tcx.attachments = Some(cx.runtime.attachments_root());
     tcx.vision = cx.live().model.info().caps.vision;

@@ -2,6 +2,7 @@
 
 mod control;
 mod device;
+mod form;
 mod protocol;
 mod redaction;
 mod timing;

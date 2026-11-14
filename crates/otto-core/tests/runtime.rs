@@ -907,6 +907,120 @@ async fn background_shell_result_is_delivered_to_the_session() {
     r.shutdown().await.unwrap();
 }
 
+/// Asks through the session's elicitor (as an MCP tool does) and returns the reply.
+struct FormTool(otto_tools::ToolSpec);
+#[async_trait::async_trait]
+impl otto_tools::Tool for FormTool {
+    fn spec(&self) -> &otto_tools::ToolSpec {
+        &self.0
+    }
+    async fn call(&self, _: serde_json::Value, cx: otto_tools::ToolCx) -> std::result::Result<otto_tools::ToolOutput, otto_tools::ToolError> {
+        let elicitor = cx.services.and_then(|s| s.downcast::<otto_proto::Elicitor>().ok()).expect("an elicitor");
+        let form = otto_proto::QuestionForm::from_schema(&serde_json::json!({"type":"object","properties":{
+            "name":{"type":"string","title":"Name"},"age":{"type":"integer","minimum":0}},"required":["name"]}))
+        .unwrap();
+        let reply = elicitor.ask(otto_proto::Elicitation { server: "forms".into(), message: "Who are you?".into(), form }).await;
+        let action = serde_json::to_value(reply.action).unwrap();
+        Ok(otto_tools::ToolOutput::text(format!("{} {}", action.as_str().unwrap(), serde_json::json!(reply.content))))
+    }
+}
+
+#[tokio::test]
+async fn elicitation_is_a_question_with_fields() {
+    use otto_proto::QuestionAction as A;
+    let (dir, r, original, _) = setup(
+        vec![vec![call("e1", "form_test", serde_json::json!({}))], vec![call("e2", "form_test", serde_json::json!({}))], text("done")],
+        "build",
+    )
+    .await;
+    let spec = serde_json::json!({"name":"form_test","description":"Ask a form.","input_schema":{"type":"object"},"effects":{"read":true}});
+    r.add_tools(vec![Arc::new(FormTool(serde_json::from_value(spec).unwrap()))]);
+    // Added tools reach sessions created after them.
+    let s = r
+        .create_session(CreateSession { project_id: original.view().await.unwrap().info.project_id, cwd: dir.path().into(), ..Default::default() })
+        .await
+        .unwrap();
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    prompt(&s).await;
+    let content = |v: serde_json::Value| Some(v.as_object().unwrap().clone());
+    let (mut asked, mut resolved) = (0, Vec::new());
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match live.recv().await.unwrap().1 {
+                Event::QuestionAsked { question_id, question, server, form, .. } => {
+                    asked += 1;
+                    assert_eq!((question.as_str(), server.as_deref()), ("Who are you?", Some("forms")));
+                    assert_eq!(form.unwrap().fields.len(), 2);
+                    let pending = s.view().await.unwrap().pending_questions;
+                    assert_eq!(pending[0].server.as_deref(), Some("forms"));
+                    if asked == 1 {
+                        // Values that miss a required field are refused; the question stays.
+                        let missing = QuestionReply { action: Some(A::Accept), content: content(serde_json::json!({"age":3})), ..Default::default() };
+                        assert!(s.reply_question(&question_id, missing).await.is_err());
+                        assert_eq!(s.view().await.unwrap().pending_questions.len(), 1);
+                        let ok = QuestionReply {
+                            action: Some(A::Accept),
+                            content: content(serde_json::json!({"name":"Ann","age":3})),
+                            ..Default::default()
+                        };
+                        s.reply_question(&question_id, ok).await.unwrap();
+                    } else {
+                        s.reply_question(&question_id, QuestionReply { action: Some(A::Decline), ..Default::default() }).await.unwrap();
+                    }
+                }
+                Event::QuestionResolved { answer, action, .. } => resolved.push((action, answer)),
+                Event::TurnFinished { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let items = serde_json::to_string(&s.view().await.unwrap().items).unwrap();
+    assert_eq!(resolved, [(Some(A::Accept), "Name: Ann · age: 3".to_owned()), (Some(A::Decline), "Declined".to_owned())], "{asked} {items}");
+    assert!(items.contains("accept {") && items.contains("Ann") && items.contains("decline null"), "{items}");
+    r.shutdown().await.unwrap();
+}
+
+/// A client without forms answers a form question with text: the single field's value.
+#[tokio::test]
+async fn a_text_answer_fills_a_single_field_form() {
+    struct OneField(otto_tools::ToolSpec);
+    #[async_trait::async_trait]
+    impl otto_tools::Tool for OneField {
+        fn spec(&self) -> &otto_tools::ToolSpec {
+            &self.0
+        }
+        async fn call(&self, _: serde_json::Value, cx: otto_tools::ToolCx) -> std::result::Result<otto_tools::ToolOutput, otto_tools::ToolError> {
+            let elicitor = cx.services.and_then(|s| s.downcast::<otto_proto::Elicitor>().ok()).unwrap();
+            let schema = serde_json::json!({"properties":{"ok":{"type":"boolean"}},"required":["ok"]});
+            let form = otto_proto::QuestionForm::from_schema(&schema).unwrap();
+            let reply = elicitor.ask(otto_proto::Elicitation { server: "s".into(), message: "Proceed?".into(), form }).await;
+            Ok(otto_tools::ToolOutput::text(serde_json::json!(reply.content).to_string()))
+        }
+    }
+    let (dir, r, original, _) = setup(vec![vec![call("e", "one_field", serde_json::json!({}))], text("done")], "build").await;
+    let spec = serde_json::json!({"name":"one_field","description":"Ask.","input_schema":{"type":"object"},"effects":{"read":true}});
+    r.add_tools(vec![Arc::new(OneField(serde_json::from_value(spec).unwrap()))]);
+    let s = r
+        .create_session(CreateSession { project_id: original.view().await.unwrap().info.project_id, cwd: dir.path().into(), ..Default::default() })
+        .await
+        .unwrap();
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    prompt(&s).await;
+    loop {
+        if let Event::QuestionAsked { question_id, options, .. } = live.recv().await.unwrap().1 {
+            assert_eq!(options, ["Yes", "No"]);
+            assert!(s.answer_question(&question_id, "maybe".into()).await.is_err());
+            s.answer_question(&question_id, "Yes".into()).await.unwrap();
+            break;
+        }
+    }
+    finish(&mut live).await;
+    assert!(serde_json::to_string(&s.view().await.unwrap().items).unwrap().contains(r#"{\"ok\":true}"#));
+    r.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn question_and_steer_at_boundary() {
     let (_dir, r, s, m) =

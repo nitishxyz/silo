@@ -1959,6 +1959,19 @@ impl AgentPane {
         let body = match (self.card.clone()?, setup) {
             (Card::Question(q), Some(kind)) => self.render_setup(card, &q, kind, active, cx),
             (Card::Question(q), None) => {
+                // An MCP server's question names it; its form replaces the options.
+                let card = card.when_some(q.server.clone(), |el, server| {
+                    el.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(px(11.5))
+                            .text_color(rgb(theme::muted()))
+                            .child(icon("plug", 12.0, theme::muted()))
+                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("MCP server · {server}"))),
+                    )
+                });
                 let options: Vec<AnyElement> = q
                     .options
                     .iter()
@@ -1997,8 +2010,12 @@ impl AgentPane {
                             }))
                         }),
                 )
-                .when(!options.is_empty(), |el| el.child(div().flex().flex_wrap().gap(px(6.0)).children(options)))
-                .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child("Or type an answer below"))
+                .map(|el| match &q.form {
+                    Some(form) => self.render_form(el, &q, form, active, keys, cx),
+                    None => el
+                        .when(!options.is_empty(), |el| el.child(div().flex().flex_wrap().gap(px(6.0)).children(options)))
+                        .child(div().text_size(px(11.5)).text_color(rgb(theme::muted())).child("Or type an answer below")),
+                })
             }
             (Card::Approval(a, more), _) => {
                 // `shell: cd <project> && …`: the command reads as on its line.

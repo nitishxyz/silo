@@ -12,6 +12,7 @@ mod av;
 mod branch;
 pub(crate) mod client;
 pub(crate) mod editor;
+mod form_card;
 mod header;
 mod jobs;
 mod markdown;
@@ -450,6 +451,8 @@ pub struct AgentPane {
     signin: SignIn,
     /// Media providers' status and the Media rows (`media_setup.rs`).
     media_keys: media_setup::Setup,
+    /// The shown form question's inputs (an MCP server's elicitation).
+    form: Option<form_card::FormState>,
     /// The otto settings, shown instead of the chat (`settings.rs`).
     otto_settings: Option<settings::OttoSettings>,
     status: Option<AgentStatus>,
@@ -672,6 +675,7 @@ impl AgentPane {
             pressed_out: None,
             signin: SignIn::default(),
             media_keys: media_setup::Setup::default(),
+            form: None,
             otto_settings: None,
             status: None,
             title: String::new(),
@@ -1474,6 +1478,8 @@ impl AgentPane {
                     self.close_overlay(window, cx);
                 } else if self.escape_setup(cx) {
                     // Declined the setup card: `Not now`.
+                } else if let Some(question) = self.live_form().filter(|_| self.editor.read(cx).text().trim().is_empty()) {
+                    self.answer_form(question, otto_proto::QuestionAction::Cancel, "Cancelled".into(), None, cx);
                 } else if self.mirror().is_some_and(|m| !m.pending_approvals.is_empty()) {
                     self.answer_approval(ApprovalDecision::Deny, cx);
                 } else if self.running && self.editor.read(cx).text().trim().is_empty() && self.attachments.is_empty() {
@@ -1851,6 +1857,10 @@ impl AgentPane {
             return;
         }
         if text.is_empty() && self.attachments.is_empty() {
+            if self.live_form().is_some() {
+                self.submit_form(cx);
+                return;
+            }
             if self.mirror().is_some_and(|m| !m.pending_approvals.is_empty()) {
                 self.answer_approval(ApprovalDecision::Allow, cx);
             }

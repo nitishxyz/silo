@@ -262,8 +262,19 @@ pub enum Method {
     JobKill { session_id: SessionId, job_id: String },
     #[serde(rename = "approval.answer")]
     ApprovalAnswer { session_id: SessionId, approval_id: String, decision: ApprovalDecision, note: Option<String> },
+    /// `action` and `content` answer a question with a `form`: `accept` with the fields' values
+    /// (checked against the form; an error leaves the question pending), `decline` or `cancel`.
+    /// Without them `answer` is the text (for a form: `QuestionForm::text_answer`).
     #[serde(rename = "question.answer")]
-    QuestionAnswer { session_id: SessionId, question_id: String, answer: String },
+    QuestionAnswer {
+        session_id: SessionId,
+        question_id: String,
+        answer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<crate::form::QuestionAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<serde_json::Map<String, Value>>,
+    },
     #[serde(rename = "model.list")]
     ModelList { provider: Option<String> },
     #[serde(rename = "auth.status")]
@@ -890,10 +901,26 @@ pub enum Event {
     ApprovalRequested { approval_id: String, call_id: String, tool: String, summary: String, input: Value, effects: Vec<String> },
     #[serde(rename = "approval.resolved")]
     ApprovalResolved { approval_id: String, decision: ApprovalDecision },
+    /// `server` and `form` (additive): an MCP server's elicitation, as on [`PendingQuestion`].
     #[serde(rename = "question.asked")]
-    QuestionAsked { question_id: String, call_id: String, question: String, options: Vec<String> },
+    QuestionAsked {
+        question_id: String,
+        call_id: String,
+        question: String,
+        options: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        form: Option<crate::form::QuestionForm>,
+    },
+    /// `action` (additive): how a form question was answered, or a declined or cancelled question.
     #[serde(rename = "question.resolved")]
-    QuestionResolved { question_id: String, answer: String },
+    QuestionResolved {
+        question_id: String,
+        answer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<crate::form::QuestionAction>,
+    },
     #[serde(rename = "usage")]
     /// `context` is the session's [`SessionInfo::context`] after this step. `api_cost_usd` (additive): the step at
     /// its model's list (API) price, `None` when unknown; `provider` and `model` (additive) the model it ran on.

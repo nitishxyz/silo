@@ -216,8 +216,9 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
             runtime.answer_approval_with_note(&session_id, &approval_id, decision, note).await.map_err(core_error)?;
             Ok(json!({}))
         }
-        Method::QuestionAnswer { session_id, question_id, answer } => {
-            runtime.answer_question(&session_id, &question_id, answer).await.map_err(core_error)?;
+        Method::QuestionAnswer { session_id, question_id, answer, action, content } => {
+            let reply = otto_core::QuestionReply { answer, action, content };
+            runtime.reply_question(&session_id, &question_id, reply).await.map_err(core_error)?;
             Ok(json!({}))
         }
         Method::ModelList { provider } => Ok(json!(auth.list_models(provider).await?)),

@@ -31,7 +31,7 @@ subscription refresh; the models.dev catalog refresh.
 **Known gaps:**
 - Hooks run `type: "command"` handlers only (no prompt/HTTP hooks, no async handlers); `SessionEnd` fires on archive.
 - The MCP client is hand-written (`rmcp` was not used because builds here are offline): no legacy HTTP+SSE
-  transport, no sampling (refused), elicitation always declined, prompts are a `get_prompt` tool rather than slash
+  transport, no sampling (refused), elicitation in form mode only (URL mode is declined), prompts are a `get_prompt` tool rather than slash
   commands (commands are files only). OAuth is tested against an in-process fake only, not a real provider.
 - Path guards are revalidation, not a sandbox (§5.2 "later").
 - Global index event seqs reset when the daemon restarts.
@@ -536,7 +536,16 @@ pub struct ToolSpec {
   of their own, `<home>/auth/mcp/auth.json` (`otto_llm::auth::CredentialStore`, key `mcp:<url>`), are refreshed
   5 minutes before expiry and once after a `401`. A configured `Authorization` header turns OAuth off. Server
   requests: `ping`, `roots/list` (the projects using the server; `roots.listChanged` is announced),
-  `elicitation/create` declined, `sampling/createMessage` refused (`-1`), others `-32601`. Notifications:
+  `elicitation/create` (form mode; `initialize` declares `elicitation: {}`) becomes a question in the session of
+  the newest `tools/call` in flight on that server (the request carries no other link): `question.asked` with
+  `server` and `form` (`otto_proto::QuestionForm`, one field per `requestedSchema` property: text with
+  `format`/length limits, number, integer, boolean, enum or `oneOf` choice; title, description, default,
+  `required`), answered by `question.answer` `action` (`accept` with `content`, checked against the form; an
+  error keeps the question; `decline`, `cancel`). It waits on a task of its own, so the connection keeps
+  serving. Declined when no session can ask (no call in flight, a run without a session) or the schema has
+  nested fields; cancelled when the call ends, the turn stops or after 10 minutes. A client without forms sees
+  the message as a plain question (a single choice or switch also as options) and answers with text: a JSON
+  object of values, or the single field's value. `sampling/createMessage` refused (`-1`), others `-32601`. Notifications:
   `tools|resources|prompts/list_changed` relist at once (a new tool count goes out as `mcp.status`).
   Resources and prompts are tools: `mcp__<server>__list_resources`, `read_resource {uri}` and `get_prompt {name,
   arguments}` (its description lists the prompts), read-only, offered when the server declares the capability. Config is Claude Code's

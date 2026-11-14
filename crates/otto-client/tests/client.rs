@@ -261,8 +261,8 @@ fn approvals_questions_tools_and_usage() {
             effects: vec![],
         },
         Event::ApprovalResolved { approval_id: "a".into(), decision: ApprovalDecision::Allow },
-        Event::QuestionAsked { question_id: "q".into(), call_id: "c".into(), question: "?".into(), options: vec![] },
-        Event::QuestionResolved { question_id: "q".into(), answer: "yes".into() },
+        Event::QuestionAsked { question_id: "q".into(), call_id: "c".into(), question: "?".into(), options: vec![], server: None, form: None },
+        Event::QuestionResolved { question_id: "q".into(), answer: "yes".into(), action: None },
         Event::ToolResult { call_id: "c".into(), is_error: false, output: json!(3), item_id: "result".into() },
         Event::Usage {
             turn: 1,
@@ -297,6 +297,24 @@ fn approvals_questions_tools_and_usage() {
     assert_eq!(m.info.context, otto_proto::ContextUse { used: 4, window: 1000 });
     m.apply(script.len() as i64 + 1, &Event::Compaction { through_seq: 1, summary: None, id: None });
     assert_eq!(m.info.context, otto_proto::ContextUse { used: 0, window: 1000 });
+}
+#[test]
+fn an_mcp_form_question_keeps_its_fields() {
+    let mut m = SessionMirror::new(view(0));
+    let form = otto_proto::QuestionForm::from_schema(&json!({"properties":{"name":{"type":"string"}}})).unwrap();
+    let asked = Event::QuestionAsked {
+        question_id: "q".into(),
+        call_id: "c".into(),
+        question: "Name?".into(),
+        options: vec![],
+        server: Some("github".into()),
+        form: Some(form.clone()),
+    };
+    m.apply(1, &asked);
+    assert_eq!(m.pending_questions[0].server.as_deref(), Some("github"));
+    assert_eq!(m.pending_questions[0].form.as_ref(), Some(&form));
+    m.apply(2, &Event::QuestionResolved { question_id: "q".into(), answer: "Declined".into(), action: Some(otto_proto::QuestionAction::Decline) });
+    assert!(m.pending_questions.is_empty());
 }
 #[test]
 fn compactions_stream_live_and_give_way_to_their_checkpoint() {

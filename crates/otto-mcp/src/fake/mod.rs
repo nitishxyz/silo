@@ -28,6 +28,8 @@ pub struct FakeState {
     pub gets: Vec<Option<String>>,
     /// Requests and notifications received, by method.
     pub methods: Vec<String>,
+    /// The client's `initialize` params.
+    pub initialize: Option<Value>,
     /// The client's replies to server requests, by request id.
     pub responses: HashMap<String, Value>,
     pub registered: Vec<Value>,

@@ -7,6 +7,7 @@
 pub mod api;
 pub mod clip;
 pub mod control;
+pub mod form;
 pub mod frame;
 pub mod mcp;
 pub mod model;
@@ -14,6 +15,7 @@ pub mod paths;
 pub mod timing;
 
 pub use control::*;
+pub use form::{Elicitation, Elicitor, FieldChoice, FieldKind, FormField, FormReply, QuestionAction, QuestionForm};
 pub use frame::Frame;
 #[cfg(feature = "io")]
 pub use frame::{read_frame, spawn_reader, write_frame};
