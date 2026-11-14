@@ -752,8 +752,25 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
         let exclusive = calls.iter().any(|(_, name, _)| lookup.get(name).is_some_and(|t| t.spec().exclusive));
         let mut jobs = Vec::new();
         let result_id = crate::id();
+        // Calls run side by side but journal `tool.call` in the order the
+        // model made them: each waits for the one before it to have.
+        let mut before: Option<tokio::sync::oneshot::Receiver<()>> = None;
         for (call_id, name, value) in calls {
-            jobs.push(execute(cx.clone(), lookup.clone(), offered.clone(), call_id, name, value, turn, step, cancel.clone(), result_id.clone()));
+            let (called, next) = tokio::sync::oneshot::channel();
+            let order = Order { before: before.replace(next), called };
+            jobs.push(execute(
+                cx.clone(),
+                lookup.clone(),
+                offered.clone(),
+                call_id,
+                name,
+                value,
+                turn,
+                step,
+                cancel.clone(),
+                result_id.clone(),
+                order,
+            ));
         }
         let outputs = if exclusive {
             let mut outputs = Vec::new();
@@ -834,6 +851,12 @@ async fn tool_hook(cx: &Context, event: &str, tool: &str, fields: serde_json::Va
     cx.state(move |s| s.after_tools.extend(context)).await?;
     Ok(outcome)
 }
+/// Where a call's `tool.call` falls among the step's calls: after `before`
+/// resolves (sent, or dropped by a call that failed first), then `called`.
+struct Order {
+    before: Option<tokio::sync::oneshot::Receiver<()>>,
+    called: tokio::sync::oneshot::Sender<()>,
+}
 #[allow(clippy::too_many_arguments)]
 async fn execute(
     cx: Arc<Context>,
@@ -846,6 +869,7 @@ async fn execute(
     step: i64,
     cancel: CancellationToken,
     result_id: String,
+    order: Order,
 ) -> Result<Part> {
     let original = crate::prepared::public(value);
     let bridge = Arc::new(Bridge { cx: cx.clone(), cancel: cancel.clone(), turn, step });
@@ -908,6 +932,9 @@ async fn execute(
         Decision::Deny { reason: format!("unknown tool: {name}. Available tools: {offered}") }
     };
     let redacted = crate::prepared::card(tool.as_ref(), &original, &effective, prepared.as_ref());
+    if let Some(before) = order.before {
+        let _ = before.await;
+    }
     cx.emit(
         Event::ToolCall { call_id: call_id.clone(), name: name.clone(), input: redacted.clone() },
         Projection::ToolIntent { call_id: call_id.clone(), name: name.clone(), input: redacted.clone() },
@@ -915,6 +942,7 @@ async fn execute(
         step,
     )
     .await?;
+    let _ = order.called.send(());
     let denied = match decision {
         Decision::Allow => None,
         Decision::Deny { reason } => Some(reason),
