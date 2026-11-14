@@ -128,6 +128,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSBluetoothAlwaysUsageDescription</key><string>Web pages in Silo can use your phone or a security key to sign in.</string>
   <key>NSCameraUsageDescription</key><string>Web pages in Silo can ask to use the camera.</string>
   <key>NSMicrophoneUsageDescription</key><string>Silo listens while you dictate with the Fn key, on this Mac, and web pages in Silo can ask to use the microphone.</string>
+  <key>NSLocationUsageDescription</key><string>Web pages in Silo can ask for your location.</string>
+  <key>NSLocationWhenInUseUsageDescription</key><string>Web pages in Silo can ask for your location.</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
@@ -140,8 +142,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 
 # Inside out, with Chrome's entitlements: the Renderer and GPU helpers JIT,
-# and the app (the responsible process for its helpers) may use the camera
-# and microphone. Everything carries one team ID, so library validation
+# and the app (the responsible process for its helpers) may use the camera,
+# microphone and location. Everything carries one team ID, so library validation
 # holds. Ad-hoc signatures have no team ID, so they skip the hardened
 # runtime.
 identity="${SILO_SIGN_IDENTITY:--}"
@@ -162,7 +164,7 @@ entitlements() { # file keys...
 jit="$root/target/helper-jit.entitlements"
 entitlements "$jit" com.apple.security.cs.allow-jit
 devices="$root/target/app.entitlements"
-entitlements "$devices" com.apple.security.device.audio-input com.apple.security.device.camera
+entitlements "$devices" com.apple.security.device.audio-input com.apple.security.device.camera com.apple.security.personal-information.location
 # What programs in Silo's terminals may ask for under the hardened runtime
 # (the server is their responsible process).
 terminal="$root/target/server.entitlements"

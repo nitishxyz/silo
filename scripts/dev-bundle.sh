@@ -39,6 +39,8 @@ plist() { # exe id [helper] [icon]
   <key>NSBluetoothAlwaysUsageDescription</key><string>Web pages in Silo can use your phone or a security key to sign in.</string>
   <key>NSCameraUsageDescription</key><string>Web pages in Silo can ask to use the camera.</string>
   <key>NSMicrophoneUsageDescription</key><string>Web pages in Silo can ask to use the microphone.</string>
+  <key>NSLocationUsageDescription</key><string>Web pages in Silo can ask for your location.</string>
+  <key>NSLocationWhenInUseUsageDescription</key><string>Web pages in Silo can ask for your location.</string>
   ${3:+<key>LSUIElement</key><true/>}
   ${4:+<key>CFBundleIconFile</key><string>$4</string><key>CFBundleIconName</key><string>$4</string>}
 </dict></plist>

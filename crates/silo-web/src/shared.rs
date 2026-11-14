@@ -1,6 +1,6 @@
 //! State shared between a `Browser` handle and its CEF handlers.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -39,6 +39,14 @@ pub enum Event {
     /// A download needs its path: answer with `Browser::download_to`.
     DownloadAsked(crate::DownloadRequest),
     Download(crate::DownloadProgress),
+    /// Matches of the search `Browser::find` started.
+    Find(crate::FindResult),
+    /// A file chooser wants paths: answer with `Browser::file_dialog_done`.
+    FileDialog(crate::FileDialog),
+    /// The page asks for a permission: answer with `Browser::answer_permission`.
+    PermissionAsked(crate::PermissionRequest),
+    /// A request no longer waits (its document went, CEF dismissed it).
+    PermissionDismissed(u64),
     CursorChanged(Cursor),
     /// IME candidate anchor in view points: `(x, y, w, h)` of the selection's first character.
     ImeBounds {
@@ -160,6 +168,19 @@ pub(crate) struct Shared {
     pub(crate) wheel_rest: Mutex<(f32, f32)>,
     /// Flipped by each pinch: wheel events carry it as NumLock (`Browser::pinch`).
     pub(crate) wheel_relatch: AtomicBool,
+    /// Open file choosers, by id.
+    pub(crate) file_dialogs: Mutex<std::collections::HashMap<u32, cef::FileDialogCallback>>,
+    pub(crate) next_dialog: AtomicU32,
+    /// The profile's remembered permission decisions (set at creation).
+    pub(crate) sites: Mutex<Option<Arc<crate::permission::SiteStore>>>,
+    /// Permission requests waiting for the user.
+    pub(crate) permissions: Mutex<Vec<crate::permission::Pending>>,
+    pub(crate) next_permission: AtomicU64,
+    /// "Allow once" grants to forget when the document goes.
+    pub(crate) once: Mutex<Vec<crate::permission::Once>>,
+    /// An agent's page (`Browser::deny_prompts`): no permission or file
+    /// chooser is ever asked for.
+    pub(crate) deny_prompts: AtomicBool,
 }
 
 /// Whether `url` is no page: empty or `about:blank`.
@@ -227,6 +248,13 @@ impl Shared {
             frame_asked: Mutex::new(None),
             wheel_rest: Mutex::new((0.0, 0.0)),
             wheel_relatch: AtomicBool::new(false),
+            file_dialogs: Mutex::default(),
+            next_dialog: AtomicU32::new(1),
+            sites: Mutex::new(None),
+            permissions: Mutex::new(Vec::new()),
+            next_permission: AtomicU64::new(1),
+            once: Mutex::new(Vec::new()),
+            deny_prompts: AtomicBool::new(false),
         });
         crate::runtime::track(&shared);
         shared

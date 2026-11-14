@@ -91,6 +91,7 @@ impl Runtime {
     pub fn create_browser(&self, options: BrowserOptions) -> Result<Browser> {
         let shared = Shared::new(options.size, options.notify);
         shared.frame_rate.store(frame_rate(options.offscreen), Ordering::Relaxed);
+        *lock(&shared.sites) = Some(Arc::clone(&options.profile.sites));
         let window_info = window_info();
         let settings = settings(options.offscreen);
         let mut client = crate::handlers::client(&shared, &options.profile.tunnel);
@@ -373,6 +374,43 @@ impl Browser {
 
     pub fn cancel_download(&self, id: u32) {
         crate::download::cancel(&self.shared, id);
+    }
+
+    /// Find `text` in the page: a new search (`next` false) selects the
+    /// first match, `next` steps from the selected one (`forward` or back).
+    /// Results come as `Event::Find`; empty `text` ends the search.
+    pub fn find(&self, text: &str, forward: bool, next: bool) {
+        let Some(host) = self.host() else { return };
+        if text.is_empty() {
+            host.stop_finding(1);
+            return;
+        }
+        host.find(Some(&CefString::from(text)), i32::from(forward), 0, i32::from(next));
+    }
+
+    /// End the search and clear its highlights.
+    pub fn stop_finding(&self) {
+        if let Some(host) = self.host() {
+            host.stop_finding(1);
+        }
+    }
+
+    /// Answer `Event::FileDialog` `id` with the chosen paths, or cancel it
+    /// (`None` or none chosen).
+    pub fn file_dialog_done(&self, id: u32, paths: Option<&[std::path::PathBuf]>) {
+        crate::dialog::answer(&self.shared, id, paths);
+    }
+
+    /// Answer `Event::PermissionAsked` `id`; "always" and "never" are
+    /// remembered for its origin in the page's profile.
+    pub fn answer_permission(&self, id: u64, answer: crate::Answer) {
+        crate::permission::answer(&self.shared, id, answer);
+    }
+
+    /// An agent's page: permission requests are refused and file choosers
+    /// cancelled, never asked for.
+    pub fn deny_prompts(&self) {
+        self.shared.deny_prompts.store(true, Ordering::Release);
     }
 
     /// The system's print panel for the page.

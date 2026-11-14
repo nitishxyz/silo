@@ -229,7 +229,7 @@ impl Runtime {
             return Ok(profile.clone());
         }
         let profile = match (name, tunnel) {
-            (crate::profile::DEFAULT, None) => crate::Profile::global()?,
+            (crate::profile::DEFAULT, None) => crate::Profile::global(&self.profiles_dir)?,
             (crate::profile::DEFAULT, Some(_)) => {
                 bail!("the default profile is local-only; tunnels need a server profile")
             }

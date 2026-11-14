@@ -5,8 +5,11 @@
 use std::time::{Duration, Instant};
 
 mod downloads;
+mod file_chooser;
+mod find;
 mod look_up;
 mod menu;
+mod permissions;
 mod tabs;
 
 use gpui::AppContext as _;
@@ -374,6 +377,10 @@ pub struct BrowserPane {
     menu_point: (i32, i32),
     /// The page's downloads, while running or just finished.
     downloads: Vec<downloads::Download>,
+    /// The find bar (⌘F), while open.
+    find: Option<find::FindBar>,
+    /// Permission requests waiting for the user, oldest first.
+    permissions: Vec<silo_web::PermissionRequest>,
     _subs: Vec<gpui::Subscription>,
     /// Focus subscriptions of the window showing the pane.
     window_subs: Vec<gpui::Subscription>,
@@ -467,6 +474,8 @@ impl BrowserPane {
             menu: None,
             menu_point: (0, 0),
             downloads: Vec::new(),
+            find: None,
+            permissions: Vec::new(),
             _subs: subs,
             window_subs: Vec::new(),
         }
@@ -938,7 +947,7 @@ impl BrowserPane {
         self.frames.wake(Instant::now());
         let mut changed = false;
         let mut visits = Vec::new();
-        let (mut tabs, mut menu, mut closed, mut asked) = (Vec::new(), None, false, Vec::new());
+        let (mut tabs, mut menu, mut closed, mut asked, mut dialogs) = (Vec::new(), None, false, Vec::new(), Vec::new());
         for event in page.take_events() {
             let Some(state) = self.state.as_mut() else { break };
             match event {
@@ -952,6 +961,7 @@ impl BrowserPane {
                     self.security_open = false;
                     self.blocked = None;
                     self.close_menu();
+                    self.find_navigated();
                     visits.push((url, None));
                     changed = true;
                 }
@@ -1006,6 +1016,13 @@ impl BrowserPane {
                 silo_web::Event::ContextMenu(m) => menu = Some(m),
                 silo_web::Event::DownloadAsked(request) => asked.push(request),
                 silo_web::Event::Download(progress) => self.download_progress(progress, cx),
+                silo_web::Event::Find(result) => {
+                    self.find_result(result);
+                    cx.notify();
+                }
+                silo_web::Event::FileDialog(dialog) => dialogs.push(dialog),
+                silo_web::Event::PermissionAsked(request) => self.permission_asked(request, cx),
+                silo_web::Event::PermissionDismissed(id) => self.permission_dismissed(id, cx),
                 silo_web::Event::ImeBounds { x, y, width, height } => self.ime_rect = Some((x, y, width, height)),
                 silo_web::Event::CursorChanged(cursor) => self.cursor = cursor,
                 silo_web::Event::Closed { by_page } => {
@@ -1020,6 +1037,8 @@ impl BrowserPane {
                         cx.emit(BrowserPaneEvent::Sound);
                     }
                     self.menu = None;
+                    self.permissions.clear();
+                    self.find = None;
                     closed = by_page;
                 }
             }
@@ -1029,6 +1048,9 @@ impl BrowserPane {
         }
         for request in asked {
             self.download_asked(request, cx);
+        }
+        for dialog in dialogs {
+            self.file_dialog(dialog, cx);
         }
         if let Some(m) = menu {
             self.show_menu(m, cx);
@@ -2408,7 +2430,17 @@ impl gpui::Render for BrowserPane {
             .children(arrow)
             .children(self.download_pill(cx));
         let menu = self.menu.as_ref().map(|m| m.render("browser-menu", cx, |this, action, window, cx| this.menu_pick(action, window, cx)));
-        div().flex().flex_col().size_full().min_w_0().min_h_0().child(page).children(menu)
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(page)
+            .children(self.find_bar(cx))
+            .children(self.permission_card(cx))
+            .children(menu)
     }
 }
 
@@ -2521,6 +2553,15 @@ fn intercept(pane: gpui::WeakEntity<BrowserPane>, cx: &mut gpui::App) -> gpui::S
     cx.intercept_keystrokes(move |event, window, cx| {
         let k = &event.keystroke;
         let _ = pane.update(cx, |pane, cx| {
+            // ⌘F / ⌘G / ⇧⌘G: the terminal's find keys, here find in page.
+            let in_block = pane.focus.is_focused(window) || pane.find_focused(window, cx) || pane.address.read(cx).focus.is_focused(window);
+            if in_block && let Some(chord) = find::find_chord(&k.key, k.modifiers) {
+                if chord == find::FindChord::Open || pane.find.is_some() {
+                    pane.find_chord(chord, window, cx);
+                    cx.stop_propagation();
+                }
+                return;
+            }
             let Some(chord) = page_chord(&k.key, k.modifiers, pane.focus.is_focused(window), pane.editable) else { return };
             match chord {
                 Chord::Address => pane.focus_address(window, cx),

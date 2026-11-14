@@ -442,6 +442,9 @@ wrap_load_handler! {
             frame.execute_java_script(Some(&CefString::from(crate::audio::media_script(&self.shared.media_tag).as_str())), None, 0);
             let main = frame.is_main() != 0;
             if main {
+                // A new document: requests of the old one are refused, its one-time grants end.
+                let context = browser.as_ref().and_then(|b| b.host()).and_then(|h| h.request_context());
+                crate::permission::document_gone(&self.shared, context);
                 // A new document: the old one's frames (and their sound) are gone.
                 let silent = lock(&self.shared.media).clear();
                 if let Some(audible) = silent {
@@ -501,6 +504,8 @@ wrap_life_span_handler! {
                 return 1;
             }
             let popup = crate::popup::Popup::shared(*lock(&self.shared.view));
+            *lock(&popup.sites) = lock(&self.shared.sites).clone();
+            popup.deny_prompts.store(self.shared.deny_prompts.load(Ordering::Acquire), Ordering::Release);
             *window_info = crate::browser::window_info();
             *settings = crate::browser::settings(!foreground);
             popup.frame_rate.store(crate::browser::frame_rate(!foreground), Ordering::Relaxed);
@@ -548,13 +553,16 @@ wrap_life_span_handler! {
             self.shared.notify();
         }
 
-        fn on_before_close(&self, _browser: Option<&mut Browser>) {
+        fn on_before_close(&self, browser: Option<&mut Browser>) {
             self.shared.devtools.close();
             lock(&self.shared.browser).take();
             if let Some(menu) = lock(&self.shared.menu).take() {
                 menu.cancel();
             }
             lock(&self.shared.menu_frame).take();
+            crate::dialog::cancel_all(&self.shared);
+            let context = browser.and_then(|b| b.host()).and_then(|h| h.request_context());
+            crate::permission::document_gone(&self.shared, context);
             self.shared.push(Event::Closed { by_page: !self.shared.closing.load(Ordering::Acquire) });
             crate::runtime::browser_closed();
         }
@@ -655,15 +663,22 @@ wrap_permission_handler! {
         // A clipboard read (`navigator.clipboard.read*`) is allowed once per user input to
         // the page and others are dismissed. Chromium persists the grant and counts
         // dismissals toward an embargo, so both are cleared and every read asks again.
-        // Other prompts keep CEF's default.
+        // Camera, microphone, location and notifications go to the app (`permission.rs`);
+        // other prompts keep CEF's default.
         fn on_show_permission_prompt(
             &self,
             browser: Option<&mut Browser>,
-            _prompt_id: u64,
+            prompt_id: u64,
             requesting_origin: Option<&CefString>,
             requested_permissions: u32,
             callback: Option<&mut PermissionPromptCallback>,
         ) -> c_int {
+            if let (Some(kinds), Some(callback)) = (crate::permission::prompt_kinds(requested_permissions), callback.as_deref()) {
+                let origin = requesting_origin.map(ToString::to_string).unwrap_or_default();
+                let reply = crate::permission::Reply::Prompt(callback.clone());
+                crate::permission::ask(&self.shared, &origin, kinds, Some(prompt_id), reply);
+                return 1;
+            }
             let clipboard = PermissionRequestTypes::CLIPBOARD.get_raw();
             let Some(callback) = callback.filter(|_| requested_permissions == clipboard) else { return 0 };
             let gesture = self.shared.take_gesture();
@@ -678,6 +693,27 @@ wrap_permission_handler! {
                 post_delayed_task(ThreadId::UI, Some(&mut task), FORGET_CLIPBOARD_MS);
             }
             1
+        }
+
+        // `getUserMedia`: the camera and microphone as one request. Screen capture keeps
+        // CEF's default.
+        fn on_request_media_access_permission(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            requesting_origin: Option<&CefString>,
+            requested_permissions: u32,
+            callback: Option<&mut MediaAccessCallback>,
+        ) -> c_int {
+            let (Some(kinds), Some(callback)) = (crate::permission::media_kinds(requested_permissions), callback) else { return 0 };
+            let origin = requesting_origin.map(ToString::to_string).unwrap_or_default();
+            let reply = crate::permission::Reply::Media(callback.clone(), requested_permissions);
+            crate::permission::ask(&self.shared, &origin, kinds, None, reply);
+            1
+        }
+
+        fn on_dismiss_permission_prompt(&self, _browser: Option<&mut Browser>, prompt_id: u64, _result: PermissionRequestResult) {
+            crate::permission::dismissed(&self.shared, prompt_id);
         }
     }
 }
@@ -752,6 +788,8 @@ wrap_client! {
         dialogs: JsdialogHandler,
         menu: ContextMenuHandler,
         downloads: DownloadHandler,
+        find: FindHandler,
+        file_dialogs: DialogHandler,
     }
 
     impl Client {
@@ -794,6 +832,14 @@ wrap_client! {
         fn download_handler(&self) -> Option<DownloadHandler> {
             Some(self.downloads.clone())
         }
+
+        fn find_handler(&self) -> Option<FindHandler> {
+            Some(self.find.clone())
+        }
+
+        fn dialog_handler(&self) -> Option<DialogHandler> {
+            Some(self.file_dialogs.clone())
+        }
     }
 }
 
@@ -808,6 +854,8 @@ pub(crate) fn client(shared: &Arc<Shared>, tunnel: &SharedTunnel) -> Client {
         AgentDialogs::new(Arc::clone(shared)),
         PageMenuHandler::new(Arc::clone(shared)),
         crate::download::handler(shared),
+        crate::find::handler(shared),
+        crate::dialog::handler(shared),
     )
 }
 

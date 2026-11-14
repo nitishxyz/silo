@@ -479,6 +479,8 @@ fn open_page(home: &Path, profile: &str, tunnel: Option<silo_web::Tunnel>, cx: &
     let profile = runtime.profile(profile, tunnel)?;
     let options = silo_web::BrowserOptions { url: "about:blank", profile: &profile, size: FETCH_VIEW, offscreen: true, notify: Arc::new(|| {}) };
     let page = Rc::new(runtime.create_browser(options)?);
+    // Nobody sees it: no permission prompt or file chooser is ever asked for.
+    page.deny_prompts();
     crate::web::register(page.clone(), Arc::new(AtomicBool::new(false)), None);
     Ok(page)
 }

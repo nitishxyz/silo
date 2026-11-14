@@ -63,6 +63,8 @@ pub struct Profile {
     pub name: String,
     pub(crate) context: RequestContext,
     pub(crate) tunnel: SharedTunnel,
+    /// Its remembered site permissions (`silo-permissions.json`).
+    pub(crate) sites: Arc<crate::permission::SiteStore>,
 }
 
 /// Directory name for a profile (`"<server>/<name>"` → `"<server>_<name>"`).
@@ -155,11 +157,12 @@ wrap_request_context_handler! {
 
 impl Profile {
     /// The global context (`profiles/default`, `Settings::cache_path`). Never tunnelled.
-    pub(crate) fn global() -> Result<Profile> {
+    pub(crate) fn global(profiles: &Path) -> Result<Profile> {
         let context = request_context_get_global_context().context("no global request context")?;
         let tunnel = SharedTunnel::default();
         lock(&tunnel).initialized = true;
-        Ok(Profile { name: DEFAULT.to_owned(), context, tunnel })
+        let sites = crate::permission::SiteStore::open(&profiles.join(DEFAULT), false);
+        Ok(Profile { name: DEFAULT.to_owned(), context, tunnel, sites })
     }
 
     /// Creates the context in `profiles/<name>`; the proxy is applied once it initializes.
@@ -173,7 +176,8 @@ impl Profile {
         let tunnel = shared;
         let mut handler = ProxyOnInit::new(Arc::clone(&tunnel));
         let context = request_context_create_context(Some(&settings), Some(&mut handler)).context("request_context_create_context")?;
-        Ok(Profile { name: name.to_owned(), context, tunnel })
+        let sites = crate::permission::SiteStore::open(&path, name == AGENT);
+        Ok(Profile { name: name.to_owned(), context, tunnel, sites })
     }
 
     /// Re-points the tunnel proxy and its credentials (e.g. after the local proxy restarts), or
