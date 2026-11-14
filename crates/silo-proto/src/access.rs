@@ -215,6 +215,9 @@ pub enum Need {
     /// Never a remote or paired client, a share link or an agent token
     /// (macOS privacy permissions of this Mac).
     Local,
+    /// Only the login server: a unix peer with uid 0 that said
+    /// `role: login` (`docs/LOGIN_SERVER.md` §6).
+    Login,
 }
 
 const fn rights(on: Target, rights: Rights) -> Need {
@@ -302,6 +305,9 @@ pub fn need(method: &Method) -> Need {
         M::HostOffer { .. } => Need::Offer,
         M::AppReply { .. } => Need::AppReply,
         M::PermissionsStatus {} | M::PermissionsRequest { .. } | M::AppPermissionsShow { .. } => Need::Local,
+        M::LoginAdmit(_) | M::LoginRevoke(_) => Need::Login,
+        // The config runs commands as the server's user.
+        M::ConfigGet {} | M::ConfigReload {} | M::ActionList {} | M::ActionRun(_) => rights(Server, Control),
 
         M::BlockView { .. }
         | M::TerminalCapture { .. }
@@ -381,7 +387,9 @@ pub fn need(method: &Method) -> Need {
         | M::AppJumpPrompt { .. }
         | M::AppSelectOutput { .. }
         | M::AppCopyOutput { .. }
-        | M::AppOpenShare { .. } => rights(Server, Control),
+        | M::AppOpenShare { .. }
+        | M::AppModeEnter { .. }
+        | M::AppModeExit { .. } => rights(Server, Control),
 
         M::ServerLog { .. } | M::PairList {} | M::GrantList {} | M::ServiceSocket { .. } => rights(Server, Owner),
         M::ServerShutdown { .. }
@@ -405,6 +413,8 @@ pub enum AccessKind {
     AppReply,
     /// Only the user on the server's machine (see [`Need::Local`]).
     Local,
+    /// Only the login server (see [`Need::Login`]).
+    Login,
     #[serde(other)]
     Unknown,
 }
@@ -455,6 +465,7 @@ pub fn access(name: &str, method: &Method) -> Access {
         Need::Offer => plain(AccessKind::Offer),
         Need::AppReply => plain(AccessKind::AppReply),
         Need::Local => plain(AccessKind::Local),
+        Need::Login => plain(AccessKind::Login),
         Need::Rights { on, rights, approval } => {
             let (target, param) = on.describe();
             Access { kind: AccessKind::Rights, target: Some(target), param: param.map(str::to_owned), rights: Some(rights), approval, app }
@@ -526,6 +537,24 @@ mod tests {
             assert_eq!(access(&name, &method).kind, AccessKind::Local, "{name}");
         }
         assert_eq!(serde_json::to_value(AccessKind::Local).unwrap(), "local");
+    }
+
+    #[test]
+    fn login_methods_are_the_login_server_s_and_config_needs_control() {
+        use crate::config::ActionRunParams;
+        use crate::login::{LoginAdmitParams, LoginRevokeParams};
+        let admit = Method::LoginAdmit(LoginAdmitParams { device: "d".into(), name: "n".into(), account: "alice".into() });
+        let revoke = Method::LoginRevoke(LoginRevokeParams { device: "d".into(), account: None });
+        for method in [admit, revoke] {
+            assert_eq!(need(&method), Need::Login, "{method:?}");
+            let name = crate::api::method_name(&method);
+            assert_eq!(access(&name, &method).kind, AccessKind::Login, "{name}");
+        }
+        assert_eq!(serde_json::to_value(AccessKind::Login).unwrap(), "login");
+        let run = Method::ActionRun(ActionRunParams { name: "a".into(), ..ActionRunParams::default() });
+        for method in [Method::ConfigGet {}, Method::ConfigReload {}, Method::ActionList {}, run] {
+            assert_eq!(need(&method), rights(Target::Server, Rights::Control), "{method:?}");
+        }
     }
 
     #[test]

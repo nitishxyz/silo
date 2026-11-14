@@ -60,7 +60,7 @@ impl AddHostSheet {
         if let Some(name) = name {
             name_field.update(cx, |f, cx| f.set_text(name, cx));
         }
-        let ticket = cx.new(|cx| TextField::new("silo1… or a shared link", cx).on_glass());
+        let ticket = cx.new(|cx| TextField::new("silo1…, silol1… or a shared link", cx).on_glass());
         let subs = vec![
             cx.subscribe_in(&ticket, window, |this, _, event: &FieldEvent, window, cx| this.sheet_event(0, event, window, cx)),
             cx.subscribe_in(&name_field, window, |this, _, event: &FieldEvent, window, cx| this.sheet_event(1, event, window, cx)),
@@ -112,6 +112,28 @@ pub(crate) fn pair(
         let net = crate::remote::net(&home).await?;
         let (control, _) = silo_client::pair(net, &ticket, &client).await?;
         Ok((ticket.addr, control.hello().server.hostname.clone()))
+    })
+}
+
+/// Log in through a login server with `ticket` in the background: the
+/// account's server's address, a name to suggest (`account@hostname`) and
+/// where to log in again.
+pub(crate) fn login(
+    rt: &tokio::runtime::Handle,
+    home: PathBuf,
+    ticket: silo_client::transport::LoginTicket,
+) -> tokio::task::JoinHandle<anyhow::Result<(EndpointAddr, String, silo_client::hosts::LoginVia)>> {
+    let client = crate::conn::client_name();
+    rt.spawn(async move {
+        // The app's endpoint is the device key: the login server knows the
+        // device by it.
+        let net = crate::remote::net(&home).await?;
+        let reply = silo_client::login::login(net, &ticket, None, None, &client).await?;
+        let addr = silo_client::login::server_addr(&reply)?;
+        let (control, _) = silo_client::Control::connect_remote(net, addr.clone(), &client, false, None).await?;
+        let hostname = control.hello().server.hostname.clone();
+        let name = if hostname.is_empty() { reply.account.clone() } else { format!("{}@{hostname}", reply.account) };
+        Ok((addr, name, silo_client::login::via(&ticket, &reply, None)))
     })
 }
 
@@ -284,6 +306,12 @@ impl Workspace {
             self.close_add_host(window, cx);
             return self.open_share(share, window, cx);
         }
+        // A login server's ticket (`silol1…`, `account@silol1…`).
+        if let Ok(ticket) = silo_client::transport::LoginTicket::parse(&text)
+            && silo_client::transport::LoginTicket::is_login(&text)
+        {
+            return self.add_login_host(ticket, typed, replace, window, cx);
+        }
         let Ok(ticket) = PairTicket::decode(&text) else {
             return self.sheet_error("Invalid ticket.", cx);
         };
@@ -310,6 +338,49 @@ impl Workspace {
                 Err(error) => {
                     tracing::info!("pairing failed: {error:#}");
                     this.sheet_error(pair_error(&error), cx);
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Log in through a login server in the background, then save the
+    /// account's server as a paired host that remembers its login server.
+    fn add_login_host(
+        &mut self,
+        ticket: silo_client::transport::LoginTicket,
+        typed: String,
+        replace: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(sheet) = &mut self.add_host {
+            sheet.busy = true;
+            sheet.error = None;
+        }
+        let task = login(&self.rt, self.home.clone(), ticket);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok((addr, suggested, via)) => {
+                    let typed = Some(typed.trim().to_owned()).filter(|t| !t.is_empty());
+                    // Saved with its login server in one write (see `hosts::save`).
+                    match this.shared.update(cx, |shared, cx| shared.save_remote_via(addr, typed, &suggested, Some(via), replace, cx)) {
+                        Ok((index, _)) => {
+                            this.sync_hosts(cx);
+                            this.switch_host(index, window, cx);
+                            this.close_add_host(window, cx);
+                        }
+                        Err(error) => this.sheet_error(error, cx),
+                    }
+                }
+                Err(error) => {
+                    tracing::info!("login failed: {error:#}");
+                    match error.downcast_ref::<silo_client::login::LoginRefused>() {
+                        Some(refused) => this.sheet_error(refused.message.clone(), cx),
+                        None => this.sheet_error(pair_error(&error), cx),
+                    }
                 }
             });
         })

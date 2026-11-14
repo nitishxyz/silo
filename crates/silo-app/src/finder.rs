@@ -57,6 +57,8 @@ pub enum Group {
     Grep,
     Agents,
     Changes,
+    /// `init.lua` actions of one category (`config::category_label`).
+    Action(u16),
 }
 
 impl Group {
@@ -77,6 +79,7 @@ impl Group {
             Self::Grep => "Matches",
             Self::Agents => "Agents",
             Self::Changes => "Changes",
+            Self::Action(category) => crate::config::category_label(category),
         }
     }
 }
@@ -125,7 +128,7 @@ impl Scope {
             Self::All => !matches!(group, Group::Categories | Group::Grep | Group::Agents | Group::Changes),
             Self::Files => group == Group::Files,
             Self::Grep => group == Group::Grep,
-            Self::Commands => group == Group::Commands,
+            Self::Commands => matches!(group, Group::Commands | Group::Action(_)),
             Self::Settings => group == Group::Settings,
             Self::Spaces => matches!(group, Group::Sessions | Group::Machines),
             Self::Tabs => group == Group::Tabs,
@@ -452,6 +455,11 @@ pub enum Target {
         block: Option<String>,
         path: String,
     },
+    /// An `init.lua` action of host `host`.
+    Action {
+        host: usize,
+        name: String,
+    },
 }
 
 /// One result row.
@@ -483,7 +491,7 @@ pub enum Right {
 }
 
 impl Item {
-    fn new(target: Target, group: Group, text: impl Into<String>, key: String) -> Self {
+    pub(crate) fn new(target: Target, group: Group, text: impl Into<String>, key: String) -> Self {
         Self {
             target,
             group,
@@ -973,6 +981,9 @@ impl Workspace {
                 item.check = self.checked(command);
                 out.push(item);
             }
+        }
+        if scope.includes(Group::Action(0)) {
+            out.extend(self.action_items());
         }
         // Renaming the shown host is a command; the others' sit after
         // their Go to entries, so a bare name still goes there first.

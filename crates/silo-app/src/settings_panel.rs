@@ -304,6 +304,8 @@ pub struct SettingsSnapshot {
     pub sounds: bool,
     /// What the address bar searches with.
     pub search_engine: crate::search::SearchEngine,
+    /// How this app's endpoint reaches remote hosts.
+    pub relay: crate::remote::Relay,
     pub notify: crate::hosts::NotifyPrefs,
     /// macOS refused Silo's notifications.
     pub notify_denied: bool,
@@ -346,6 +348,7 @@ impl Default for SettingsSnapshot {
             confirm_close: true,
             sounds: true,
             search_engine: crate::search::SearchEngine::default(),
+            relay: crate::remote::Relay::Default,
             notify: crate::hosts::NotifyPrefs::default(),
             notify_denied: false,
             ui_font: UiFontSettings::default(),
@@ -378,6 +381,8 @@ pub enum SettingsEvent {
     SetDensity(Density),
     SetTabs(crate::hosts::TabPosition),
     SetSearchEngine(crate::search::SearchEngine),
+    /// The app endpoint's relay (applied at the next start).
+    SetRelay(crate::remote::Relay),
     /// Show a block type's headers.
     SetPaneHeaders(crate::pane_header::HeaderBlock, bool),
     /// Card padding and chrome take on the running app's background.
@@ -677,6 +682,11 @@ pub struct SettingsPanel {
     font_triggers: [TriggerBounds; 2],
     color_fields: Vec<(ColorSlot, Entity<TextField>)>,
     scrollback_field: Entity<TextField>,
+    /// Settings › Hosts: the custom relay's address, Custom picked before
+    /// one was entered, and why the typed one can't be used.
+    relay_field: Entity<TextField>,
+    relay_custom: bool,
+    relay_error: Option<String>,
     /// Input that could not be applied (bad hex, number out of range).
     field_error: Option<String>,
     /// The open theme dropdown (by trigger id) and its highlighted row.
@@ -761,6 +771,25 @@ impl SettingsPanel {
             _ => {}
         }));
         let voice_fields = voice_words::VoiceFields::new(&mut subscriptions, window, cx);
+        let relay_field = cx.new(|cx| TextField::new("https://relay.example.com", cx).on_glass());
+        subscriptions.push(cx.subscribe(&relay_field, |this, field, event, cx| match event {
+            FieldEvent::Submit => match crate::remote::Relay::parse(&field.read(cx).text) {
+                Ok(relay) => {
+                    this.relay_error = None;
+                    this.relay_custom = matches!(relay, crate::remote::Relay::Custom(_));
+                    cx.emit(SettingsEvent::SetRelay(relay));
+                }
+                Err(error) => {
+                    this.relay_error = Some(error);
+                    cx.notify();
+                }
+            },
+            FieldEvent::Cancel => {
+                this.relay_error = None;
+                this.sync_relay(cx);
+            }
+            _ => {}
+        }));
         let mut this = Self {
             snapshot,
             selected: Section::Appearance,
@@ -780,6 +809,9 @@ impl SettingsPanel {
             font_triggers: Default::default(),
             color_fields,
             scrollback_field,
+            relay_field,
+            relay_custom: false,
+            relay_error: None,
             field_error: None,
             theme_menu: None,
             theme_highlight: 0,
@@ -790,6 +822,7 @@ impl SettingsPanel {
             _subscriptions: subscriptions,
         };
         this.sync_fields(cx);
+        this.sync_relay(cx);
         this
     }
 
@@ -802,12 +835,28 @@ impl SettingsPanel {
         let old = &self.snapshot.terminal;
         let new = &snapshot.terminal;
         let fields_changed = old.colors != new.colors || old.scrollback_lines != new.scrollback_lines;
+        let relay_changed = self.snapshot.relay != snapshot.relay;
         self.snapshot = snapshot;
         self.pending_server = None;
         self.pending_remove = None;
         if fields_changed {
             self.sync_fields(cx);
         }
+        if relay_changed {
+            self.sync_relay(cx);
+        }
+        cx.notify();
+    }
+
+    /// Show the custom relay's address in its field (dropping edits).
+    fn sync_relay(&mut self, cx: &mut Context<Self>) {
+        let text = match &self.snapshot.relay {
+            crate::remote::Relay::Custom(url) => url.clone(),
+            _ => String::new(),
+        };
+        // A relay set elsewhere (`app.settings_set`) ends a Custom pick.
+        self.relay_custom = matches!(self.snapshot.relay, crate::remote::Relay::Custom(_));
+        self.relay_field.update(cx, |f, cx| f.replace_text(text, cx));
         cx.notify();
     }
 
@@ -1134,6 +1183,54 @@ impl SettingsPanel {
             );
         }
         row.into_any_element()
+    }
+
+    /// Settings › Hosts › Connection: the relay (Default, Off, Custom) and,
+    /// for Custom, its address.
+    fn relay_rows(&self, narrow: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use crate::remote::Relay;
+        let relay = &self.snapshot.relay;
+        let custom = self.relay_custom || matches!(relay, Relay::Custom(_));
+        let selected = match relay {
+            _ if custom => 2,
+            Relay::Off => 1,
+            _ => 0,
+        };
+        let panel = cx.entity().downgrade();
+        let field = self.relay_field.clone();
+        let control = Segmented::new("settings-relay", ["Default", "Off", "Custom"], selected)
+            .segment_width(72.0)
+            .on_select(move |index, window, cx| {
+                let _ = panel.update(cx, |this, cx| {
+                    this.relay_error = None;
+                    this.relay_custom = index == 2;
+                    match index {
+                        0 => cx.emit(SettingsEvent::SetRelay(Relay::Default)),
+                        1 => cx.emit(SettingsEvent::SetRelay(Relay::Off)),
+                        // A custom relay applies once its address is entered.
+                        _ => match Relay::parse(&field.read(cx).text) {
+                            Ok(relay @ Relay::Custom(_)) => cx.emit(SettingsEvent::SetRelay(relay)),
+                            _ => {
+                                let focus = field.read(cx).focus.clone();
+                                window.focus(&focus, cx);
+                            }
+                        },
+                    }
+                    cx.notify();
+                });
+            })
+            .into_any_element();
+        let note = if crate::remote::needs_restart(relay) {
+            "Takes effect after restarting Silo"
+        } else {
+            "How Silo reaches hosts it can't connect to directly"
+        };
+        let mut rows = vec![Self::row(SettingId::Relay.label(), Some(note.into()), Some(control), narrow)];
+        if custom {
+            let description = self.relay_error.clone().unwrap_or_else(|| "Press Return to use it".into());
+            rows.push(Self::row("Address", Some(description.into()), Some(Self::field_box(&self.relay_field, 240.0)), narrow));
+        }
+        rows
     }
 
     fn search_engine_control(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1966,6 +2063,7 @@ impl SettingsPanel {
                         false,
                     )],
                 ));
+                out.push(self.group(Some("Connection"), self.relay_rows(narrow, cx)));
             }
             Section::Server => {
                 let status = if s.server.status.is_empty() { "Unknown".to_owned() } else { s.server.status.clone() };

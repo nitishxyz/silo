@@ -41,6 +41,7 @@ pub enum SettingId {
     NotifyProgram,
     Shortcuts,
     Hosts,
+    Relay,
     PairDevice,
     VoiceTyping,
     VoiceEngine,
@@ -283,6 +284,15 @@ pub const SETTINGS: &[Setting] = &[
     ),
     setting!(SettingId::Hosts, "Hosts", "Hosts", Hosts, None, Open, "hosts machines remote add remove rename"),
     setting!(
+        SettingId::Relay,
+        "Relay",
+        "Relay",
+        Hosts,
+        Some("Connection"),
+        Choice,
+        "relay iroh network connection nat firewall self-hosted custom default off disabled"
+    ),
+    setting!(
         SettingId::PairDevice,
         "Pair a device",
         "New device",
@@ -456,6 +466,7 @@ impl SettingId {
             Self::CursorShape => label_of(&CURSOR_SHAPES, &t.cursor_shape),
             Self::Scrollback => format!("{} lines", t.scrollback_lines),
             Self::VoiceEngine => s.voice.prefs.engine.label().to_owned(),
+            Self::Relay => s.relay.label().to_owned(),
             _ => return None,
         })
     }
@@ -498,6 +509,7 @@ impl SettingId {
             Self::VoiceEngine => {
                 silo_voice::EngineKind::ALL.iter().map(|e| simple(e.label(), Self::voice(s, |p| p.engine = *e), *e == s.voice.prefs.engine)).collect()
             }
+            Self::Relay => relays(&s.relay).into_iter().map(|r| simple(r.label(), SettingsEvent::SetRelay(r.clone()), r == s.relay)).collect(),
             _ => Vec::new(),
         }
     }
@@ -549,6 +561,17 @@ fn fonts(choices: &[String], preference: &str, event: fn(String) -> SettingsEven
             swatch: None,
         }))
         .collect()
+}
+
+/// The relay choices: Default, Off, and the custom relay when one is set
+/// (a new one is typed in Settings).
+fn relays(current: &crate::remote::Relay) -> Vec<crate::remote::Relay> {
+    use crate::remote::Relay;
+    let mut out = vec![Relay::Default, Relay::Off];
+    if matches!(current, Relay::Custom(_)) {
+        out.push(current.clone());
+    }
+    out
 }
 
 /// The search words of a panel section's settings.
@@ -608,6 +631,20 @@ mod tests {
         assert!(matches!(SettingId::AgentHeaders.toggled(false), Some(SettingsEvent::SetPaneHeaders(HeaderBlock::Agent, false))));
         let words = section_keywords(Section::Appearance);
         assert!(["block headers", "terminal", "agent"].iter().all(|w| words.contains(w)), "{words}");
+    }
+
+    #[test]
+    fn relay_is_default_off_or_the_custom_one() {
+        use crate::remote::Relay;
+        let mut s = SettingsSnapshot::default();
+        assert_eq!(SettingId::Relay.value(&s).as_deref(), Some("Default"));
+        let labels = |s: &SettingsSnapshot| SettingId::Relay.choices(s).iter().map(|c| (c.label.clone(), c.selected)).collect::<Vec<_>>();
+        assert_eq!(labels(&s), [("Default".into(), true), ("Off".into(), false)]);
+        s.relay = Relay::Custom("https://relay.example.com/".into());
+        assert_eq!(SettingId::Relay.value(&s).as_deref(), Some("https://relay.example.com/"));
+        assert_eq!(labels(&s), [("Default".into(), false), ("Off".into(), false), ("https://relay.example.com/".into(), true)]);
+        assert!(matches!(&SettingId::Relay.choices(&s)[1].event, SettingsEvent::SetRelay(Relay::Off)));
+        assert!(section_keywords(Section::Hosts).contains("relay"));
     }
 
     #[test]

@@ -2552,6 +2552,10 @@ fn browser_split(block: String, axis: silo_proto::model::Axis, url: Option<Strin
 fn intercept(pane: gpui::WeakEntity<BrowserPane>, cx: &mut gpui::App) -> gpui::Subscription {
     cx.intercept_keystrokes(move |event, window, cx| {
         let k = &event.keystroke;
+        // A chord `init.lua` binds is the config's, not the page's.
+        if crate::keymap::config_starts(k) {
+            return;
+        }
         let _ = pane.update(cx, |pane, cx| {
             // ⌘F / ⌘G / ⇧⌘G: the terminal's find keys, here find in page.
             let in_block = pane.focus.is_focused(window) || pane.find_focused(window, cx) || pane.address.read(cx).focus.is_focused(window);

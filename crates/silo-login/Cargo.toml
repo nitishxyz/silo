@@ -1,0 +1,28 @@
+[package]
+name = "silo-login"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+autotests = false
+rust-version.workspace = true
+
+[dependencies]
+silo-proto.workspace = true
+silo-transport.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+libc.workspace = true
+rustix.workspace = true
+rand.workspace = true
+data-encoding.workspace = true
+
+[dev-dependencies]
+silo-server.workspace = true
+silo-client.workspace = true
+
+[[test]]
+name = "broker"
+path = "tests/broker.rs"

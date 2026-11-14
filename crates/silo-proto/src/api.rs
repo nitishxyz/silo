@@ -148,6 +148,11 @@ fn result_schema(method: &Method) -> Schema {
         M::SearchFiles(_) => schema_for!(SearchFiles),
         M::SearchGrep(_) => schema_for!(SearchGrep),
         M::SearchOpened(_) => schema_for!(Empty),
+        M::ConfigGet {} | M::ConfigReload {} => schema_for!(crate::config::ConfigState),
+        M::ActionList {} => schema_for!(crate::config::ActionList),
+        M::ActionRun(_) => schema_for!(crate::config::ActionResult),
+        M::LoginAdmit(_) => schema_for!(crate::login::LoginAdmitted),
+        M::LoginRevoke(_) => schema_for!(Empty),
         M::BrowserClick(_)
         | M::BrowserHover(_)
         | M::BrowserFill(_)
@@ -254,7 +259,9 @@ fn result_schema(method: &Method) -> Schema {
         | M::AppSelectOutput { .. }
         | M::AppCopyOutput { .. }
         | M::AppOpenShare { .. }
-        | M::AppPermissionsShow { .. } => schema_for!(AppResult),
+        | M::AppPermissionsShow { .. }
+        | M::AppModeEnter { .. }
+        | M::AppModeExit { .. } => schema_for!(AppResult),
     }
 }
 
@@ -396,6 +403,18 @@ pub fn examples() -> Vec<Method> {
         M::SearchFiles(SearchFilesParams { root: "~/src/silo".into(), query: "main.rs !test".into(), limit: Some(20) }),
         M::SearchGrep(SearchGrepParams { root: "~/src/silo".into(), query: "fn main".into(), mode: Some(SearchGrepMode::Plain), limit: None }),
         M::SearchOpened(SearchOpenedParams { root: "~/src/silo".into(), path: "src/main.rs".into() }),
+        M::ConfigGet {},
+        M::ConfigReload {},
+        M::ActionList {},
+        M::ActionRun(crate::config::ActionRunParams {
+            name: "dev_layout".into(),
+            args: json!({"file": "app.log"}),
+            session_id: Some(s()),
+            window_id: Some(w()),
+            block_id: Some(b()),
+            client_id: None,
+            origin: Some(crate::config::ActionOrigin::Cli),
+        }),
         M::ServerInfo {},
         M::ServerShutdown { force: false },
         M::ServerRestart { force: false },
@@ -496,6 +515,15 @@ pub fn examples() -> Vec<Method> {
         M::GrantList {},
         M::GrantRevoke { id: "3f9a1c0d5e7b2a46".into() },
         M::ApprovalAnswer { id: "a1b2c3d4e5f60718".into(), allow: true },
+        M::LoginAdmit(crate::login::LoginAdmitParams {
+            device: "7c3e5f0d9a1b4c6e8f2a0b1c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d9e".into(),
+            name: "work laptop".into(),
+            account: "alice".into(),
+        }),
+        M::LoginRevoke(crate::login::LoginRevokeParams {
+            device: "7c3e5f0d9a1b4c6e8f2a0b1c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d9e".into(),
+            account: None,
+        }),
         M::PermissionsStatus {},
         M::PermissionsRequest { id: PermissionId::ScreenRecording },
         M::AppReply { request_id: "r1b2c3d4e5f60718".into(), result: Some(json!({})), error: None },
@@ -531,6 +559,8 @@ pub fn examples() -> Vec<Method> {
         M::AppCopyOutput { block_id: None, client_id: None },
         M::AppOpenShare { link: "https://silo.example/#silos1aeaqcaibaeaq".into(), client_id: None },
         M::AppPermissionsShow { id: Some(PermissionId::Accessibility), client_id: None },
+        M::AppModeEnter { name: "resize".into(), once: false, client_id: None },
+        M::AppModeExit { all: false, client_id: None },
     ]
 }
 
@@ -654,6 +684,7 @@ mod tests {
                 Need::Offer => assert_eq!(access.kind, AccessKind::Offer, "{name}"),
                 Need::AppReply => assert_eq!(access.kind, AccessKind::AppReply, "{name}"),
                 Need::Local => assert_eq!(access.kind, AccessKind::Local, "{name}"),
+                Need::Login => assert_eq!(access.kind, AccessKind::Login, "{name}"),
                 Need::Rights { rights, approval, .. } => {
                     assert_eq!((access.kind, access.rights, access.approval), (AccessKind::Rights, Some(rights), approval), "{name}");
                     let target = access.target.unwrap_or_else(|| panic!("{name} has no target"));

@@ -74,16 +74,18 @@ pub fn path_lead() -> &'static (PathBuf, Vec<PathBuf>) {
     })
 }
 
-/// Environment for a spawned program of block `block_id`: `SILO_BLOCK`, and
-/// `PATH` led by [`path_lead`] (login shells restore that order after their
-/// startup files through [`crate::shell`]).
-pub fn shell_env(block_id: &str) -> Vec<(OsString, OsString)> {
+/// Environment for a spawned program of block `block_id` in session
+/// `session_id`: `SILO_BLOCK`, `SILO_SESSION`, and `PATH` led by
+/// [`path_lead`] (login shells restore that order after their startup files
+/// through [`crate::shell`]). A block may later move to another session;
+/// `SILO_SESSION` stays where it started, as a process environment must.
+pub fn shell_env(block_id: &str, session_id: &str) -> Vec<(OsString, OsString)> {
     static PATH: OnceLock<OsString> = OnceLock::new();
     let path = PATH.get_or_init(|| {
         let rest = std::env::var_os("PATH").unwrap_or_default();
         std::env::join_paths(path_lead().1.iter().cloned().chain(std::env::split_paths(&rest))).unwrap_or(rest)
     });
-    vec![("PATH".into(), path.clone()), ("SILO_BLOCK".into(), block_id.into())]
+    vec![("PATH".into(), path.clone()), ("SILO_BLOCK".into(), block_id.into()), ("SILO_SESSION".into(), session_id.into())]
 }
 
 #[cfg(test)]
@@ -104,8 +106,9 @@ mod tests {
         let before = std::fs::metadata(dir.join("xclip")).unwrap().modified().unwrap();
         install_shims(&home).unwrap();
         assert_eq!(std::fs::metadata(dir.join("xclip")).unwrap().modified().unwrap(), before);
-        let env = shell_env("b1");
+        let env = shell_env("b1", "s1");
         assert!(env.contains(&("SILO_BLOCK".into(), "b1".into())));
+        assert!(env.contains(&("SILO_SESSION".into(), "s1".into())));
         let _ = std::fs::remove_dir_all(&home);
     }
 

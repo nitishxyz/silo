@@ -434,6 +434,36 @@ async fn server_addr(control: &Control) -> Option<silo_client::transport::Endpoi
     silo_client::hosts::current_addr(control).await.inspect_err(|e| tracing::debug!("server address: {e:#}")).ok().flatten()
 }
 
+/// How long logging in again may take: the login server may start the
+/// account's server first.
+const RELOGIN_LIMIT: Duration = Duration::from_secs(90);
+
+/// A remote host that did not answer: log in again through its login
+/// server, if it has one (see [`Transport::relogin`]); whether it worked.
+/// A new route is sent on as [`ConnEvent::Addr`].
+async fn relogin(transport: &mut Transport, name: &str, tx: &mpsc::UnboundedSender<ConnEvent>) -> bool {
+    let Transport::Iroh { addr: before, .. } = &*transport else { return false };
+    let before = before.clone();
+    match tokio::time::timeout(RELOGIN_LIMIT, transport.relogin(name)).await {
+        Ok(None) => false,
+        Ok(Some(Ok(addr))) => {
+            tracing::info!(host = %addr.id, "logged in again through the login server");
+            if addr != before {
+                let _ = tx.send(ConnEvent::Addr(addr));
+            }
+            true
+        }
+        Ok(Some(Err(error))) => {
+            tracing::warn!(host = %before.id, "log in again through the login server: {error:#}");
+            false
+        }
+        Err(_) => {
+            tracing::warn!(host = %before.id, "log in again through the login server: timed out");
+            false
+        }
+    }
+}
+
 async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, paused: Arc<AtomicBool>) {
     let name = client_name();
     let remote = transport.is_remote();
@@ -467,7 +497,18 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
         }
         // A stopped server accepts the socket but never answers the hello.
         let limit = if remote { silo_client::PING_TIMEOUT_IROH } else { silo_client::PING_TIMEOUT_LOCAL };
-        let connected = tokio::time::timeout(limit, transport.connect(&name)).await.unwrap_or_else(|_| Err(anyhow::anyhow!("server not responding")));
+        let not_responding = || Err(anyhow::Error::new(silo_client::login::NotAnswering("server not responding".into())));
+        let mut connected = tokio::time::timeout(limit, transport.connect(&name)).await.unwrap_or_else(|_| not_responding());
+        // A host added through a login server that does not answer (its
+        // server is not running): log in there again, which starts it, and
+        // retry once. At most one login per attempt; a failure goes on to
+        // the backoff below.
+        if let Err(error) = &connected
+            && silo_client::login::not_answering(error)
+            && relogin(&mut transport, &name, &tx).await
+        {
+            connected = tokio::time::timeout(limit, transport.connect(&name)).await.unwrap_or_else(|_| not_responding());
+        }
         match connected {
             Ok((control, mut events)) => {
                 attempt = 0;

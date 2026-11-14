@@ -86,7 +86,7 @@ async fn join_offers_and_adds_host() {
     timeout(T, silo_cli::link::offer(&b_home, &join, &offer_ticket, "box-b", &options)).await.unwrap().unwrap();
     let offer = silo_cli::link::wait_offer(&mut a_events, &invite_id, T).await.unwrap();
     assert_eq!((offer.name.as_str(), offer.endpoint_id.as_str()), ("box-b", b.hello().server.endpoint_id.as_str()));
-    let host = timeout(T, silo_cli::add_host(&a_home, &offer.ticket, None, &options, "a")).await.unwrap().unwrap();
+    let host = timeout(T, silo_cli::add_host(&a_home, &offer.ticket, None, None, &options, "a")).await.unwrap().unwrap();
     let hostname = b.hello().server.hostname.clone();
     assert_eq!(host.name, if hostname.is_empty() { "silo host" } else { hostname.as_str() }, "a new host is named by its hostname");
     assert_eq!(Hosts::load(&a_home).unwrap().hosts, [host]);
@@ -110,7 +110,7 @@ async fn join_offers_and_adds_host() {
     let (_, offer_ticket) = loopback(&b, InvitePurpose::Device).await;
     timeout(T, silo_cli::link::offer(&b_home, &join, &offer_ticket, "box-b", &options)).await.unwrap().unwrap();
     let offer = silo_cli::link::wait_offer(&mut a_events, &invite_id, T).await.unwrap();
-    let host = timeout(T, silo_cli::add_host(&a_home, &offer.ticket, None, &options, "a")).await.unwrap().unwrap();
+    let host = timeout(T, silo_cli::add_host(&a_home, &offer.ticket, None, None, &options, "a")).await.unwrap().unwrap();
     assert_eq!((host.name.as_str(), host.id.as_str()), ("mini", b.hello().server.endpoint_id.as_str()), "same key, name kept");
     assert_eq!(Hosts::load(&a_home).unwrap().hosts, [host]);
 
@@ -144,7 +144,7 @@ async fn pair_then_remote_ls() {
     let error = silo_cli::connect_remote(&client_home, "box", &options, "laptop").await.err().unwrap();
     assert!(format!("{error:#}").contains("refused this device"), "{error:#}");
 
-    let host = timeout(T, silo_cli::add_host(&client_home, &invite, None, &options, "laptop")).await.unwrap().unwrap();
+    let host = timeout(T, silo_cli::add_host(&client_home, &invite, None, None, &options, "laptop")).await.unwrap().unwrap();
     assert_eq!(host.id, server_id);
     assert_eq!(host.name, "box", "re-adding keeps the stored name");
     assert_eq!(Hosts::load(&client_home).unwrap().hosts.len(), 1);
@@ -256,7 +256,8 @@ async fn upgrade_reaches_a_moved_host() {
     let task = start_on(&server_home, Some(port)).await;
     let owner = Control::connect(&paths::socket(&server_home), "owner").await.unwrap().0;
     let options = NetOptions { relay: RelayConfig::Disabled, mdns: false };
-    let host = timeout(T, silo_cli::add_host(&client_home, &ticket(&owner).await, Some("box".into()), &options, "laptop")).await.unwrap().unwrap();
+    let host =
+        timeout(T, silo_cli::add_host(&client_home, &ticket(&owner).await, Some("box".into()), None, &options, "laptop")).await.unwrap().unwrap();
     let candidate = Candidate::new(&Source::Local).unwrap();
     let up_to_date = format!("box: already up to date ({})", silo_proto::upgrade::version_text(env!("CARGO_PKG_VERSION"), silo_proto::BUILD));
     let here = |port| -> SocketAddr { (Ipv4Addr::LOCALHOST, port).into() };

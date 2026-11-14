@@ -22,6 +22,9 @@ pub enum Principal {
     Offer {
         invite_id: String,
     },
+    /// The login server (a unix peer with uid 0 that said `role: login`):
+    /// `login.*`, `server.info` and `ping`, nothing else.
+    Login,
 }
 
 impl Principal {
@@ -50,7 +53,7 @@ impl Principal {
                 Who::Secret { kind: silo_proto::access::SecretKind::Link, .. } => WatcherKind::Link,
                 _ => WatcherKind::Unknown,
             },
-            Self::Offer { .. } => WatcherKind::Unknown,
+            Self::Offer { .. } | Self::Login => WatcherKind::Unknown,
         }
     }
 }
@@ -71,7 +74,7 @@ pub enum On<'a> {
 pub fn rights_on(principal: &Principal, on: On<'_>) -> Option<Rights> {
     let grant = match principal {
         Principal::Owner => return Some(Rights::Owner),
-        Principal::Offer { .. } => return None,
+        Principal::Offer { .. } | Principal::Login => return None,
         Principal::Grant(grant) => grant,
     };
     if grant.expired(unix_secs()) {
@@ -129,6 +132,10 @@ pub fn check(principal: &Principal, role: ClientRole, method: &Method, reg: &Reg
         (Need::Offer, Principal::Offer { .. }) => return Ok(open),
         (Need::Offer, _) => return Err(RpcError::forbidden(&name())),
         (_, Principal::Offer { .. }) => return Err(RpcError::unauthorized("a join invite only permits host.offer")),
+        (Need::Login, Principal::Login) => return Ok(open),
+        (Need::Login, _) => return Err(RpcError::denied(format!("{} is only for the login server", name()))),
+        (_, Principal::Login) if matches!(method, Method::ServerInfo {} | Method::Ping {}) => return Ok(open),
+        (_, Principal::Login) => return Err(RpcError::denied("the login server only permits login.*, server.info and ping")),
         _ => {}
     }
     let (on, wanted, approval) = match need {
@@ -138,7 +145,7 @@ pub fn check(principal: &Principal, role: ClientRole, method: &Method, reg: &Reg
         Need::AppReply if role == ClientRole::App => return Ok(open),
         Need::AppReply => return Err(RpcError::forbidden(&name())),
         Need::Rights { on, rights, approval } => (on, rights, approval),
-        Need::Offer => unreachable!("handled above"),
+        Need::Offer | Need::Login => unreachable!("handled above"),
     };
     let params = serde_json::to_value(method).map_err(RpcError::internal)?.get_mut("params").map(Value::take).unwrap_or_default();
     let id = |param: &str| -> Result<String, RpcError> {
@@ -380,6 +387,34 @@ mod tests {
                 for (who, principal) in &others {
                     assert!(check(principal, role, method, &reg).is_err(), "{method:?} as {who}");
                 }
+            }
+        }
+    }
+
+    /// The login server reaches `login.*`, `server.info` and `ping` only,
+    /// and nobody else reaches `login.*`.
+    #[test]
+    fn the_login_server_reaches_login_methods_only() {
+        use silo_proto::login::{LoginAdmitParams, LoginRevokeParams};
+        let reg = registry();
+        let admit = Method::LoginAdmit(LoginAdmitParams { device: "d".into(), name: "n".into(), account: "alice".into() });
+        let revoke = Method::LoginRevoke(LoginRevokeParams { device: "d".into(), account: None });
+        for method in [&admit, &revoke, &Method::ServerInfo {}, &Method::Ping {}] {
+            assert_eq!(check(&Principal::Login, ClientRole::Login, method, &reg), Ok(Gate { approval: false }), "{method:?}");
+        }
+        for method in [Method::SessionList {}, Method::PairList {}, Method::ConfigGet {}, Method::EventsSubscribe {}] {
+            assert_eq!(check(&Principal::Login, ClientRole::Login, &method, &reg).unwrap_err().code, RpcError::FORBIDDEN, "{method:?}");
+        }
+        assert_eq!(rights_on(&Principal::Login, On::Server), None);
+        let others = [
+            ("owner", Principal::Owner),
+            ("device", grant(Who::Device { id: "d".into() }, Scope::Server, Rights::Owner)),
+            ("token", grant(Who::Secret { kind: SecretKind::Token, hash: "t".into() }, Scope::Server, Rights::Control)),
+            ("offer", Principal::Offer { invite_id: "i".into() }),
+        ];
+        for (who, principal) in &others {
+            for method in [&admit, &revoke] {
+                assert!(check(principal, ClientRole::Login, method, &reg).is_err(), "{method:?} as {who}");
             }
         }
     }

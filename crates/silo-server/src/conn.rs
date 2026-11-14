@@ -81,12 +81,18 @@ where
     let (mut reader, writer) = tokio::io::split(stream);
     let first = match &peer {
         Peer::Local { .. } => read_frame(&mut reader).await,
-        Peer::Remote { .. } => tokio::time::timeout(HELLO_TIMEOUT, read_frame_max(&mut reader, REMOTE_HELLO_MAX)).await.unwrap_or(Ok(None)),
+        Peer::Remote { .. } | Peer::Root { .. } => {
+            tokio::time::timeout(HELLO_TIMEOUT, read_frame_max(&mut reader, REMOTE_HELLO_MAX)).await.unwrap_or(Ok(None))
+        }
     };
     let first = match first {
         Ok(Some(frame)) => frame,
         _ => return,
     };
+    // Another user's root peer is the login server: one control stream.
+    if matches!(peer, Peer::Root { .. }) && first.kind != kind::CONTROL_HELLO {
+        return tracing::warn!(kind = first.kind, "refused a root peer's non-control stream");
+    }
     let result = match (first.kind, expect) {
         (kind::CONTROL_HELLO, Expect::Any | Expect::Control) => control(server, first, reader, writer, peer, admitted).await,
         (kind::DATA_HELLO, Expect::Any | Expect::Data) => data(server, first, reader, writer, peer).await,
@@ -106,10 +112,16 @@ where
 /// Serve one accepted unix stream, or pass it on as an upgrade request when
 /// it starts with [`handoff::MAGIC`].
 pub async fn accept(server: Arc<Server>, stream: tokio::net::UnixStream, upgrades: mpsc::UnboundedSender<std::os::unix::net::UnixStream>) {
+    let cred = stream.peer_cred().ok();
+    let pid = cred.and_then(|c| c.pid());
+    // uid 0 on another user's server (the accept loop let it through):
+    // never an upgrade, never the owner.
+    if cred.is_some_and(|c| c.uid() == 0) && !rustix::process::getuid().is_root() {
+        return serve(server, stream, Peer::Root { pid }, Expect::Control, None).await;
+    }
     match handoff::peek_magic(&stream).await {
         Ok(true) => {}
         Ok(false) => {
-            let pid = stream.peer_cred().ok().and_then(|c| c.pid());
             return serve(server, stream, Peer::Local { pid }, Expect::Any, None).await;
         }
         Err(error) => return tracing::debug!("peek: {error}"),
@@ -215,7 +227,7 @@ where
         let (pane, tty) = match (&peer, &stand_in) {
             (_, Some(stand_in)) => (stand_in.pane.clone(), stand_in.tty),
             (Peer::Local { pid }, None) => approval::origin(*pid, &reg),
-            (Peer::Remote { .. }, None) => (None, false),
+            (Peer::Remote { .. } | Peer::Root { .. }, None) => (None, false),
         };
         let id = reg.add_client(hello.client_name.clone(), hello.passive);
         if let Some(entry) = reg.clients.get_mut(&id) {
@@ -231,7 +243,9 @@ where
         id
     };
     let granted = match &principal {
-        Principal::Grant(grant) if matches!(grant.who, Who::Secret { .. }) => Some(silo_proto::access::Granted::from(grant.as_ref())),
+        Principal::Grant(grant) if matches!(grant.who, Who::Secret { .. }) || crate::login::derived(grant) => {
+            Some(silo_proto::access::Granted::from(grant.as_ref()))
+        }
         _ => None,
     };
     let mut reply = ServerHello { granted, ..ServerHello::ours(client_id, server.info_now().await) };
@@ -513,6 +527,10 @@ fn slow(method: &Method) -> bool {
             | M::AppPaneHeaders { .. }
             | M::AppPaste { .. }
             | M::AppPermissionsShow { .. }
+            | M::AppModeEnter { .. }
+            | M::AppModeExit { .. }
+            | M::ActionRun(_)
+            | M::ConfigReload {}
             | M::AppQuit { .. }
             | M::AppSelectAll { .. }
             | M::AppSelectOutput { .. }
@@ -598,6 +616,25 @@ pub struct Ctx {
 fn admit(server: &Server, peer: &Peer, hello: &ClientHello) -> Result<(Principal, Option<String>), RpcError> {
     let mut auth = server.auth();
     let (endpoint_id, conn_id) = match peer {
+        Peer::Root { .. } => {
+            let plain = hello.grant.is_none() && hello.invite.is_none() && hello.device.is_none();
+            return if hello.role == ClientRole::Login && plain {
+                tracing::info!(client = hello.client_name, "the login server connected");
+                Ok((Principal::Login, None))
+            } else {
+                Err(RpcError::unauthorized("another user's connection is admitted only as the login server"))
+            };
+        }
+        Peer::Local { .. } if hello.role == ClientRole::Login => {
+            // The login server runs as root: only root's own server (or
+            // one told to trust its own uid, for tests and `--unprivileged`)
+            // takes `role: login` from its own uid.
+            return if hello.grant.is_none() && (rustix::process::getuid().is_root() || server.trust_own_login) {
+                Ok((Principal::Login, None))
+            } else {
+                Err(RpcError::unauthorized("role login is only for the login server"))
+            };
+        }
         Peer::Local { .. } => {
             return match &hello.grant {
                 None => Ok((Principal::Owner, None)),
@@ -686,7 +723,7 @@ async fn grant_create(
     let kind = match kind {
         GrantKind::Token => SecretKind::Token,
         GrantKind::Link => SecretKind::Link,
-        GrantKind::Account => return Err(RpcError::bad_request("accounts need a login server")),
+        GrantKind::Account => return crate::login::grant_account(server, ctx.id, &ctx.principal, scope, rights, ttl, label),
     };
     if rights == Rights::Owner {
         return Err(RpcError::bad_request("tokens and links cannot hold owner rights"));
@@ -1130,7 +1167,13 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::AppSelectOutput { .. }
         | Method::AppCopyOutput { .. }
         | Method::AppOpenShare { .. }
-        | Method::AppPermissionsShow { .. } => crate::app_bridge::handle(server, client_id, method).await,
+        | Method::AppPermissionsShow { .. }
+        | Method::AppModeEnter { .. }
+        | Method::AppModeExit { .. } => crate::app_bridge::handle(server, client_id, method).await,
+        Method::ConfigGet {} | Method::ConfigReload {} | Method::ActionList {} | Method::ActionRun(_) => {
+            crate::scripting::handle(server, client_id, &ctx.principal, method).await
+        }
+        Method::LoginAdmit(_) | Method::LoginRevoke(_) => crate::login::handle(server, client_id, &ctx.principal, method).await,
         Method::PermissionsStatus {} | Method::PermissionsRequest { .. } => crate::permissions::handle(server, client_id, method).await,
     }
 }

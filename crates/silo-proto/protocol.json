@@ -2317,6 +2317,32 @@
           "data"
         ],
         "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "properties": {
+              "revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "revision"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "const": "config.changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
       }
     ],
     "title": "Event"
@@ -2381,6 +2407,10 @@
             },
             {
               "const": "app",
+              "type": "string"
+            },
+            {
+              "const": "login",
               "type": "string"
             }
           ]
@@ -3001,7 +3031,262 @@
       "type": "object"
     }
   },
+  "login": {
+    "LoginAnswer": {
+      "$defs": {
+        "LoginError": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        "LoginReply": {
+          "properties": {
+            "account": {
+              "type": "string"
+            },
+            "server_id": {
+              "type": "string"
+            },
+            "ticket": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "account",
+            "ticket",
+            "server_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "ok": {
+              "$ref": "#/$defs/LoginReply"
+            }
+          },
+          "required": [
+            "ok"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/LoginError"
+            }
+          },
+          "required": [
+            "error"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "LoginAnswer"
+    },
+    "LoginRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "account": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "invite": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "protocol": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "server_of": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "title": "LoginRequest",
+      "type": "object"
+    }
+  },
   "methods": {
+    "action.list": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ActionInfo": {
+            "properties": {
+              "args": {
+                "default": null
+              },
+              "category": {
+                "default": "",
+                "type": "string"
+              },
+              "description": {
+                "default": "",
+                "type": "string"
+              },
+              "hidden": {
+                "default": false,
+                "type": "boolean"
+              },
+              "keywords": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "repeats": {
+                "default": false,
+                "type": "boolean"
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              },
+              "title": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "actions": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ActionInfo"
+            },
+            "type": "array"
+          }
+        },
+        "title": "ActionList",
+        "type": "object"
+      }
+    },
+    "action.run": {
+      "params": {
+        "$defs": {
+          "ActionOrigin": {
+            "enum": [
+              "key",
+              "palette",
+              "cli",
+              "api",
+              "script",
+              "event",
+              "timer",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "args": {
+            "default": null
+          },
+          "block_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ActionOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "window_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "result": {
+            "default": null
+          }
+        },
+        "title": "ActionResult",
+        "type": "object"
+      }
+    },
     "agent.set": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3119,6 +3404,10 @@
               },
               {
                 "const": "local",
+                "type": "string"
+              },
+              {
+                "const": "login",
                 "type": "string"
               }
             ]
@@ -3573,6 +3862,66 @@
         "required": [
           "delta"
         ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "title": "AppResult",
+        "type": "object"
+      }
+    },
+    "app.mode_enter": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "client_id": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "once": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "title": "AppResult",
+        "type": "object"
+      }
+    },
+    "app.mode_exit": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "all": {
+            "default": false,
+            "type": "boolean"
+          },
+          "client_id": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "result": {
@@ -10951,6 +11300,634 @@
         "type": "object"
       }
     },
+    "config.get": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ActionInfo": {
+            "properties": {
+              "args": {
+                "default": null
+              },
+              "category": {
+                "default": "",
+                "type": "string"
+              },
+              "description": {
+                "default": "",
+                "type": "string"
+              },
+              "hidden": {
+                "default": false,
+                "type": "boolean"
+              },
+              "keywords": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "repeats": {
+                "default": false,
+                "type": "boolean"
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              },
+              "title": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
+          "BindTarget": {
+            "oneOf": [
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "command",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "method",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "name"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "action",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "name"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "type": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ConfigProblem": {
+            "properties": {
+              "level": {
+                "$ref": "#/$defs/ProblemLevel"
+              },
+              "message": {
+                "type": "string"
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "level",
+              "message"
+            ],
+            "type": "object"
+          },
+          "HandlerInfo": {
+            "properties": {
+              "event": {
+                "type": "string"
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event"
+            ],
+            "type": "object"
+          },
+          "KeyBinding": {
+            "properties": {
+              "args": {
+                "default": null
+              },
+              "keys": {
+                "type": "string"
+              },
+              "mode": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/BindTarget"
+              }
+            },
+            "required": [
+              "keys",
+              "target"
+            ],
+            "type": "object"
+          },
+          "KeyMode": {
+            "properties": {
+              "exclusive": {
+                "default": false,
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
+          "KeyUnbind": {
+            "properties": {
+              "keys": {
+                "type": "string"
+              },
+              "mode": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              },
+              "target": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "keys"
+            ],
+            "type": "object"
+          },
+          "ProblemLevel": {
+            "enum": [
+              "warning",
+              "error"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "actions": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ActionInfo"
+            },
+            "type": "array"
+          },
+          "bindings": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/KeyBinding"
+            },
+            "type": "array"
+          },
+          "exists": {
+            "default": false,
+            "type": "boolean"
+          },
+          "failed": {
+            "default": false,
+            "type": "boolean"
+          },
+          "handlers": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/HandlerInfo"
+            },
+            "type": "array"
+          },
+          "loaded_at": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "modes": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/KeyMode"
+            },
+            "type": "array"
+          },
+          "path": {
+            "default": "",
+            "type": "string"
+          },
+          "problems": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ConfigProblem"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timers": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unbinds": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/KeyUnbind"
+            },
+            "type": "array"
+          }
+        },
+        "title": "ConfigState",
+        "type": "object"
+      }
+    },
+    "config.reload": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ActionInfo": {
+            "properties": {
+              "args": {
+                "default": null
+              },
+              "category": {
+                "default": "",
+                "type": "string"
+              },
+              "description": {
+                "default": "",
+                "type": "string"
+              },
+              "hidden": {
+                "default": false,
+                "type": "boolean"
+              },
+              "keywords": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "repeats": {
+                "default": false,
+                "type": "boolean"
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              },
+              "title": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
+          "BindTarget": {
+            "oneOf": [
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "command",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "method",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "name"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "action",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "name"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "type": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ConfigProblem": {
+            "properties": {
+              "level": {
+                "$ref": "#/$defs/ProblemLevel"
+              },
+              "message": {
+                "type": "string"
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "level",
+              "message"
+            ],
+            "type": "object"
+          },
+          "HandlerInfo": {
+            "properties": {
+              "event": {
+                "type": "string"
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "event"
+            ],
+            "type": "object"
+          },
+          "KeyBinding": {
+            "properties": {
+              "args": {
+                "default": null
+              },
+              "keys": {
+                "type": "string"
+              },
+              "mode": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/BindTarget"
+              }
+            },
+            "required": [
+              "keys",
+              "target"
+            ],
+            "type": "object"
+          },
+          "KeyMode": {
+            "properties": {
+              "exclusive": {
+                "default": false,
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
+          "KeyUnbind": {
+            "properties": {
+              "keys": {
+                "type": "string"
+              },
+              "mode": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "default": "",
+                "type": "string"
+              },
+              "target": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "keys"
+            ],
+            "type": "object"
+          },
+          "ProblemLevel": {
+            "enum": [
+              "warning",
+              "error"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "actions": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ActionInfo"
+            },
+            "type": "array"
+          },
+          "bindings": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/KeyBinding"
+            },
+            "type": "array"
+          },
+          "exists": {
+            "default": false,
+            "type": "boolean"
+          },
+          "failed": {
+            "default": false,
+            "type": "boolean"
+          },
+          "handlers": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/HandlerInfo"
+            },
+            "type": "array"
+          },
+          "loaded_at": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "modes": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/KeyMode"
+            },
+            "type": "array"
+          },
+          "path": {
+            "default": "",
+            "type": "string"
+          },
+          "problems": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ConfigProblem"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timers": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unbinds": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/KeyUnbind"
+            },
+            "type": "array"
+          }
+        },
+        "title": "ConfigState",
+        "type": "object"
+      }
+    },
     "data.connect": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -13367,6 +14344,71 @@
           "window_id",
           "path",
           "ratio"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "login.admit": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "device": {
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device",
+          "account"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "grant_id": {
+            "type": "string"
+          },
+          "ticket": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticket",
+          "grant_id"
+        ],
+        "title": "LoginAdmitted",
+        "type": "object"
+      }
+    },
+    "login.revoke": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "account": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "device": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "device"
         ],
         "type": "object"
       },

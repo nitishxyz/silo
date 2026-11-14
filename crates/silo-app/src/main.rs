@@ -27,6 +27,7 @@ mod clipboard;
 mod close_confirm;
 mod commands;
 mod composition;
+mod config;
 mod confirm_card;
 mod conn;
 mod context_menu;
@@ -49,6 +50,7 @@ mod launcher;
 mod layout;
 mod material;
 mod menubar;
+mod modes;
 mod motion;
 mod notifications;
 mod offers;
@@ -251,7 +253,7 @@ fn main() {
 
     // `silo://settings` and `silo://permissions` (sent by the menu-bar
     // agent) open Settings or the Permissions panel, in a running app or at
-    // launch.
+    // launch; `silo://share#<ticket>` opens a share link.
     let (urls_tx, mut urls) = tokio::sync::mpsc::unbounded_channel::<String>();
     let application = gpui_platform::application().with_assets(assets::Assets);
     application.on_open_urls(move |list| {
@@ -308,6 +310,7 @@ fn main() {
             Some(Opens::Settings) => show_settings(cx),
             Some(Opens::Permissions(focus)) => permissions::show(focus, cx),
             Some(Opens::Updates) => check_for_updates(cx),
+            Some(Opens::Share(link)) => open_share(&link, cx),
             None => {}
         }
         cx.spawn(async move |cx| {
@@ -322,6 +325,7 @@ fn main() {
                     Some(Opens::Settings) => cx.update(show_settings),
                     Some(Opens::Permissions(focus)) => cx.update(|cx| permissions::show(focus, cx)),
                     Some(Opens::Updates) => cx.update(check_for_updates),
+                    Some(Opens::Share(link)) => cx.update(|cx| open_share(&link, cx)),
                     None => tracing::info!(url, "ignoring URL"),
                 }
             }
@@ -453,10 +457,13 @@ enum Opens {
     Permissions(Option<silo_proto::permissions::PermissionId>),
     /// Check for Updates.
     Updates,
+    /// A share link (`silo://share#silos1…` or `silo://share?link=…`):
+    /// opened as `app.open_share` does.
+    Share(String),
 }
 
-/// `silo://settings`, `silo://updates`, `silo://permissions` or `silo://permissions/<id>`
-/// (any trailing slash or query).
+/// `silo://settings`, `silo://updates`, `silo://permissions`, `silo://permissions/<id>`
+/// (any trailing slash or query) or `silo://share#<ticket>`.
 fn opens(url: &str) -> Option<Opens> {
     let rest = url.strip_prefix("silo://")?;
     let path = rest.split(['?', '#']).next().unwrap_or_default();
@@ -465,9 +472,34 @@ fn opens(url: &str) -> Option<Opens> {
         "settings" => Opens::Settings,
         "updates" => Opens::Updates,
         "permissions" => Opens::Permissions(words.next().and_then(|w| w.parse().ok())),
+        "share" => Opens::Share(share_link(rest)?),
         _ => return None,
     };
     Some(opened)
+}
+
+/// The link of `share#<ticket>` or `share?link=<link>` (percent-encoded).
+fn share_link(rest: &str) -> Option<String> {
+    if let Some((_, ticket)) = rest.split_once('#') {
+        return Some(ticket.trim()).filter(|t| !t.is_empty()).map(str::to_owned);
+    }
+    let query = rest.split_once('?')?.1;
+    let link = query.split('&').find_map(|pair| pair.strip_prefix("link="))?;
+    Some(terminal_links::percent_decode(&link.replace('+', " "))).filter(|l| !l.trim().is_empty())
+}
+
+/// Open share `link` in the frontmost window, as `app.open_share` does.
+fn open_share(link: &str, cx: &mut App) {
+    let Ok(ticket) = silo_client::transport::ShareTicket::parse(link) else {
+        tracing::info!(link, "not a share link");
+        return;
+    };
+    let Some(handle) = frontmost(cx).or_else(|| open_window(None, cx).ok()) else { return };
+    let _ = handle.update(cx, |workspace, window, cx| {
+        window.activate_window();
+        workspace.open_share(ticket, window, cx);
+    });
+    cx.activate(true);
 }
 
 fn reduce_motion() -> bool {
@@ -497,5 +529,21 @@ mod url_tests {
         assert_eq!(opens("silo://permissions"), Some(Opens::Permissions(None)));
         assert_eq!(opens("silo://permissions/screen-recording"), Some(Opens::Permissions(Some(PermissionId::ScreenRecording))));
         assert_eq!(opens("silo://permissions/camera"), Some(Opens::Permissions(None)));
+    }
+
+    #[test]
+    fn share_url() {
+        use super::{Opens, opens};
+        assert_eq!(opens("silo://share#silos1abc"), Some(Opens::Share("silos1abc".into())));
+        assert_eq!(opens("silo://share/#silos1abc"), Some(Opens::Share("silos1abc".into())));
+        assert_eq!(opens("silo://share?link=silos1abc"), Some(Opens::Share("silos1abc".into())));
+        assert_eq!(
+            opens("silo://share?x=1&link=https%3A%2F%2Fsilo.dev%2Fs%23silos1abc"),
+            Some(Opens::Share("https://silo.dev/s#silos1abc".into())),
+            "a percent-encoded web link"
+        );
+        assert_eq!(opens("silo://share"), None, "no link");
+        assert_eq!(opens("silo://share#"), None);
+        assert_eq!(opens("silo://share?link="), None);
     }
 }

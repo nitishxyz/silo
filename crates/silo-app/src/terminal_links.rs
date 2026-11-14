@@ -1,7 +1,8 @@
 //! Links in a terminal: an OSC 8 hyperlink under the pointer, else an
 //! address written out in the row's text (`https://…`, `file://…`,
 //! `localhost:5173`, …), found by column so wide characters count as the
-//! two cells they take.
+//! two cells they take. A `file://` link is a path (`file_path`), which
+//! `init.lua`'s `open_file` may open (`config.rs`).
 
 use silo_vt::{Cell, Frame, Span};
 
@@ -102,9 +103,50 @@ fn trim_end(url: &str) -> usize {
     }
 }
 
+/// The path of a `file://` link (its host dropped, percent-decoded).
+#[must_use]
+pub fn file_path(url: &str) -> Option<String> {
+    let rest = url.get(..7).filter(|s| s.eq_ignore_ascii_case("file://")).map(|_| &url[7..])?;
+    let path = &rest[rest.find('/')?..];
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    (path.len() > 1).then(|| percent_decode(path))
+}
+
+/// `%XX` escapes decoded (as UTF-8); a bad escape stays as written.
+#[must_use]
+pub fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| char::from(b).to_digit(16);
+        match (bytes[i], bytes.get(i + 1).copied().and_then(hex), bytes.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(high), Some(low)) => {
+                out.push(u8::try_from(high * 16 + low).unwrap_or(b'?'));
+                i += 3;
+            }
+            (b, ..) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_links_are_paths() {
+        assert_eq!(file_path("file:///Users/me/a%20b.rs").as_deref(), Some("/Users/me/a b.rs"));
+        assert_eq!(file_path("file://mac.local/tmp/x").as_deref(), Some("/tmp/x"), "the host goes");
+        assert_eq!(file_path("FILE:///tmp/x").as_deref(), Some("/tmp/x"));
+        assert_eq!(file_path("https://a.dev/x"), None);
+        assert_eq!(file_path("file://"), None);
+        assert_eq!(percent_decode("a%2Fb%zz%e2%9c%93"), "a/b%zz✓", "a bad escape stays");
+    }
 
     fn row(text: &str) -> Vec<Cell> {
         text.chars()

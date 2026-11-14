@@ -138,3 +138,28 @@ old server exits, and the successor lives in your login session).
 
 `systemctl --user restart silo` is not an upgrade: it stops the server first,
 which ends every session.
+
+## Login server (several people on one machine)
+
+`silo login-server` lets a device into its own unix account's server
+without pairing it there first (`docs/LOGIN_SERVER.md`). It runs as root,
+never carries session data, and starts an account's `silo server` (as that
+user) when a device logs in and it is not running.
+
+```sh
+sudo silo login-server install            # unit, empty /etc/silo/accounts.json, enabled
+sudo silo login-server invite alice       # a single-use silol1… ticket (--qr, --ttl 1d)
+sudo silo login-server allow alice <device-id>
+sudo silo login-server deny alice <device-id>
+sudo silo login-server list
+sudo silo login-server ticket [account]   # the machine's address, no invite
+sudo systemctl reload silo-login          # after editing accounts.json (or `silo login-server reload`)
+```
+
+The person adds the host with the ticket (Add Host in Silo, or `silo hosts
+add <ticket>`; `root@silol1…` picks an account). The unit is
+`packaging/linux/silo-login.service` (`KillMode=process`: the accounts'
+servers outlive a restart of the login server); its state (identity key,
+admin socket) is in `/var/lib/silo-login`. Each account's server still needs
+its own way out (relay or a reachable port). `--unprivileged` runs it as
+yourself for your own account only, to try it out.

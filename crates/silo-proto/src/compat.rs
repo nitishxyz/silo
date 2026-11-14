@@ -111,6 +111,15 @@ pub mod feature {
     /// returns a data ticket in `Created` (no `data.connect` round trip).
     /// Older servers ignore both and pick their own ids, so gate on it.
     pub const INSTANT_BLOCKS: &str = "instant_blocks";
+    /// Lua config and actions (docs/LUA.md §7): `config.get`,
+    /// `config.reload`, `action.list`, `action.run`, the `config.changed`
+    /// event and the app's `app.mode_enter`/`app.mode_exit`. Older servers
+    /// answer `method_not_found`; the app keeps its own keymap there.
+    pub const CONFIG: &str = "config";
+    /// The login server's `login.admit` and `login.revoke`
+    /// (docs/LOGIN_SERVER.md §6). Older servers answer
+    /// `method_not_found`; the login server reports them too old.
+    pub const LOGIN: &str = "login";
 }
 
 /// Everything this build supports beyond protocol 1.
@@ -134,6 +143,8 @@ pub const FEATURES: &[&str] = &[
     feature::TAB_MOVES,
     feature::TOOLS,
     feature::INSTANT_BLOCKS,
+    feature::CONFIG,
+    feature::LOGIN,
 ];
 
 /// Features this build's server supports that a client advertises only
@@ -211,6 +222,15 @@ mod tests {
         assert_eq!(missing_of(&[SYNTHETIC], &[]), [SYNTHETIC]);
         assert!(missing_of(&[SYNTHETIC], &[SYNTHETIC.to_owned(), "newer".to_owned()]).is_empty());
         assert!(missing(&features()).is_empty());
+    }
+
+    #[test]
+    fn servers_advertise_config_and_login() {
+        let ours = server_features();
+        for f in [feature::CONFIG, feature::LOGIN] {
+            assert!(ours.iter().any(|o| o == f), "{f}");
+            assert!(features().iter().any(|o| o == f), "{f}");
+        }
     }
 
     #[test]

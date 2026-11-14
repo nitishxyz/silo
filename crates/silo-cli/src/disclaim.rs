@@ -24,6 +24,8 @@
 //! [`DAEMONIZED`] that it is already detached (and which descriptor is the
 //! takeover's status pipe).
 
+#![cfg_attr(not(target_os = "macos"), allow(dead_code, reason = "macOS only; the tests run everywhere"))]
+
 use std::ffi::OsStr;
 
 /// Set in the re-executed process so a failure can never loop; removed

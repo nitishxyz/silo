@@ -334,7 +334,22 @@ impl HostsState {
         replace: Option<usize>,
         cx: &mut Context<Self>,
     ) -> Result<(usize, String), String> {
-        let host = hosts::update(&self.home, |saved| hosts::save(saved, addr, chosen, suggested)).map_err(|e| format!("Could not save: {e:#}"))?;
+        self.save_remote_via(addr, chosen, suggested, None, replace, cx)
+    }
+
+    /// [`Self::save_remote`] for a host added through a login server
+    /// (`login`: where to log in again; see [`hosts::save`]).
+    pub fn save_remote_via(
+        &mut self,
+        addr: EndpointAddr,
+        chosen: Option<String>,
+        suggested: &str,
+        login: Option<silo_client::hosts::LoginVia>,
+        replace: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> Result<(usize, String), String> {
+        let host =
+            hosts::update(&self.home, |saved| hosts::save(saved, addr, chosen, suggested, login)).map_err(|e| format!("Could not save: {e:#}"))?;
         if let Some(index) = replace.filter(|i| *i < self.entries.len()) {
             self.forget(index, cx);
         }
@@ -369,6 +384,8 @@ impl HostsState {
                 entry.state = HostState::Connected;
                 entry.control = Some(control.clone());
                 entry.incompatible = None;
+                let home = entry.info.local;
+                crate::config::fetch(&self.rt, host, home, control.clone(), cx);
                 self.refresh_sessions(host, cx);
                 self.gc_cache(host);
             }
@@ -464,6 +481,11 @@ impl HostsState {
                 let note = notifications::approval_identifier(&self.entries[host].info.key(), id);
                 if self.delivered.remove(&note).is_some() {
                     notifications::remove(vec![note]);
+                }
+            }
+            ConnEvent::Event(Event::ConfigChanged { .. }) => {
+                if let Some(control) = self.entries[host].control.clone() {
+                    crate::config::fetch(&self.rt, host, self.entries[host].info.local, control, cx);
                 }
             }
             ConnEvent::Event(_) => {}

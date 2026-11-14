@@ -63,6 +63,38 @@ fn app_cache_in(home: &std::path::Path, channel: crate::Channel, var: silo_chann
     }
 }
 
+/// The server's config (`docs/LUA.md` §2): `$SILO_CONFIG`, else
+/// `$XDG_CONFIG_HOME/silo/init.lua` (default `~/.config/silo/init.lua`; dev:
+/// `silo-dev`) when `home` is the channel's default home, else
+/// `<home>/config/init.lua` (tests, UI runs). `SILO_CONFIG=off` (load
+/// nothing) is the server's to read; here it counts as unset.
+#[must_use]
+pub fn config_file(home: &std::path::Path) -> PathBuf {
+    config_file_in(home, crate::CHANNEL, &env, MACOS)
+}
+
+/// The folder of [`config_file`]: where `require` finds modules.
+#[must_use]
+pub fn config_dir(home: &std::path::Path) -> PathBuf {
+    parent_dir(&config_file(home))
+}
+
+fn parent_dir(file: &std::path::Path) -> PathBuf {
+    file.parent().filter(|p| !p.as_os_str().is_empty()).map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf)
+}
+
+fn config_file_in(home: &std::path::Path, channel: crate::Channel, var: silo_channel::Var, macos: bool) -> PathBuf {
+    if let Some(file) = silo_channel::set(var, "SILO_CONFIG").filter(|v| v.as_os_str() != "off") {
+        return PathBuf::from(file);
+    }
+    if silo_channel::same_dir(home, &silo_channel::default_silo_home(channel, var, macos)) {
+        let user = || silo_channel::set(var, "HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from).join(".config");
+        silo_channel::set(var, "XDG_CONFIG_HOME").map_or_else(user, PathBuf::from).join(channel.silo_dir()).join(crate::config::CONFIG_FILE)
+    } else {
+        home.join("config").join(crate::config::CONFIG_FILE)
+    }
+}
+
 #[must_use]
 pub fn socket(home: &std::path::Path) -> PathBuf {
     home.join("server.sock")
@@ -198,6 +230,27 @@ mod tests {
         assert_eq!(app_cache_in(release, Channel::Release, &var, true), Path::new("/h/Library/Caches/silo"));
         assert_eq!(app_cache_in(Path::new("/tmp/silo-ui"), Channel::Dev, &var, true), Path::new("/tmp/silo-ui/cache"));
         assert_eq!(app_cache_in(Path::new("/h/.local/state/silo-dev"), Channel::Dev, &var, false), Path::new("/h/.cache/silo-dev"));
+    }
+
+    #[test]
+    fn config_file_per_channel_and_override() {
+        let vars =
+            |pairs: &'static [(&'static str, &'static str)]| move |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| OsString::from(v));
+        let home = vars(&[("HOME", "/h")]);
+        let dev = Path::new("/h/Library/Application Support/silo-dev");
+        assert_eq!(config_file_in(dev, Channel::Dev, &home, true), Path::new("/h/.config/silo-dev/init.lua"));
+        let release = Path::new("/h/Library/Application Support/silo");
+        assert_eq!(config_file_in(release, Channel::Release, &home, true), Path::new("/h/.config/silo/init.lua"));
+        let linux = Path::new("/h/.local/state/silo");
+        let xdg = vars(&[("HOME", "/h"), ("XDG_CONFIG_HOME", "/x")]);
+        assert_eq!(config_file_in(linux, Channel::Release, &xdg, false), Path::new("/x/silo/init.lua"));
+        assert_eq!(config_file_in(Path::new("/tmp/silo-ui"), Channel::Dev, &home, true), Path::new("/tmp/silo-ui/config/init.lua"));
+        let set = vars(&[("HOME", "/h"), ("SILO_CONFIG", "/p/my.lua")]);
+        assert_eq!(config_file_in(Path::new("/tmp/silo-ui"), Channel::Dev, &set, true), Path::new("/p/my.lua"));
+        let off = vars(&[("HOME", "/h"), ("SILO_CONFIG", "off")]);
+        assert_eq!(config_file_in(Path::new("/tmp/silo-ui"), Channel::Dev, &off, true), Path::new("/tmp/silo-ui/config/init.lua"));
+        assert_eq!(parent_dir(Path::new("/p/my.lua")), Path::new("/p"));
+        assert_eq!(parent_dir(Path::new("init.lua")), Path::new("."));
     }
 
     #[test]

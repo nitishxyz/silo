@@ -101,6 +101,8 @@ pub struct Workspace {
     pub(crate) add_host: Option<AddHostSheet>,
     pub(crate) share: Option<crate::share::ShareSheet>,
     pub(crate) palette: Option<crate::palette::Palette>,
+    /// Key modes entered in this window (`modes.rs`).
+    pub(crate) modes: crate::modes::Modes,
     pub(crate) picker: Option<crate::window_picker::WindowPicker>,
     /// Asking before a close that would end running programs.
     pub(crate) close_confirm: Option<crate::close_confirm::CloseConfirm>,
@@ -338,6 +340,7 @@ impl Workspace {
             add_host: None,
             share: None,
             palette: None,
+            modes: crate::modes::Modes::default(),
             picker: None,
             close_confirm: None,
             unsaved: None,
@@ -738,7 +741,9 @@ impl Workspace {
                 | Event::BlockAttention { .. }
                 // Provided tools are the agents' business (`silo-tools`).
                 | Event::ToolsChanged {}
-                | Event::ToolRequest(_),
+                | Event::ToolRequest(_)
+                // `HostsState` fetches the new config (`config.rs`).
+                | Event::ConfigChanged { .. },
             ) => {}
         }
         cx.notify();
@@ -1031,12 +1036,9 @@ impl Workspace {
             }
             PaneEvent::Backdrop => cx.notify(),
             PaneEvent::OpenLink { url, external } => {
-                if *external {
-                    cx.open_url(url);
-                } else {
-                    let block = pane.read(cx).block_id.clone();
-                    this.open_page_beside_block(&block, url.clone(), cx);
-                }
+                // `open_file` / `open_url` of `init.lua` first (`config.rs`).
+                let block = pane.read(cx).block_id.clone();
+                this.open_terminal_link(block, url.clone(), *external, window, cx);
             }
         });
         self.blocks.insert(block.to_owned(), crate::blocks::BlockPane::Terminal(pane), subscription);
@@ -2030,7 +2032,7 @@ impl Render for Workspace {
         let voice = self.render_voice(window, cx);
         div()
             .id("workspace")
-            .key_context("Workspace")
+            .key_context(self.mode_context())
             .track_focus(&self.focus)
             .relative()
             .size_full()
@@ -2040,6 +2042,7 @@ impl Render for Workspace {
             .text_color(rgb(theme::foreground()))
             .font_family(theme::ui_font())
             .map(|el| crate::commands::handle_actions(el, cx))
+            .map(|el| crate::modes::handle(el, cx))
             .capture_key_down(cx.listener(Self::voice_key))
             .on_action(cx.listener(|this, _: &SelectWindow1, window, cx| this.number_key(0, window, cx)))
             .on_action(cx.listener(|this, _: &SelectWindow2, window, cx| this.number_key(1, window, cx)))

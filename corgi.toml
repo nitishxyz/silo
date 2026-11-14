@@ -73,6 +73,8 @@ silo-proto = [
 ]
 silo-client = ["service/*"]
 silo-menubar = ["assets/*"]
+# Its unit test compares the installer's unit with the packaged one.
+silo-login = ["../../packaging/linux/silo-login.service"]
 silo-app = ["assets/**", "src/**"]
 otto-llm = ["catalog/*.json", "tests/fixtures/**"]
 otto-media = ["tests/fixtures/**"]

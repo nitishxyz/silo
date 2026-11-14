@@ -11,6 +11,7 @@ use silo_proto::{
     control::{ClientHello, Event, METHODS, ServerHello},
     data::{ClientData, Clip, ClipKind, ClipboardLocation, CommandAnchor, CommandEnd, DataHello, Reject, ServerData, Welcome},
     kind,
+    login::{LoginAnswer, LoginRequest},
     model::{TermSize, TerminalConfig},
     upload::{UploadEntry, UploadHello, Uploaded},
 };
@@ -159,6 +160,11 @@ fn schema() -> Value {
         "frame_kinds": frame_kinds(),
         "data_frames": data_frames(),
         "share_ticket": share_ticket(),
+        // The `silo/login/1` stream (docs/LOGIN_SERVER.md §5).
+        "login": {
+            "LoginRequest": plain(schema_for!(LoginRequest).to_value()),
+            "LoginAnswer": plain(schema_for!(LoginAnswer).to_value()),
+        },
     }))
 }
 

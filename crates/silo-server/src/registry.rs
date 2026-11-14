@@ -269,6 +269,7 @@ fn needed_feature(event: &Event) -> Option<&'static str> {
         Event::ChangesChanged { .. } => Some(feature::CHANGES),
         Event::ChangesProgress { .. } => Some(feature::CHANGES_SYNC),
         Event::ToolsChanged {} | Event::ToolRequest(_) => Some(feature::TOOLS),
+        Event::ConfigChanged { .. } => Some(feature::CONFIG),
         Event::SessionsChanged { .. }
         | Event::SessionChanged { .. }
         | Event::SessionClosed { .. }
@@ -292,6 +293,8 @@ pub enum Visibility {
     },
     /// The owner only: the event carries secrets.
     Owner,
+    /// Principals holding `control` on the whole server.
+    ServerControl,
     Clients(Vec<ClientId>),
 }
 
@@ -302,6 +305,7 @@ impl Visibility {
             Self::Session(session) => sees_session(&client.principal, session),
             Self::Block { block, session } => sees_block(&client.principal, block, session.as_deref()),
             Self::Owner => client.principal == Principal::Owner,
+            Self::ServerControl => rights_on(&client.principal, On::Server).is_some_and(|r| r >= Rights::Control),
             Self::Clients(ids) => ids.contains(&id),
         }
     }
@@ -561,6 +565,7 @@ impl Registry {
             Event::BlockStatus { status } => block(&status.block_id),
             Event::HostOffered { .. } | Event::GrantsChanged { .. } => Visibility::Owner,
             Event::ToolsChanged {} => Visibility::Sessions,
+            Event::ConfigChanged { .. } => Visibility::ServerControl,
             // Sent with `emit_clients` to their recipients only.
             Event::ApprovalRequested { .. } | Event::ApprovalResolved { .. } | Event::AppRequest { .. } | Event::ToolRequest(_) => {
                 Visibility::Clients(Vec::new())
@@ -897,7 +902,7 @@ impl Registry {
             self.blocks.insert(id.clone(), Block::Browser(Box::new(BrowserBlock::new(info, BrowserState::new(url)))));
             return Ok(id);
         }
-        let config = spawn_config(&id, &spawn.command, spawn.cwd.as_deref());
+        let config = spawn_config(&id, session_id, &spawn.command, spawn.cwd.as_deref());
         let handle = block::spawn(info, &config, self.notes.clone()).map_err(RpcError::internal)?;
         self.blocks.insert(id.clone(), Block::Terminal(handle));
         Ok(id)
@@ -1057,7 +1062,7 @@ impl Registry {
             files: None,
             changes: None,
         };
-        let mut config = spawn_config(&id, command, cwd.as_deref());
+        let mut config = spawn_config(&id, &session_id, command, cwd.as_deref());
         config.env.extend(env.into_iter().map(|(k, v)| (k.into(), v.into())));
         let handle = block::spawn(info, &config, self.notes.clone()).map_err(RpcError::internal)?;
         self.blocks.insert(id.clone(), Block::Terminal(handle));
@@ -1854,9 +1859,10 @@ impl Registry {
     }
 }
 
-/// How terminal block `block_id` runs `command` (the login shell if empty) in `cwd`.
-pub fn spawn_config(block_id: &str, command: &[String], cwd: Option<&str>) -> SpawnConfig {
-    let mut env = crate::bundle::shell_env(block_id);
+/// How terminal block `block_id` of session `session_id` runs `command`
+/// (the login shell if empty) in `cwd`.
+pub fn spawn_config(block_id: &str, session_id: &str, command: &[String], cwd: Option<&str>) -> SpawnConfig {
+    let mut env = crate::bundle::shell_env(block_id, session_id);
     let mut command: Vec<std::ffi::OsString> = command.iter().map(Into::into).collect();
     if command.is_empty() {
         let program = silo_pty::user_shell();
@@ -2179,6 +2185,35 @@ mod tests {
     }
 
     #[test]
+    fn config_changes_reach_server_controllers_advertising_config() {
+        use silo_proto::access::{Grant, Scope, Who};
+        let (reg, _rx) = registry();
+        let event = Event::ConfigChanged { revision: 2 };
+        assert_eq!(needed_feature(&event), Some(feature::CONFIG));
+        let visibility = reg.visibility(&event);
+        let grant = |scope: Scope, rights: Rights| {
+            Principal::Grant(Box::new(Grant {
+                id: "g".into(),
+                who: Who::Device { id: "d".into() },
+                scope,
+                rights,
+                label: String::new(),
+                created_at: 0,
+                created_by: String::new(),
+                created_by_grant: None,
+                expires_at: None,
+                last_seen: 0,
+            }))
+        };
+        let client = |principal: Principal| ClientEntry { principal, ..ClientEntry::new(String::new(), false) };
+        assert!(visibility.admits(1, &client(Principal::Owner)));
+        assert!(visibility.admits(1, &client(grant(Scope::Server, Rights::Control))));
+        assert!(!visibility.admits(1, &client(grant(Scope::Server, Rights::Interact))));
+        assert!(!visibility.admits(1, &client(grant(Scope::Session { session_id: "s".into() }, Rights::Control))));
+        assert!(!visibility.admits(1, &client(Principal::Login)));
+    }
+
+    #[test]
     fn unknown_block_kinds_are_rejected() {
         let (mut reg, _rx) = registry();
         let new = New { spawn: &SpawnSpec::default(), kind: BlockKind::Unknown, url: None, agent: None, ids: None };
@@ -2235,7 +2270,7 @@ mod tests {
             files: None,
             changes: None,
         };
-        let config = spawn_config("b", &["/bin/sh".into(), "-c".into(), script.into()], None);
+        let config = spawn_config("b", "s", &["/bin/sh".into(), "-c".into(), script.into()], None);
         let mut handle = block::spawn(info, &config, notes.clone()).unwrap();
         assert!(handle.command);
         handle.command = !shell;

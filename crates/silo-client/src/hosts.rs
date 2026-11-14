@@ -17,6 +17,23 @@ pub struct Host {
     pub id: String,
     pub name: String,
     pub addr: EndpointAddr,
+    /// The login server it was added through: when the host does not
+    /// answer, logging in there again starts it (`docs/LOGIN_SERVER.md` §5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<LoginVia>,
+}
+
+/// A host's login server and what to ask it for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginVia {
+    /// The login server's address.
+    pub addr: EndpointAddr,
+    /// The account logged in as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Whose server, when it is another account's (sharing by name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_of: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,11 +181,21 @@ impl Hosts {
             }
             None => {
                 let name = name.unwrap_or_else(|| id[..10].to_owned());
-                self.hosts.push(Host { id, name, addr });
+                self.hosts.push(Host { id, name, addr, login: None });
                 self.hosts.len() - 1
             }
         };
         Ok(&self.hosts[index])
+    }
+
+    /// Remember (or forget) the login server of the host with `id`.
+    ///
+    /// # Errors
+    /// No such host.
+    pub fn set_login(&mut self, id: &str, login: Option<LoginVia>) -> anyhow::Result<()> {
+        let host = self.hosts.iter_mut().find(|h| h.id == id).with_context(|| format!("no host {id}"))?;
+        host.login = login;
+        Ok(())
     }
 
     /// A host by name, id or unique id prefix.
@@ -255,6 +282,26 @@ mod tests {
         std::fs::write(home.join("hosts.json"), "{ not json").unwrap();
         assert!(Hosts::update(&home, |_| Ok(())).is_err());
         assert_eq!(std::fs::read_to_string(home.join("hosts.json")).unwrap(), "{ not json");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_host_s_login_server_is_kept_and_optional() {
+        let home = std::env::temp_dir().join(format!("silo-client-login-host-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let (a, login) = (addr(&home.join("a")), addr(&home.join("login")));
+        // A file from before login servers has no `login`.
+        let old = serde_json::json!({"hosts": [{"id": a.id.to_string(), "name": "box", "addr": a}]});
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("hosts.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(Hosts::load(&home).unwrap().hosts[0].login, None);
+        let via = LoginVia { addr: login, account: Some("alice".into()), server_of: None };
+        Hosts::update(&home, |hosts| hosts.set_login(&a.id.to_string(), Some(via.clone()))).unwrap();
+        assert_eq!(Hosts::load(&home).unwrap().hosts[0].login, Some(via));
+        // Pairing the same host again keeps it.
+        Hosts::update(&home, |hosts| hosts.pair(a.clone(), None, "box").map(drop)).unwrap();
+        assert!(Hosts::load(&home).unwrap().hosts[0].login.is_some());
+        assert!(Hosts::update(&home, |hosts| hosts.set_login("nope", None)).is_err());
         let _ = std::fs::remove_dir_all(home);
     }
 

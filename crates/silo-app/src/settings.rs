@@ -155,6 +155,7 @@ impl Workspace {
             confirm_close: self.confirm_close(),
             sounds: self.state.sounds,
             search_engine: self.state.search_engine,
+            relay: self.state.relay.clone(),
             notify: self.notify_prefs(),
             notify_denied: crate::notifications::denied(),
             ui_font,
@@ -522,6 +523,12 @@ impl Workspace {
                 let engine = *engine;
                 tracing::debug!(?engine, "search engine");
                 self.shared.update(cx, |shared, cx| shared.update_state(|s| s.search_engine = engine, cx));
+                Outcome::default()
+            }
+            SettingsEvent::SetRelay(relay) => {
+                let relay = relay.clone();
+                tracing::debug!(?relay, "relay");
+                self.shared.update(cx, |shared, cx| shared.update_state(|s| s.relay = relay, cx));
                 Outcome::default()
             }
             SettingsEvent::SetNotify(field, on) => {

@@ -15,7 +15,12 @@ use std::{
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use silo_cli::{NetOptions, hosts::Hosts, link, parse_duration, parse_relay};
+use silo_cli::{
+    NetOptions,
+    config_cmd::{self, ConfigCommand},
+    hosts::Hosts,
+    link, parse_duration, parse_relay, script,
+};
 use silo_client::service;
 use silo_client::{
     Control, Events,
@@ -316,14 +321,77 @@ enum Command {
         #[command(subcommand)]
         command: ApiCommand,
     },
-    /// Call a control method, its params as flags (`silo do <method> --help`).
+    /// Run an action, a Lua script (`.lua`, a path, `-`, `-e CODE`) or a
+    /// control method (`silo do --help`).
     #[command(disable_help_flag = true)]
     Do {
+        /// An action, a script or a method.
         #[arg(allow_hyphen_values = true)]
         method: String,
-        /// `--param value`…, required params by position, `--json PARAMS`.
+        /// `key=value`… and flags; a method's `--param value`…, required
+        /// params by position, `--json PARAMS`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// The server's Lua config: `path`, `check [FILE]`, `reload`, `show`, `init`.
+    Config {
+        #[command(subcommand)]
+        command: silo_cli::config_cmd::ConfigCommand,
+    },
+    /// List the server's actions (`silo do <action>` runs one).
+    Actions {
+        /// Include hidden ones (functions bound to keys).
+        #[arg(long)]
+        all: bool,
+        /// Print them as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// The config's key bindings, modes and problems.
+    Keymap {
+        /// Print them as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a share link to a session or a block, or share it with
+    /// another account on this machine (`--account`); list or revoke them.
+    Share {
+        /// Session id or name (default: the one this runs in).
+        #[arg(conflicts_with_all = ["block", "list", "revoke"])]
+        session: Option<String>,
+        /// Share one block instead.
+        #[arg(long, conflicts_with_all = ["list", "revoke"])]
+        block: Option<String>,
+        /// `view` (watch only, the default) or `interact` (type too).
+        #[arg(long, value_parser = ["view", "interact"], default_value = "view")]
+        rights: String,
+        /// How long it works (`1h`, `1d`, `7d`, at most 30d; links default
+        /// to 1d, `--account` to until revoked).
+        #[arg(long, value_parser = parse_duration)]
+        ttl: Option<Duration>,
+        /// Who it's for, shown with the link.
+        #[arg(long, conflicts_with = "account")]
+        label: Option<String>,
+        /// Print a QR code of the link too.
+        #[arg(long, conflicts_with = "account")]
+        qr: bool,
+        /// Share with this account (a user name on a machine with a login
+        /// server) instead of making a link; it adds the machine with
+        /// `silo hosts add <login ticket> --server-of <this account>`.
+        #[arg(long, value_name = "NAME", value_parser = parse_account, conflicts_with_all = ["list", "revoke"])]
+        account: Option<String>,
+        /// List share links and account grants.
+        #[arg(long, conflicts_with = "revoke")]
+        list: bool,
+        /// Revoke a share link or account grant by id or id prefix; its
+        /// viewers disconnect.
+        #[arg(long, value_name = "ID")]
+        revoke: Option<String>,
+    },
+    /// Run or manage a login server (`docs/LOGIN_SERVER.md`).
+    LoginServer {
+        #[command(subcommand)]
+        command: silo_cli::login_cmd::LoginCommand,
     },
     /// The embedded otto harness (`otto-silo`): `silo otto server --daemon`, …
     #[command(hide = true, disable_help_flag = true)]
@@ -385,6 +453,12 @@ fn parse_permissions(text: &str) -> Result<PermissionList, String> {
 
 fn parse_permission(text: &str) -> Result<PermissionId, String> {
     text.parse()
+}
+
+/// A unix user name, as a login server names accounts.
+fn parse_account(text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if silo_client::transport::valid_account(text) { Ok(text.to_owned()) } else { Err(format!("{text:?} is not a user name")) }
 }
 
 #[derive(Subcommand)]
@@ -468,11 +542,16 @@ fn version() -> &'static str {
 
 #[derive(Subcommand)]
 enum HostsCommand {
-    /// Pair with a host using its ticket and remember it.
+    /// Pair with a host using its ticket and remember it. A login server's
+    /// ticket (`silol1…`, `account@silol1…`) logs in as your account.
     Add {
         ticket: String,
         #[arg(long)]
         name: Option<String>,
+        /// Ask the login server for this account's server instead of your
+        /// own: one shared with you by name (`silo share --account`).
+        #[arg(long, value_name = "ACCOUNT", value_parser = parse_account)]
+        server_of: Option<String>,
     },
     /// List remembered hosts.
     Ls,
@@ -750,6 +829,8 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 | Command::Clipboard { .. }
                 | Command::Permissions { .. }
                 | Command::Files { .. }
+                | Command::LoginServer { .. }
+                | Command::Config { command: ConfigCommand::Path | ConfigCommand::Check { .. } | ConfigCommand::Init }
         )
     {
         bail!("--host is not supported for this command");
@@ -1112,50 +1193,58 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(0)
         }
-        Command::Do { method, .. } if method == "--help" || method == "-h" => {
-            println!(
-                "Usage: silo do <method> [--param value]… [--json PARAMS]\n\nMethods: silo api list. A method's params: silo do <method> --help."
-            );
-            Ok(0)
-        }
-        Command::Do { method, args } => {
-            let (control, _, _net) = connect(host).await?;
-            let described = control.call::<silo_proto::control::MethodDescription>(Method::ApiDescribe { method: method.clone() }).await;
-            let described = match described {
-                Err(error) if error.downcast_ref::<silo_proto::control::RpcError>().is_some_and(|e| e.code == "not_found") => {
-                    bail!("unknown method {method}; see `silo api list`")
-                }
-                other => other?,
-            };
-            if args.iter().any(|a| a == "--help" || a == "-h") {
-                print!("{}", generated::usage(&method, &described.description, &described.params_schema));
-                return Ok(0);
+        Command::Do { method, args } => match silo_cli::script::parse(&method, &args)? {
+            script::Parsed::Help => {
+                print!("{}", script::USAGE);
+                Ok(0)
             }
-            let params = generated::build(&described.params_schema, &args)?;
-            let approval = described.access.is_some_and(|a| a.approval);
-            let call = |params: serde_json::Value| async {
-                if approval {
-                    silo_cli::confirmed(&control, || control.call_raw(&method, params.clone())).await
-                } else {
-                    control.call_raw(&method, params).await
-                }
-            };
-            let value = if silo_cli::CLOSES.contains(&method.as_str()) {
-                let force = params.get("force").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                silo_cli::guarded(force, |force| {
-                    let mut params = params.clone();
-                    if force {
-                        params["force"] = true.into();
-                    }
-                    call(params)
-                })
-                .await?
-            } else {
-                call(params).await?
-            };
-            println!("{}", serde_json::to_string_pretty(&value)?);
-            Ok(0)
+            script::Parsed::Run(run) => {
+                let (control, events, _net) = connect(host).await?;
+                script::run(control, events, *run, host.is_none()).await
+            }
+            script::Parsed::Method => do_method(host, method, args).await,
+        },
+        Command::Config { command } => match command {
+            ConfigCommand::Path => {
+                println!("{}", config_cmd::path().display());
+                Ok(0)
+            }
+            ConfigCommand::Check { file, json } => config_cmd::check(file.as_deref(), json),
+            ConfigCommand::Init => config_cmd::init(),
+            ConfigCommand::Reload { json } => {
+                let (control, _, _net) = connect(host).await?;
+                config_cmd::reload(&control, json).await
+            }
+            ConfigCommand::Show { json } => {
+                let (control, _, _net) = connect(host).await?;
+                config_cmd::show(&control, json).await
+            }
+        },
+        Command::Actions { all, json } => {
+            let (control, _, _net) = connect(host).await?;
+            config_cmd::actions(&control, all, json).await
         }
+        Command::Keymap { json } => {
+            let (control, _, _net) = connect(host).await?;
+            config_cmd::keymap(&control, json).await
+        }
+        Command::Share { session, block, rights, ttl, label, qr, account, list, revoke } => {
+            let (control, _, _net) = connect(host).await?;
+            match (list, revoke) {
+                (true, _) => silo_cli::share::list(&control).await,
+                (false, Some(id)) => silo_cli::share::revoke(&control, &id).await,
+                (false, None) => {
+                    let by_name = account.is_some();
+                    let share = silo_cli::share::Share { session, block, interact: rights == "interact", ttl, label, qr, account };
+                    if by_name {
+                        silo_cli::share::create_account(&control, &share, host).await
+                    } else {
+                        silo_cli::share::create(&control, &share, host.is_none()).await
+                    }
+                }
+            }
+        }
+        Command::LoginServer { command } => silo_cli::login_cmd::run(command).await,
         Command::Pair { ttl } => {
             let control = local_server().await?;
             warn_remote_error(&control).await?;
@@ -1233,8 +1322,8 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
         Command::Hosts { command } => {
             let home = paths::home();
             match command {
-                HostsCommand::Add { ticket, name } => {
-                    let host = silo_cli::add_host(&home, &ticket, name, &NetOptions::default(), &device_name()).await?;
+                HostsCommand::Add { ticket, name, server_of } => {
+                    let host = silo_cli::add_host(&home, &ticket, name, server_of.as_deref(), &NetOptions::default(), &device_name()).await?;
                     println!("paired with {} ({})", host.name, host.id);
                 }
                 HostsCommand::Ls => {
@@ -1250,6 +1339,46 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
             Ok(0)
         }
     }
+}
+
+/// `silo do <method>`: params as flags generated from `api.describe`.
+async fn do_method(host: Option<&str>, method: String, args: Vec<String>) -> anyhow::Result<i32> {
+    let (control, _, _net) = connect(host).await?;
+    let described = control.call::<silo_proto::control::MethodDescription>(Method::ApiDescribe { method: method.clone() }).await;
+    let described = match described {
+        Err(error) if error.downcast_ref::<silo_proto::control::RpcError>().is_some_and(|e| e.code == "not_found") => {
+            bail!("unknown method {method}; see `silo api list`")
+        }
+        other => other?,
+    };
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{}", generated::usage(&method, &described.description, &described.params_schema));
+        return Ok(0);
+    }
+    let params = generated::build(&described.params_schema, &args)?;
+    let approval = described.access.is_some_and(|a| a.approval);
+    let call = |params: serde_json::Value| async {
+        if approval {
+            silo_cli::confirmed(&control, || control.call_raw(&method, params.clone())).await
+        } else {
+            control.call_raw(&method, params).await
+        }
+    };
+    let value = if silo_cli::CLOSES.contains(&method.as_str()) {
+        let force = params.get("force").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        silo_cli::guarded(force, |force| {
+            let mut params = params.clone();
+            if force {
+                params["force"] = true.into();
+            }
+            call(params)
+        })
+        .await?
+    } else {
+        call(params).await?
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(0)
 }
 
 fn client_name() -> String {
@@ -1522,7 +1651,7 @@ async fn remote_install(target: &str, source: &silo_cli::upgrade::Source) -> any
     eprintln!("silo: waiting for {target} to pair…");
     let offer = link::wait_offer(&mut events, &invite.invite_id, Duration::from_secs(30)).await?;
     // A reinstall keeps the server's key: the host keeps the name given here.
-    let host = silo_cli::add_host(&paths::home(), &offer.ticket, None, &NetOptions::default(), &device_name()).await?;
+    let host = silo_cli::add_host(&paths::home(), &offer.ticket, None, None, &NetOptions::default(), &device_name()).await?;
     println!("Added {}.", host.name);
     Ok(0)
 }
@@ -2135,6 +2264,75 @@ mod tests {
         assert_eq!(cli.host.as_deref(), Some("mini"));
         let Some(Command::Do { args, .. }) = cli.command else { panic!() };
         assert!(args.is_empty(), "--host stays global");
+        // Scripts and actions: `-e`, flags and `key=value` reach `script::parse`.
+        let Some(Command::Do { method, args }) = Cli::parse_from(["silo", "do", "-e", "return 1", "n=2"]).command else { panic!() };
+        assert_eq!((method.as_str(), args), ("-e", vec!["return 1".to_owned(), "n=2".into()]));
+        let Some(Command::Do { method, args }) = Cli::parse_from(["silo", "do", "./x.lua", "-s", "work", "--for", "1m"]).command else { panic!() };
+        assert_eq!((method.as_str(), args.len()), ("./x.lua", 4));
+        let Some(Command::Do { method, .. }) = Cli::parse_from(["silo", "do", "--help"]).command else { panic!() };
+        assert!(matches!(script::parse(&method, &[]).unwrap(), script::Parsed::Help));
+    }
+
+    #[test]
+    fn config_actions_keymap_and_share_commands() {
+        let cli = Cli::parse_from(["silo", "config", "check", "x.lua", "--json"]);
+        assert!(matches!(cli.command, Some(Command::Config { command: ConfigCommand::Check { file: Some(_), json: true } })));
+        assert!(matches!(Cli::parse_from(["silo", "config", "path"]).command, Some(Command::Config { command: ConfigCommand::Path })));
+        assert!(matches!(Cli::parse_from(["silo", "config", "init"]).command, Some(Command::Config { command: ConfigCommand::Init })));
+        assert!(matches!(
+            Cli::parse_from(["silo", "config", "reload"]).command,
+            Some(Command::Config { command: ConfigCommand::Reload { json: false } })
+        ));
+        assert!(matches!(Cli::parse_from(["silo", "actions", "--json"]).command, Some(Command::Actions { all: false, json: true })));
+        assert!(matches!(Cli::parse_from(["silo", "keymap"]).command, Some(Command::Keymap { json: false })));
+        let cli = Cli::parse_from(["silo", "share", "work", "--rights", "interact", "--ttl", "1h", "--label", "Ana", "--qr"]);
+        let Some(Command::Share { session, rights, ttl, label, qr: true, list: false, revoke: None, .. }) = cli.command else { panic!() };
+        assert_eq!(
+            (session.as_deref(), rights.as_str(), ttl, label.as_deref()),
+            (Some("work"), "interact", Some(Duration::from_secs(3600)), Some("Ana"))
+        );
+        assert!(matches!(Cli::parse_from(["silo", "share", "--list"]).command, Some(Command::Share { list: true, .. })));
+        assert!(matches!(Cli::parse_from(["silo", "share", "--revoke", "ab"]).command, Some(Command::Share { revoke: Some(_), .. })));
+        assert!(Cli::try_parse_from(["silo", "share", "--rights", "control"]).is_err());
+        assert!(Cli::try_parse_from(["silo", "share", "work", "--list"]).is_err());
+        assert!(Cli::try_parse_from(["silo", "share", "work", "--block", "b1"]).is_err());
+    }
+
+    #[test]
+    fn share_by_name_and_hosts_add_server_of() {
+        let cli = Cli::parse_from(["silo", "share", "work", "--account", "ana", "--rights", "interact", "--ttl", "7d"]);
+        let Some(Command::Share { session, block: None, account, rights, ttl, list: false, revoke: None, .. }) = cli.command else { panic!() };
+        assert_eq!(
+            (session.as_deref(), account.as_deref(), rights.as_str(), ttl),
+            (Some("work"), Some("ana"), "interact", Some(Duration::from_secs(7 * 86_400)))
+        );
+        let cli = Cli::parse_from(["silo", "share", "--block", "b1", "--account", "ana"]);
+        assert!(matches!(cli.command, Some(Command::Share { block: Some(_), account: Some(_), rights, .. }) if rights == "view"));
+        // A user name only; no link options with it; not with --list/--revoke.
+        for args in [
+            &["silo", "share", "work", "--account", "bad name"][..],
+            &["silo", "share", "work", "--account", ""],
+            &["silo", "share", "work", "--account", "ana", "--label", "x"],
+            &["silo", "share", "work", "--account", "ana", "--qr"],
+            &["silo", "share", "--account", "ana", "--list"],
+            &["silo", "share", "--account", "ana", "--revoke", "ab"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err(), "{args:?}");
+        }
+
+        let cli = Cli::parse_from(["silo", "hosts", "add", "ana@silol1abc", "--server-of", "alice", "--name", "box"]);
+        let Some(Command::Hosts { command: HostsCommand::Add { ticket, name, server_of } }) = cli.command else { panic!() };
+        assert_eq!((ticket.as_str(), name.as_deref(), server_of.as_deref()), ("ana@silol1abc", Some("box"), Some("alice")));
+        let cli = Cli::parse_from(["silo", "hosts", "add", "silol1abc"]);
+        assert!(matches!(cli.command, Some(Command::Hosts { command: HostsCommand::Add { server_of: None, .. } })));
+        assert!(Cli::try_parse_from(["silo", "hosts", "add", "silol1abc", "--server-of", "no/such"]).is_err());
+    }
+
+    #[test]
+    fn account_names_are_checked() {
+        assert_eq!(parse_account(" ana ").as_deref(), Ok("ana"));
+        assert!(parse_account("bad name").is_err());
+        assert!(parse_account("").is_err());
     }
 
     #[test]

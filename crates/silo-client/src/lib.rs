@@ -8,6 +8,7 @@ mod data;
 mod download;
 pub mod hosts;
 pub mod launch_services;
+pub mod login;
 mod mirror;
 pub mod mismatch;
 mod predict;

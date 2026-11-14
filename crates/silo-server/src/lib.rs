@@ -18,6 +18,7 @@ pub mod files;
 pub mod grants;
 pub mod handoff;
 pub mod layout_cmds;
+pub mod login;
 mod names;
 pub mod notify;
 pub mod permissions;
@@ -25,6 +26,7 @@ pub mod persist;
 pub mod prompts;
 pub mod registry;
 pub mod remote;
+pub mod scripting;
 pub mod search;
 pub mod shell;
 pub mod status;
@@ -97,8 +99,20 @@ pub struct Config {
     /// Where `files.trash` puts items, in the XDG trash layout; `None` (the
     /// default) for the host's Trash. For tests.
     pub trash: Option<PathBuf>,
+    /// Take `role: login` from this server's own uid as the login server,
+    /// not only from uid 0 (`docs/LOGIN_SERVER.md` §6). Off unless
+    /// [`TRUST_OWN_LOGIN_ENV`] is `1`: for tests and `silo login-server
+    /// --unprivileged`, whose spawner sets it. It grants a same-uid process
+    /// nothing it lacks as the owner, except pairing a device without an
+    /// approval.
+    pub trust_own_login: bool,
+    /// Load `init.lua` (`docs/LUA.md` §8). On by default; `SILO_CONFIG=off`
+    /// turns it off too. A missing file costs nothing (no VM).
+    pub scripting: bool,
 }
 
+/// See [`Config::trust_own_login`].
+pub const TRUST_OWN_LOGIN_ENV: &str = "SILO_LOGIN_TRUST_OWN_UID";
 /// See [`Config::agent_closed`].
 pub type AgentClosed = Arc<dyn Fn(String) + Send + Sync>;
 
@@ -125,6 +139,8 @@ impl Default for Config {
             services: std::collections::HashMap::new(),
             search: search::Limits::default(),
             trash: None,
+            trust_own_login: std::env::var_os(TRUST_OWN_LOGIN_ENV).is_some_and(|v| v == "1"),
+            scripting: true,
         }
     }
 }
@@ -159,6 +175,8 @@ pub struct Server {
     pub app_requests: app_bridge::Requests,
     /// Connections running Silo's own tools for `tools.call` callers.
     pub stand_ins: tools::StandIns,
+    /// The config (`init.lua`) VM and its state.
+    pub scripting: scripting::Scripting,
     /// See [`Config::grant_sweep_ahead`].
     grant_sweep_ahead: Arc<std::sync::atomic::AtomicU64>,
     /// Data stream writers still running (see [`DataWriter`]).
@@ -169,6 +187,8 @@ pub struct Server {
     pub search: search::Search,
     /// See [`Config::trash`].
     pub trash: Option<PathBuf>,
+    /// See [`Config::trust_own_login`].
+    pub trust_own_login: bool,
 }
 
 /// Counts a data stream's writer task while it runs, so a server handing
@@ -554,11 +574,13 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         approvals: approval::Approvals::default(),
         app_requests: app_bridge::Requests::default(),
         stand_ins: tools::StandIns::default(),
+        scripting: scripting::Scripting::new(config.scripting, &home),
         grant_sweep_ahead: config.grant_sweep_ahead.clone(),
         data_writers: tokio::sync::watch::channel(0).0,
         services: config.services.clone(),
         search: search::Search::new(paths::search(&home), config.search),
         trash: config.trash.clone(),
+        trust_own_login: config.trust_own_login,
     });
     if config.keep_session {
         server.registry.lock().unwrap().keep_session();
@@ -585,6 +607,8 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         }
     }));
     tracing::info!(socket = %socket.display(), pid = server.info.pid, "silo server listening");
+    // Its handlers connect to the socket: loaded once the loop below accepts.
+    let _scripting_task = AbortOnDrop(tokio::spawn(scripting::run(server.clone())));
     let (incoming, tunnels) = incoming.unzip();
     let _remote_task = incoming.map(|incoming| AbortOnDrop(tokio::spawn(remote::accept_loop(server.clone(), incoming))));
     let _tunnel_task = tunnels.map(|tunnels| AbortOnDrop(tokio::spawn(tunnel::accept_loop(server.clone(), tunnels))));
@@ -627,6 +651,8 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
                 let Ok((stream, _)) = accepted else { continue };
                 match stream.peer_cred() {
                     Ok(cred) if cred.uid() == uid.as_raw() => {}
+                    // Root: admitted only as the login server (`conn::accept`).
+                    Ok(cred) if cred.uid() == 0 => {}
                     Ok(cred) => {
                         tracing::warn!(uid = cred.uid(), "rejected connection from another user");
                         continue;
@@ -712,6 +738,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
     drop(notes_task);
     close_net(&server).await;
     server.auth().flush();
+    server.scripting.stop();
     server.registry.lock().unwrap().shutdown();
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(paths::runtime(&home));
@@ -734,6 +761,8 @@ async fn commit(server: &Server, listener: UnixListener, lock: ServerLock, given
         }
     };
     drop(listener);
+    // The successor loads the config afresh.
+    server.scripting.stop();
     // Remote clients reconnect to the successor, which binds the same
     // identity once this endpoint is gone.
     close_net(server).await;

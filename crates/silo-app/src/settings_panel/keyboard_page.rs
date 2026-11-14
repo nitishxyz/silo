@@ -1,14 +1,17 @@
 //! Settings › Keyboard: every command's shortcuts by group. Clicking one
 //! records the next chord (Esc cancels, ⌫ removes it); a chord another
-//! command has asks before replacing it.
+//! command has asks before replacing it. Shortcuts the home server's
+//! `init.lua` gives are shown beside them, marked: they win over what is
+//! set here (which still goes to `keybindings.json`).
 
 use gpui::{AnyElement, Context, IntoElement, SharedString, Subscription, Window, div, prelude::*, px, rgb};
+use silo_proto::keys::Sequence;
 
 use super::{ButtonKind, SettingsEvent, SettingsPanel, keycap};
 use crate::{
     assets::icon,
     commands::Command,
-    keymap::{Chord, KeymapEvent},
+    keymap::{Chord, ChordExt as _, KeymapEvent},
     theme::{self, Continuous as _},
 };
 
@@ -145,13 +148,19 @@ impl SettingsPanel {
     }
 
     /// What the row says under its title, and in which color.
-    fn shortcut_note(&self, shortcut: &super::SettingsShortcut) -> Option<(String, u32)> {
+    fn shortcut_note(&self, shortcut: &super::SettingsShortcut, from_config: &[Sequence]) -> Option<(String, u32)> {
         let command = shortcut.command;
         if self.recorder.target.is_some_and(|(c, _)| c == command) {
             return Some(("Esc cancels, ⌫ removes it".into(), theme::muted()));
         }
         if let Some(conflict) = self.recorder.conflict.as_ref().filter(|c| c.command == command) {
             return Some((format!("{} is also used by {}", conflict.chord.hint(), names(&conflict.others)), theme::warning()));
+        }
+        if !from_config.is_empty() {
+            return Some(("init.lua sets a shortcut too; it wins over shortcuts set here".into(), theme::muted()));
+        }
+        if let Some(chord) = crate::keymap::taken(command).first() {
+            return Some((format!("{}: init.lua unbinds it or uses it elsewhere", chord.hint()), theme::warning()));
         }
         shortcut.keys.iter().find_map(|chord| {
             let others: Vec<Command> =
@@ -166,6 +175,7 @@ impl SettingsPanel {
 
     fn shortcut_row(&self, shortcut: &super::SettingsShortcut, cx: &mut Context<Self>) -> AnyElement {
         let command = shortcut.command;
+        let from_config = crate::keymap::config_shortcuts(command);
         let group = SharedString::from(format!("shortcut-row-{}", command.id()));
         let adding = self.recorder.target == Some((command, None));
         let mut chips: Vec<AnyElement> = shortcut.keys.iter().enumerate().map(|(i, k)| self.chord_chip(command, Some(i), Some(k), cx)).collect();
@@ -197,7 +207,8 @@ impl SettingsPanel {
             let reset = SettingsEvent::Keymap(KeymapEvent::Reset(command));
             actions.push(Self::emit_button(SharedString::from(format!("shortcut-reset-{}", command.id())), "Reset", reset, cx));
         }
-        let note = self.shortcut_note(shortcut);
+        let note = self.shortcut_note(shortcut, &from_config);
+        let config_chips = from_config.iter().map(|keys| config_chip(command, keys));
         div()
             .group(group)
             .w_full()
@@ -219,9 +230,29 @@ impl SettingsPanel {
             )
             .children(actions)
             .children(add)
+            .children(config_chips)
             .child(div().flex_none().flex().items_center().gap(px(4.0)).children(chips))
             .into_any_element()
     }
+}
+
+/// A shortcut from `init.lua`: its keys (each chord of a sequence), in the
+/// accent, not editable here.
+fn config_chip(command: Command, keys: &Sequence) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("shortcut-config-{}-{keys}", command.id())))
+        .h(px(24.0))
+        .px(px(4.0))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(6.0))
+        .continuous(6.0)
+        .border_1()
+        .border_color(rgb(theme::accent()))
+        .tooltip(crate::tooltip::Tooltip::text("From init.lua"))
+        .children(keys.0.iter().map(|chord| keycap(&chord.hint())))
+        .into_any_element()
 }
 
 impl SettingsPanel {
@@ -264,6 +295,21 @@ impl SettingsPanel {
         let mut out = Vec::new();
         if show_all {
             let mut rows = vec![Self::row("Shortcuts file", None, Some(self.keymap_file_line(cx)), false)];
+            // The file's path is not shown (Open opens it).
+            if let Some((_, count)) = crate::keymap::config_summary() {
+                let title = match count {
+                    0 => "No shortcuts from init.lua".to_owned(),
+                    1 => "1 shortcut from init.lua".to_owned(),
+                    n => format!("{n} shortcuts from init.lua"),
+                };
+                let buttons = div()
+                    .flex()
+                    .gap(px(6.0))
+                    .child(Self::emit_button("settings-config-open", "Open", emit(KeymapEvent::OpenConfig), cx))
+                    .child(Self::emit_button("settings-config-reload", "Reload", emit(KeymapEvent::ReloadConfig), cx))
+                    .into_any_element();
+                rows.push(Self::row(title, Some("Keys, modes and actions set on This Mac".into()), Some(buttons), false));
+            }
             if self.snapshot.shortcuts.iter().any(|s| s.custom) || !self.snapshot.shortcut_problems.is_empty() {
                 let restore = Self::emit_button("settings-keymap-restore", "Restore", emit(KeymapEvent::RestoreDefaults), cx);
                 rows.push(Self::row("Restore Defaults", Some("Every shortcut back to Silo's".into()), Some(restore), false));

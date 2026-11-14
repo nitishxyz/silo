@@ -17,6 +17,9 @@ use crate::stream::BiStream;
 pub const CTL_ALPN: &[u8] = b"silo/ctl/1";
 /// Browser-block tunnels: one TCP connection per bi stream (see `tunnel`).
 pub const TUNNEL_ALPN: &[u8] = b"silo/tunnel/1";
+/// The login server (`docs/LOGIN_SERVER.md`): one bi stream per
+/// connection carrying a login request and its answer.
+pub const LOGIN_ALPN: &[u8] = b"silo/login/1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RelayConfig {
@@ -124,6 +127,11 @@ impl Net {
         self.connect(addr.into(), TUNNEL_ALPN).await
     }
 
+    /// Connect to a login server with LOGIN_ALPN.
+    pub async fn dial_login(&self, addr: impl Into<EndpointAddr>) -> Result<RemoteConn> {
+        self.connect(addr.into(), LOGIN_ALPN).await
+    }
+
     async fn connect(&self, addr: EndpointAddr, alpn: &[u8]) -> Result<RemoteConn> {
         let id = addr.id;
         match self.endpoint.connect(addr, alpn).await {
@@ -148,6 +156,18 @@ impl Net {
             Router::builder(self.endpoint.clone()).accept(CTL_ALPN, CtlHandler { tx }).accept(TUNNEL_ALPN, TunnelHandler { tx: tunnel_tx }).spawn();
         self.router = Some(router);
         Ok((CtlIncoming { rx }, TunnelIncoming { rx: tunnel_rx }))
+    }
+
+    /// Start accepting LOGIN_ALPN connections only (a login server's
+    /// endpoint serves nothing else). Each is delivered with its first bi
+    /// stream once the peer has written on it.
+    pub fn serve_login(&mut self, backlog: usize) -> Result<LoginIncoming> {
+        if self.router.is_some() {
+            bail!("serve called twice");
+        }
+        let (tx, rx) = mpsc::channel(backlog.max(1));
+        self.router = Some(Router::builder(self.endpoint.clone()).accept(LOGIN_ALPN, CtlHandler { tx }).spawn());
+        Ok(CtlIncoming { rx })
     }
 
     /// Close all connections and the endpoint, waiting for a clean shutdown.
@@ -273,6 +293,9 @@ impl CtlIncoming {
         self.rx.recv().await
     }
 }
+
+/// Accepted LOGIN_ALPN connections with their first bi stream.
+pub type LoginIncoming = CtlIncoming;
 
 #[derive(Debug)]
 struct CtlHandler {

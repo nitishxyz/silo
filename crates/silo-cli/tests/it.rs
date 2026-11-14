@@ -2,6 +2,7 @@
 
 mod r#do;
 mod kill;
+mod lua;
 mod mcp;
 mod remote;
 mod remote_agent;

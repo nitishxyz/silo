@@ -29,6 +29,10 @@ pub const MAX_INVITE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub enum Peer {
     /// Same-uid unix socket client, with its process id when known.
     Local { pid: Option<i32> },
+    /// A unix socket client with uid 0 on a server running as another
+    /// user: admitted only as the login server (`role: login`), for one
+    /// control stream and nothing else (`docs/LOGIN_SERVER.md` §6).
+    Root { pid: Option<i32> },
     /// An iroh connection, authenticated by its endpoint id.
     Remote { endpoint_id: String, conn_id: u64 },
 }
@@ -36,7 +40,7 @@ pub enum Peer {
 impl Peer {
     pub fn conn_id(&self) -> Option<u64> {
         match self {
-            Peer::Local { .. } => None,
+            Peer::Local { .. } | Peer::Root { .. } => None,
             Peer::Remote { conn_id, .. } => Some(*conn_id),
         }
     }

@@ -140,8 +140,9 @@ impl Workspace {
         target.is_none_or(|w| self.is_own_window(*w, window, cx))
     }
 
-    /// Run an `app.*` method in this window.
-    fn run_app_method(&mut self, host: usize, method: Method, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, RpcError> {
+    /// Run an `app.*` method in this window (forwarded, or an `init.lua`
+    /// binding's).
+    pub(crate) fn run_app_method(&mut self, host: usize, method: Method, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, RpcError> {
         let name = silo_proto::api::method_name(&method);
         // Commands without params run as from the palette.
         if let Some(&command) = Command::ALL.iter().find(|c| matches!(c.api(), Api::Method(m) if m == name))
@@ -301,6 +302,8 @@ impl Workspace {
                     return Err(RpcError::not_found("command output"));
                 }
             }
+            Method::AppModeEnter { name, once, .. } => self.enter_mode(&name, once, cx).map_err(|_| RpcError::not_found(format!("mode {name}")))?,
+            Method::AppModeExit { all, .. } => self.exit_mode(all, cx),
             _ => return Err(RpcError::bad_request(format!("{name} is not an app method"))),
         }
         Ok(json!({}))

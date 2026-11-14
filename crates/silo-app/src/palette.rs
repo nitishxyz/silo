@@ -120,6 +120,13 @@ enum Input {
     /// (host index, current name)
     HostName(usize, String),
     OpenUrl(String),
+    /// An `init.lua` action's required args, as `key=value …`.
+    ActionArgs {
+        host: usize,
+        name: String,
+        title: String,
+        schema: serde_json::Value,
+    },
 }
 
 impl Step {
@@ -139,6 +146,7 @@ impl Input {
             Self::RenameTab(..) => "Rename tab (empty to reset)".into(),
             Self::HostName(..) => "Rename host".into(),
             Self::OpenUrl(_) => "Open in a new browser".into(),
+            Self::ActionArgs { title, .. } => format!("Run {title}"),
         }
     }
 
@@ -147,6 +155,7 @@ impl Input {
         match self {
             Self::RenameSession(_, current) | Self::RenameTab(_, current) | Self::HostName(_, current) => current.clone(),
             Self::OpenUrl(_) => "Address".into(),
+            Self::ActionArgs { schema, .. } => crate::config::args_placeholder(schema),
         }
     }
 }
@@ -1201,7 +1210,37 @@ impl Workspace {
                 }
                 Err(error) => fail(self, error, cx),
             },
+            Input::ActionArgs { host, name, schema, .. } => match crate::config::parse_args(&text, &schema) {
+                Ok(args) => {
+                    self.close_palette(window, cx);
+                    self.run_palette_action(host, &name, args, window, cx);
+                }
+                Err(error) => fail(self, error, cx),
+            },
         }
+    }
+
+    /// ⌘P picked action `name` of `host`: ask for its required args, or run it.
+    fn pick_action(&mut self, host: usize, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let action = crate::config::get(host).and_then(|c| c.actions.iter().find(|a| a.name == name).cloned());
+        let Some(action) = action else {
+            self.close_palette(window, cx);
+            return self.flash(Status::warning(format!("No action named “{name}”")), cx);
+        };
+        if crate::config::required_args(&action.args).is_empty() {
+            self.close_palette(window, cx);
+            return self.run_palette_action(host, &name, serde_json::json!({}), window, cx);
+        }
+        let title = if action.title.is_empty() { name.clone() } else { action.title.clone() };
+        self.open_palette_step(Step::Input(Input::ActionArgs { host, name, title, schema: action.args }), String::new(), window, cx);
+    }
+
+    /// `action.run` from ⌘P: the focus ids go to the focused session's host only.
+    fn run_palette_action(&mut self, host: usize, name: &str, args: serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = self.focus_ids(window, cx);
+        let focused = (host == self.active_host).then_some(&focus);
+        let params = crate::config::action_params(name, args, focused, Some(silo_proto::config::ActionOrigin::Palette));
+        self.run_action(host, params, cx);
     }
 
     /// Remember a finder pick for the empty query and the recency boost.
@@ -1294,7 +1333,16 @@ impl Workspace {
             Target::Category(scope) => self.set_chip(Some(scope), String::new(), window, cx),
             Target::File { root, path, line } => {
                 self.close_palette(window, cx);
-                self.open_found_file(root, path, line, how, window, cx);
+                // `init.lua`'s `open_file` first, when a host defines it.
+                let full = std::path::Path::new(&root).join(&path).to_string_lossy().into_owned();
+                let mut args = serde_json::json!({ "path": full });
+                if let Some(line) = line {
+                    args["line"] = line.into();
+                }
+                let origin = Some(silo_proto::config::ActionOrigin::Palette);
+                let open =
+                    move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| this.open_found_file(root, path, line, how, window, cx);
+                self.reserved_or("open_file", args, None, origin, open, window, cx);
             }
             Target::Agent { session, title } => {
                 self.close_palette(window, cx);
@@ -1306,6 +1354,7 @@ impl Workspace {
                     self.open_found_change(block, path, window, cx);
                 }
             }
+            Target::Action { host, name } => self.pick_action(host, name, window, cx),
         }
         cx.notify();
     }

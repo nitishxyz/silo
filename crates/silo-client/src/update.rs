@@ -1073,6 +1073,7 @@ mod tests {
         std::fs::write(path.join("Contents/Info.plist"), plist).unwrap();
     }
 
+    #[cfg(target_os = "macos")]
     fn version_of(app: &Path) -> String {
         app_version(app).unwrap()
     }

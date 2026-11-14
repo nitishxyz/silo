@@ -1,0 +1,22 @@
+[package]
+name = "silo-lua"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+silo-proto.workspace = true
+silo-client.workspace = true
+# Lua 5.4 built from source (no system Lua), async calls into Rust, serde
+# for its null and array markers.
+mlua = { version = "0.12", features = ["lua54", "vendored", "async", "serialize"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

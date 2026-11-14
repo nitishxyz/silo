@@ -1,0 +1,23 @@
+# systemd unit for the silo login server (docs/LOGIN_SERVER.md), written by
+# `silo login-server install` with the path of the silo binary it ran as.
+# The installer's copy is crates/silo-login/src/install.rs (a test keeps the
+# two the same).
+[Unit]
+Description=silo login server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/silo login-server run
+# Re-reads /etc/silo/accounts.json; devices that lost an account are revoked.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+# The accounts' servers it starts outlive it (a restart or upgrade of the
+# login server must not end anyone's sessions): stop signals only it.
+KillMode=process
+UMask=0077
+StateDirectory=silo-login
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

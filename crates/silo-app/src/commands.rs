@@ -282,10 +282,11 @@ impl Command {
         }
     }
 
-    /// The effective shortcut in macOS notation, e.g. `⇧⌘N`.
+    /// The effective shortcut in macOS notation, e.g. `⇧⌘N`, or `⌃B C`
+    /// for a sequence `init.lua` binds.
     #[must_use]
     pub fn hint(self) -> Option<String> {
-        crate::keymap::bindings(self).first().map(crate::keymap::Chord::hint)
+        crate::keymap::shortcuts(self).first().map(silo_proto::keys::Sequence::hint)
     }
 
     /// Commands that need confirmation in the palette.

@@ -5,9 +5,10 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use silo_client::{Control, Events, transport::EndpointAddr};
+use silo_client::{Control, Events, hosts::LoginVia, transport::EndpointAddr};
 
-/// A saved, paired remote host (`hosts.json`).
+/// A saved, paired remote host (`hosts.json`, shared with the CLI's
+/// `silo_client::hosts::Host`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteHost {
     /// The server's canonical EndpointId.
@@ -15,12 +16,26 @@ pub struct RemoteHost {
     pub name: String,
     /// Last known route: relay and direct addresses.
     pub addr: EndpointAddr,
+    /// The login server it was added through: when the host does not
+    /// answer, logging in there again starts it (`docs/LOGIN_SERVER.md` §5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<LoginVia>,
+    /// Fields this build does not know (written by a newer CLI or app):
+    /// kept as they are when the app rewrites the file.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl RemoteHost {
     #[must_use]
     pub fn new(addr: EndpointAddr, name: String) -> Self {
-        Self { id: addr.id.to_string(), name, addr }
+        Self { id: addr.id.to_string(), name, addr, login: None, extra: serde_json::Map::new() }
+    }
+
+    /// As the client library has it (for `silo_client::login::relogin`).
+    #[must_use]
+    pub fn client(&self) -> silo_client::hosts::Host {
+        silo_client::hosts::Host { id: self.id.clone(), name: self.name.clone(), addr: self.addr.clone(), login: self.login.clone() }
     }
 }
 
@@ -32,8 +47,11 @@ pub fn find<'a>(hosts: &'a [RemoteHost], id: &str) -> Option<&'a RemoteHost> {
 
 /// Save a paired host: a known EndpointId takes the new route and keeps
 /// its name unless the user `chose` one; a new host is named `chosen`,
-/// else `suggested` (its hostname or offered name). The saved host.
-pub fn save(hosts: &mut Vec<RemoteHost>, addr: EndpointAddr, chosen: Option<String>, suggested: &str) -> RemoteHost {
+/// else `suggested` (its hostname or offered name). `login` (a host added
+/// through a login server) is where to log in again; `None` keeps what
+/// the host had, as pairing it again with a plain ticket does. The saved
+/// host.
+pub fn save(hosts: &mut Vec<RemoteHost>, addr: EndpointAddr, chosen: Option<String>, suggested: &str, login: Option<LoginVia>) -> RemoteHost {
     let id = addr.id.to_string();
     match hosts.iter_mut().find(|h| h.id == id) {
         Some(host) => {
@@ -41,10 +59,13 @@ pub fn save(hosts: &mut Vec<RemoteHost>, addr: EndpointAddr, chosen: Option<Stri
             if let Some(name) = chosen {
                 host.name = name;
             }
+            if login.is_some() {
+                host.login = login;
+            }
             host.clone()
         }
         None => {
-            let host = RemoteHost::new(addr, chosen.unwrap_or_else(|| suggested.to_owned()));
+            let host = RemoteHost { login, ..RemoteHost::new(addr, chosen.unwrap_or_else(|| suggested.to_owned())) };
             hosts.push(host.clone());
             host
         }
@@ -55,6 +76,9 @@ pub fn save(hosts: &mut Vec<RemoteHost>, addr: EndpointAddr, chosen: Option<Stri
 struct HostsFile {
     #[serde(default)]
     hosts: Vec<RemoteHost>,
+    /// Top-level fields this build does not know, kept on rewrite.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 fn hosts_path(home: &Path) -> PathBuf {
@@ -70,9 +94,13 @@ pub fn load(home: &Path) -> Vec<RemoteHost> {
 /// file is no hosts).
 #[must_use]
 pub fn try_load(home: &Path) -> Option<Vec<RemoteHost>> {
+    load_file(home).map(|f| f.hosts)
+}
+
+fn load_file(home: &Path) -> Option<HostsFile> {
     match std::fs::read(hosts_path(home)) {
-        Ok(bytes) => serde_json::from_slice::<HostsFile>(&bytes).ok().map(|f| f.hosts),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+        Ok(bytes) => serde_json::from_slice::<HostsFile>(&bytes).ok(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(HostsFile::default()),
         Err(_) => None,
     }
 }
@@ -94,12 +122,12 @@ pub fn update<R>(home: &Path, change: impl FnOnce(&mut Vec<RemoteHost>) -> R) ->
     std::fs::create_dir_all(home)?;
     let lock = std::fs::File::options().create(true).truncate(false).write(true).open(home.join("hosts.json.lock"))?;
     lock.lock()?;
-    let mut hosts = try_load(home).ok_or_else(|| anyhow::anyhow!("hosts.json is unreadable"))?;
+    let HostsFile { mut hosts, extra } = load_file(home).ok_or_else(|| anyhow::anyhow!("hosts.json is unreadable"))?;
     let before = hosts.clone();
     let out = change(&mut hosts);
     if hosts != before {
         let tmp = home.join(format!("hosts.json.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&HostsFile { hosts })?)?;
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&HostsFile { hosts, extra })?)?;
         std::fs::rename(tmp, hosts_path(home))?;
     }
     Ok(out)
@@ -164,6 +192,30 @@ impl Transport {
     #[must_use]
     pub fn is_remote(&self) -> bool {
         matches!(self, Self::Iroh { .. } | Self::Shared { .. })
+    }
+
+    /// For a saved host added through a login server: log in there again
+    /// (which starts the account's server when it is not running), store
+    /// the address it gives in hosts.json and dial that from now on; the
+    /// address dialed now. `None` when there is nothing to log in to (not a
+    /// saved host, or not one added through a login server).
+    pub async fn relogin(&mut self, client_name: &str) -> Option<anyhow::Result<EndpointAddr>> {
+        let Self::Iroh { home, addr } = self else { return None };
+        let host = try_load(home)?.into_iter().find(|h| h.id == addr.id.to_string() && h.login.is_some())?;
+        let result = async {
+            let net = crate::remote::net(home).await?;
+            let new = silo_client::login::relogin(net, &host.client(), client_name).await?;
+            silo_client::hosts::store_addr(home, new.clone())?;
+            anyhow::Ok(new)
+        }
+        .await;
+        // An address without routes is only the id: keep dialing the last route.
+        Some(result.map(|new| {
+            if !new.is_empty() {
+                addr.clone_from(&new);
+            }
+            addr.clone()
+        }))
     }
 
     #[must_use]
@@ -399,6 +451,14 @@ pub struct AppState {
     /// Settings › Voice.
     #[serde(default)]
     pub voice: silo_voice::VoicePrefs,
+    /// How this app's endpoint reaches remote hosts (Settings › Hosts);
+    /// read when the endpoint is bound.
+    #[serde(default, skip_serializing_if = "is_default_relay")]
+    pub relay: crate::remote::Relay,
+}
+
+fn is_default_relay(relay: &crate::remote::Relay) -> bool {
+    *relay == crate::remote::Relay::Default
 }
 
 impl Default for AppState {
@@ -424,6 +484,7 @@ impl Default for AppState {
             notifications: NotifyPrefs::default(),
             quiet_hosts: Vec::new(),
             voice: silo_voice::VoicePrefs::default(),
+            relay: crate::remote::Relay::Default,
         }
     }
 }
@@ -496,17 +557,17 @@ pub(crate) mod tests {
         let dir = temp("save");
         let mut hosts = Vec::new();
         let first = addr(&dir.join("a"));
-        assert_eq!(save(&mut hosts, first.clone(), None, "batmini.local").name, "batmini.local", "a new host takes the suggestion");
+        assert_eq!(save(&mut hosts, first.clone(), None, "batmini.local", None).name, "batmini.local", "a new host takes the suggestion");
         hosts[0].name = "mini".into();
         // Reinstalled or re-offered: same EndpointId, new route.
         let moved = EndpointAddr::new(first.id).with_ip_addr("10.0.0.2:5000".parse().unwrap());
-        let saved = save(&mut hosts, moved.clone(), None, "batmini.local");
+        let saved = save(&mut hosts, moved.clone(), None, "batmini.local", None);
         assert_eq!((saved.name.as_str(), &saved.addr), ("mini", &moved));
         assert_eq!(hosts, vec![saved]);
         // A name the user types wins.
-        assert_eq!(save(&mut hosts, moved, Some("studio".into()), "batmini.local").name, "studio");
+        assert_eq!(save(&mut hosts, moved, Some("studio".into()), "batmini.local", None).name, "studio");
         // A fresh key is another host, named afresh.
-        let other = save(&mut hosts, addr(&dir.join("b")), None, "batmini.local");
+        let other = save(&mut hosts, addr(&dir.join("b")), None, "batmini.local", None);
         assert_eq!((other.name.as_str(), hosts.len()), ("batmini.local", 2));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -524,6 +585,48 @@ pub(crate) mod tests {
         silo_client::hosts::store_addr(&dir, EndpointAddr::new(old.id)).unwrap();
         silo_client::hosts::store_addr(&dir, addr(&dir.join("b"))).unwrap();
         assert_eq!(load(&dir).iter().map(|h| &h.addr).collect::<Vec<_>>(), [&moved]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_login_host_keeps_its_login_server_and_unknown_fields() {
+        use silo_client::hosts::Hosts;
+        let dir = temp("login");
+        let (a, server) = (addr(&dir.join("a")), addr(&dir.join("login")));
+        // A file from before login servers has no `login`; it loads.
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = serde_json::json!({"hosts": [{"id": a.id.to_string(), "name": "box", "addr": a}]});
+        std::fs::write(dir.join("hosts.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(load(&dir), vec![RemoteHost::new(a.clone(), "box".into())]);
+        update(&dir, |hosts| hosts[0].name = "boxed".into()).unwrap();
+        assert!(!std::fs::read_to_string(dir.join("hosts.json")).unwrap().contains("\"login\""), "no login server, none written");
+        // Saved by the CLI with its login server: the app's rewrites (a
+        // rename, pairing again with a plain ticket) keep it.
+        let via = LoginVia { addr: server, account: Some("alice".into()), server_of: None };
+        Hosts::update(&dir, |h| h.set_login(&a.id.to_string(), Some(via.clone()))).unwrap();
+        assert_eq!(load(&dir)[0].login, Some(via.clone()));
+        update(&dir, |hosts| hosts[0].name = "work".into()).unwrap();
+        let moved = EndpointAddr::new(a.id).with_ip_addr("10.0.0.2:5000".parse().unwrap());
+        update(&dir, |hosts| save(hosts, moved.clone(), None, "box", None)).unwrap();
+        let cli = Hosts::load(&dir).unwrap();
+        let host = cli.find("work").unwrap();
+        assert_eq!((&host.addr, &host.login), (&moved, &Some(via.clone())));
+        // Add Host with a login ticket saves the login server with the host.
+        let b = addr(&dir.join("b"));
+        let saved = update(&dir, |hosts| save(hosts, b.clone(), None, "alice@b", Some(via.clone()))).unwrap();
+        assert_eq!((saved.name.as_str(), &saved.login), ("alice@b", &Some(via.clone())));
+        assert_eq!(Hosts::load(&dir).unwrap().find("alice@b").unwrap().login, Some(via.clone()));
+        assert_eq!(saved.client().login, Some(via));
+        // Fields of a newer build, a host's and the file's, survive a rewrite.
+        let mut file: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("hosts.json")).unwrap()).unwrap();
+        file["hosts"][0]["future"] = serde_json::json!({"x": 1});
+        file["version"] = serde_json::json!(2);
+        std::fs::write(dir.join("hosts.json"), serde_json::to_vec(&file).unwrap()).unwrap();
+        update(&dir, |hosts| hosts[0].name = "studio".into()).unwrap();
+        let file: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("hosts.json")).unwrap()).unwrap();
+        assert_eq!((&file["hosts"][0]["future"], &file["version"]), (&serde_json::json!({"x": 1}), &serde_json::json!(2)));
+        assert_eq!(file["hosts"][0]["name"], "studio");
+        assert!(file["hosts"][0]["login"].is_object());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -579,6 +682,7 @@ pub(crate) mod tests {
             notifications: NotifyPrefs { done: false, ..NotifyPrefs::default() },
             quiet_hosts: vec!["local".into()],
             voice: silo_voice::VoicePrefs::default(),
+            relay: crate::remote::Relay::Off,
         };
         save_state(&dir, &state);
         let text = std::fs::read_to_string(dir.join("app.json")).unwrap();
@@ -603,6 +707,29 @@ pub(crate) mod tests {
         save_state(&dir, &state);
         assert_eq!(load_state(&dir).ui_font_family, "Helvetica Neue");
         assert!(!dir.join("terminal.json").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn relay_setting_round_trips_and_defaults() {
+        use crate::remote::Relay;
+        let old: AppState = serde_json::from_str(r#"{"last_session":"s1","sounds":false}"#).unwrap();
+        assert_eq!(old.relay, Relay::Default, "older files use the default relays");
+        assert!(!old.sounds, "the rest of an older file is kept");
+        let dir = temp("relay");
+        std::fs::create_dir_all(&dir).unwrap();
+        save_state(&dir, &AppState::default());
+        assert!(!std::fs::read_to_string(dir.join("app.json")).unwrap().contains("relay"), "the default is not written");
+        let custom = Relay::Custom("https://relay.example.com/".into());
+        save_state(&dir, &AppState { relay: custom.clone(), ..AppState::default() });
+        let text = std::fs::read_to_string(dir.join("app.json")).unwrap();
+        assert!(text.contains(r#""relay": "https://relay.example.com/""#), "{text}");
+        assert_eq!(load_state(&dir).relay, custom);
+        save_state(&dir, &AppState { relay: Relay::Off, ..AppState::default() });
+        assert_eq!(load_state(&dir).relay, Relay::Off);
+        std::fs::write(dir.join("app.json"), r#"{"relay":"not a relay","sounds":false}"#).unwrap();
+        let bad = load_state(&dir);
+        assert_eq!((bad.relay, bad.sounds), (Relay::Default, false), "a bad relay keeps the rest of the file");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

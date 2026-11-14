@@ -321,7 +321,8 @@ impl Workspace {
             })
             .font_family(theme::ui_font())
             .when(side && self.view.is_some(), |el| el.child(self.render_sidebar_toggle(cx)))
-            .child(self.render_pill(cx));
+            .child(self.render_pill(cx))
+            .children(self.render_mode_chip(cx));
         if self.view.is_some() {
             let menu_open = self.appearance_menu.open;
             let new_tab_open = self.launcher.is_open_for_tab();

@@ -49,6 +49,13 @@ pub struct StandIn {
     pub label: String,
 }
 
+impl StandIn {
+    /// A stand-in acting as connected client `entry`.
+    pub fn of(entry: &crate::registry::ClientEntry) -> Self {
+        Self { principal: entry.principal.clone(), role: entry.role, pane: entry.pane.clone(), tty: entry.tty, label: entry.label.clone() }
+    }
+}
+
 /// Connections the server opens to itself to run Silo's own tools for a
 /// caller, admitted with a one-time secret as that caller ([`StandIn`]),
 /// and the tools each caller's stand-in runs (kept while it is connected,
@@ -57,6 +64,8 @@ pub struct StandIn {
 pub struct StandIns {
     secrets: Mutex<HashMap<String, StandIn>>,
     tools: tokio::sync::Mutex<HashMap<ClientId, Arc<silo_tools::Tools>>>,
+    /// The connection each caller's `action.run`s call Silo through.
+    callers: tokio::sync::Mutex<HashMap<ClientId, silo_client::Control>>,
 }
 
 impl StandIns {
@@ -68,6 +77,41 @@ impl StandIns {
     /// Forget `client`'s stand-in (it disconnected).
     pub async fn client_gone(&self, client: ClientId) {
         self.tools.lock().await.remove(&client);
+        self.callers.lock().await.remove(&client);
+    }
+
+    /// A connection acting as connected client `client` (its rights, pane
+    /// and approvals), opened on first use and kept while it is connected.
+    ///
+    /// # Errors
+    /// `not_found` for an unknown client; `internal` if it cannot connect.
+    pub async fn caller(server: &Server, client: ClientId) -> Result<silo_client::Control, RpcError> {
+        let mut cache = server.stand_ins.callers.lock().await;
+        if let Some(control) = cache.get(&client).filter(|c| !c.is_closed()) {
+            return Ok(control.clone());
+        }
+        let stand_in = {
+            let reg = server.registry.lock().unwrap();
+            StandIn::of(reg.clients.get(&client).ok_or_else(|| RpcError::not_found("client"))?)
+        };
+        let label = stand_in.label.clone();
+        let (control, _events) = Self::connect(server, stand_in, &label).await?;
+        cache.insert(client, control.clone());
+        Ok(control)
+    }
+
+    /// Open a passive connection to `server` acting as `stand_in`, named
+    /// `name` in its hello. Its events need `subscribe` as any client's.
+    ///
+    /// # Errors
+    /// `internal` if the connection fails (the server is stopping).
+    pub async fn connect(server: &Server, stand_in: StandIn, name: &str) -> Result<(silo_client::Control, silo_client::Events), RpcError> {
+        let secret = format!("standin-{}{}", new_id(), new_id());
+        server.stand_ins.secrets.lock().unwrap().insert(secret.clone(), stand_in);
+        let socket = silo_proto::paths::socket(&server.home);
+        let connected = silo_client::Control::connect_with_secret(&socket, name, secret.clone()).await;
+        server.stand_ins.secrets.lock().unwrap().remove(&secret);
+        connected.map_err(RpcError::internal)
     }
 }
 
@@ -318,22 +362,10 @@ async fn builtin(server: &Server, client: ClientId, params: ToolsCallParams) -> 
             None => {
                 let stand_in = {
                     let reg = server.registry.lock().unwrap();
-                    let entry = reg.clients.get(&client).ok_or_else(|| RpcError::not_found("client"))?;
-                    StandIn {
-                        principal: entry.principal.clone(),
-                        role: entry.role,
-                        pane: entry.pane.clone(),
-                        tty: entry.tty,
-                        label: entry.label.clone(),
-                    }
+                    StandIn::of(reg.clients.get(&client).ok_or_else(|| RpcError::not_found("client"))?)
                 };
                 let pane = stand_in.pane.clone();
-                let secret = format!("standin-{}{}", new_id(), new_id());
-                server.stand_ins.secrets.lock().unwrap().insert(secret.clone(), stand_in);
-                let socket = silo_proto::paths::socket(&server.home);
-                let connected = silo_client::Control::connect_with_secret(&socket, "silo tools", secret.clone()).await;
-                server.stand_ins.secrets.lock().unwrap().remove(&secret);
-                let (control, events) = connected.map_err(RpcError::internal)?;
+                let (control, events) = StandIns::connect(server, stand_in, "silo tools").await?;
                 let cx = silo_tools::Context { agent_block: pane, ..silo_tools::Context::default() };
                 let tools = Arc::new(silo_tools::Tools::new(control, events, cx));
                 cache.insert(client, tools.clone());

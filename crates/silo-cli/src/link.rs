@@ -5,7 +5,11 @@
 use std::{path::Path, time::Duration};
 
 use anyhow::{Context, bail};
-use silo_client::{Control, Events, Unauthorized, transport::PairTicket};
+use silo_client::{
+    Control, Events, Unauthorized,
+    hosts::{self, Host, Hosts},
+    transport::{LoginTicket, PairTicket},
+};
 use silo_proto::control::{Event, HostOffer, InvitePurpose, Method, OfferSource, PairInvite};
 
 use crate::{Endpoint, NetOptions, explain};
@@ -93,6 +97,84 @@ pub async fn wait_offer(events: &mut Events, invite_id: &str, timeout: Duration)
         bail!("the local server went away")
     };
     tokio::time::timeout(timeout, wait).await.unwrap_or_else(|_| bail!("the other machine did not offer its server in time"))
+}
+
+/// A stored host did not answer its dial (see [`crate::reach`]): a host
+/// added through a login server can be started by logging in again.
+pub use silo_client::login::NotAnswering;
+
+/// A clear message for a refused login.
+fn explain_login(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<silo_client::login::LoginRefused>() {
+        Some(refused) => anyhow::anyhow!("{refused}"),
+        None => explain(error),
+    }
+}
+
+/// Add a host through a login server (`silol1…` or `account@silol1…`):
+/// log in (redeeming its invite, if any), connect to the account's server
+/// as a paired device, and store it with its login server. With
+/// `server_of`, log in as the caller's own account and ask for that
+/// account's server (one shared by name); reconnects ask the same. Named
+/// `name` when the user chose one, else `account@hostname` (the server's
+/// account).
+///
+/// # Errors
+/// Refused login, unreachable server, or `hosts.json` I/O.
+pub async fn add_login_host(
+    home: &Path,
+    text: &str,
+    name: Option<String>,
+    server_of: Option<&str>,
+    options: &NetOptions,
+    client_name: &str,
+) -> anyhow::Result<Host> {
+    let ticket = LoginTicket::parse(text)?;
+    // The login server knows a device by the endpoint that dials it: the
+    // device key itself, as for pairing.
+    let endpoint = Endpoint::device(home, options).await?;
+    let result = async {
+        let reply = silo_client::login::login(&endpoint.net, &ticket, None, server_of, client_name).await?;
+        let addr = silo_client::login::server_addr(&reply)?;
+        let (control, _) = Control::connect_remote(&endpoint.net, addr.clone(), client_name, false, None).await?;
+        let hostname = control.hello().server.hostname.clone();
+        let current = hosts::current_addr(&control).await?.filter(|a| a.id == addr.id);
+        anyhow::Ok((current.unwrap_or(addr), hostname, reply))
+    }
+    .await;
+    endpoint.close().await;
+    let (addr, hostname, reply) = result.map_err(explain_login)?;
+    let via = silo_client::login::via(&ticket, &reply, server_of);
+    let owner = server_of.unwrap_or(&reply.account);
+    let suggested = if hostname.is_empty() { owner.to_owned() } else { format!("{owner}@{hostname}") };
+    let id = addr.id.to_string();
+    Hosts::update(home, |hosts| {
+        hosts.pair(addr, name, &suggested)?;
+        hosts.set_login(&id, Some(via))?;
+        Ok(hosts.find(&id)?.clone())
+    })
+}
+
+/// Log in again through `host`'s login server (which starts its server)
+/// and store the address it gives: the host to dial now.
+///
+/// # Errors
+/// No login server, a refused login, or `hosts.json` I/O.
+pub async fn relogin(home: &Path, host: &Host, options: &NetOptions, client_name: &str) -> anyhow::Result<Host> {
+    let endpoint = Endpoint::device(home, options).await?;
+    let addr = silo_client::login::relogin(&endpoint.net, host, client_name).await;
+    endpoint.close().await;
+    let addr = addr.map_err(explain_login)?;
+    tracing::info!(host = host.name, "logged in again through the login server");
+    hosts::store_addr(home, addr.clone())?;
+    Ok(Host { addr, ..host.clone() })
+}
+
+/// Whether `error` is a stored host that did not answer and has a login
+/// server to start it.
+#[must_use]
+pub fn login_may_start(error: &anyhow::Error, host: &Host) -> bool {
+    silo_client::login::may_start(error, host)
 }
 
 /// Whether `silo up` should offer this machine inline: run from a Silo

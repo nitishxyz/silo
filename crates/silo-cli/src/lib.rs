@@ -1,9 +1,13 @@
 //! Command logic of the `silo` CLI, callable from tests.
 
 pub mod clipboard;
+pub mod config_cmd;
 pub mod hooks;
 pub mod link;
+pub mod login_cmd;
 pub mod mcp;
+pub mod script;
+pub mod share;
 pub mod tool;
 pub mod update;
 pub mod upgrade;
@@ -178,6 +182,10 @@ pub fn explain(error: anyhow::Error) -> anyhow::Error {
     error
 }
 
+/// How long the first dial of a host added through a login server may
+/// take before logging in again (the app's connect timeout).
+const LOGIN_HOST_DIAL: Duration = Duration::from_secs(10);
+
 /// Dial the stored `host`, as every command reaching a paired host does.
 /// No limit of its own: when the stored addresses are outdated (each
 /// restart of a host moves its ports) iroh needs the time it allows for
@@ -188,7 +196,7 @@ pub fn explain(error: anyhow::Error) -> anyhow::Error {
 pub async fn reach(net: &Net, host: &Host) -> anyhow::Result<RemoteConn> {
     net.dial(host.addr.clone()).await.map_err(|error| {
         if let Some(e) = error.downcast_ref::<Unreachable>() {
-            return anyhow::anyhow!("could not reach {} ({}); is its silo running?", host.name, e.reason);
+            return link::NotAnswering(format!("could not reach {} ({}); is its silo running?", host.name, e.reason)).into();
         }
         error.context(format!("reach {}", host.name))
     })
@@ -209,20 +217,39 @@ pub async fn connect_remote(home: &Path, host: &str, options: &NetOptions, clien
             (endpoint, result)
         } else {
             let host = Hosts::load(home)?.find(host)?.clone();
-            let hello = async |endpoint: &Endpoint| {
-                let rc = reach(&endpoint.net, &host).await?;
+            let hello = async |endpoint: &Endpoint, host: &Host| {
+                let rc = reach(&endpoint.net, host).await?;
                 match endpoint.proof(host.addr.id) {
                     Some(proof) => Control::over_remote_as(rc, client_name, false, proof).await,
                     None => Control::over_remote(rc, client_name, false, None).await,
                 }
             };
             let own = Endpoint::own(home, options).await?;
-            match hello(&own).await {
+            // A login host's server may not be running: do not wait out the
+            // whole dial (30 s) before logging in again, which starts it.
+            let first = async {
+                if host.login.is_none() {
+                    return hello(&own, &host).await;
+                }
+                match tokio::time::timeout(LOGIN_HOST_DIAL, hello(&own, &host)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(link::NotAnswering(format!("could not reach {}; is its silo running?", host.name)).into()),
+                }
+            };
+            match first.await {
                 Err(error) if unknown_device(&error) => {
                     let device = own.refused(home, options).await?;
-                    let result = hello(&device).await;
+                    let result = hello(&device, &host).await;
                     (device, result)
                 }
+                // Added through a login server: logging in there starts it.
+                Err(error) if link::login_may_start(&error, &host) => match link::relogin(home, &host, options, client_name).await {
+                    Ok(host) => {
+                        let result = hello(&own, &host).await;
+                        (own, result)
+                    }
+                    Err(login) => (own, Err(error.context(format!("{login:#}")))),
+                },
                 result => (own, result),
             }
         };
@@ -240,11 +267,26 @@ pub async fn connect_remote(home: &Path, host: &str, options: &NetOptions, clien
 
 /// Redeem `ticket` and store the host (see [`hosts::Hosts::pair`]): named
 /// `name` when the user chose one, else as before, else by the server's
-/// hostname.
+/// hostname. `server_of` (a login server's ticket only) asks for that
+/// account's server instead of the caller's own (sharing by name).
 ///
 /// # Errors
 /// Pairing failed or `hosts.json` could not be written.
-pub async fn add_host(home: &Path, ticket: &str, name: Option<String>, options: &NetOptions, client_name: &str) -> anyhow::Result<hosts::Host> {
+pub async fn add_host(
+    home: &Path,
+    ticket: &str,
+    name: Option<String>,
+    server_of: Option<&str>,
+    options: &NetOptions,
+    client_name: &str,
+) -> anyhow::Result<hosts::Host> {
+    // A login server's ticket: log in, then store the account's server.
+    if silo_client::transport::LoginTicket::is_login(ticket) {
+        return link::add_login_host(home, ticket, name, server_of, options, client_name).await;
+    }
+    if server_of.is_some() {
+        anyhow::bail!("--server-of needs a login server's ticket (silol1…)");
+    }
     let ticket = PairTicket::decode(ticket)?;
     // Pairing grants the endpoint's key: the device key itself.
     let net = Endpoint::device(home, options).await?.net;

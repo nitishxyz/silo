@@ -8,7 +8,9 @@ use serde_json::Value;
 
 pub use crate::agent::*;
 pub use crate::changes::*;
+pub use crate::config::{ActionInfo, ActionList, ActionOrigin, ActionResult, ActionRunParams, ConfigState};
 pub use crate::files::*;
+pub use crate::login::{LoginAdmitParams, LoginAdmitted, LoginRevokeParams};
 pub use crate::permissions::{PermissionId, PermissionInfo, PermissionStatus, Permissions};
 pub use crate::search::*;
 pub use crate::tools::{ToolList, ToolRequest, ToolsCallParams, ToolsProvideParams, ToolsReplyParams};
@@ -77,6 +79,9 @@ pub enum ClientRole {
     Cli,
     /// A Silo app: forwarded `app.*` requests go to it, and it approves.
     App,
+    /// The login server (`docs/LOGIN_SERVER.md` §6): admitted as such
+    /// only from a unix peer with uid 0.
+    Login,
     #[serde(other)]
     Unknown,
 }
@@ -316,6 +321,17 @@ pub enum Method {
     SearchGrep(SearchGrepParams),
     #[serde(rename = "search.opened")]
     SearchOpened(SearchOpenedParams),
+    /// What the server's `init.lua` declares (feature `config`).
+    #[serde(rename = "config.get")]
+    ConfigGet {},
+    /// Load `init.lua` again; a failed load keeps the last good config.
+    #[serde(rename = "config.reload")]
+    ConfigReload {},
+    #[serde(rename = "action.list")]
+    ActionList {},
+    /// Run an action of the config as the caller.
+    #[serde(rename = "action.run")]
+    ActionRun(ActionRunParams),
     #[serde(rename = "server.info")]
     ServerInfo {},
     #[serde(rename = "server.shutdown")]
@@ -729,6 +745,13 @@ pub enum Method {
     /// Allow or deny a call waiting for approval (`approval.requested`).
     #[serde(rename = "approval.answer")]
     ApprovalAnswer { id: String, allow: bool },
+    /// Login server only: give a device a device grant (feature `login`).
+    #[serde(rename = "login.admit")]
+    LoginAdmit(LoginAdmitParams),
+    /// Login server only: remove the grants `login.admit` made for a
+    /// device.
+    #[serde(rename = "login.revoke")]
+    LoginRevoke(LoginRevokeParams),
 
     /// Local only: whether Silo Server holds each macOS privacy permission
     /// (checked as the server), and the bundle to drag into System
@@ -957,6 +980,24 @@ pub enum Method {
         #[serde(default)]
         client_id: Option<ClientId>,
     },
+    /// Enter a key mode of the config; `once`: leave it after one binding
+    /// runs.
+    #[serde(rename = "app.mode_enter")]
+    AppModeEnter {
+        name: String,
+        #[serde(default)]
+        once: bool,
+        #[serde(default)]
+        client_id: Option<ClientId>,
+    },
+    /// Leave the current key mode, or every one (`all`).
+    #[serde(rename = "app.mode_exit")]
+    AppModeExit {
+        #[serde(default)]
+        all: bool,
+        #[serde(default)]
+        client_id: Option<ClientId>,
+    },
 }
 
 /// Method names and one-line descriptions, for `api.list`.
@@ -1019,6 +1060,10 @@ pub const METHODS: &[(&str, &str)] = &[
     ("search.files", "Fuzzy-find files under a folder (fff query syntax: globs, !excludes, git:modified), frecency-ranked."),
     ("search.grep", "Search the text of the files under a folder (plain, regex or fuzzy), within a time budget."),
     ("search.opened", "Record that a file under a folder was opened, so it ranks higher in later searches."),
+    ("config.get", "What the server's init.lua declares: bindings, modes, actions, handlers and problems."),
+    ("config.reload", "Load the server's init.lua again; a failed load keeps the last good config."),
+    ("action.list", "List the actions of the server's init.lua."),
+    ("action.run", "Run an action of the server's init.lua as the caller."),
     ("server.info", "Server version, Ghostty revision and identity."),
     ("server.shutdown", "Stop the server and every process it runs."),
     ("server.restart", "Restart the server from its own binary; ends every session."),
@@ -1090,6 +1135,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("grant.list", "List grants (owner only)."),
     ("grant.revoke", "Remove a grant and close its connections (owner only)."),
     ("approval.answer", "Allow or deny a call waiting for approval."),
+    ("login.admit", "Give a device a device grant for an account (the login server only)."),
+    ("login.revoke", "Remove the grants login.admit made for a device (the login server only)."),
     ("permissions.status", "Which macOS privacy permissions Silo Server holds, and the app to drag into System Settings (local only)."),
     ("permissions.request", "Help grant a macOS privacy permission: ask macOS, then show the app's Permissions panel at it (local only)."),
     ("app.reply", "Answer an app.request (the app it went to only)."),
@@ -1125,6 +1172,8 @@ pub const METHODS: &[(&str, &str)] = &[
     ("app.copy_output", "Copy the last command's output."),
     ("app.open_share", "Open a shared link."),
     ("app.permissions_show", "Show the Permissions panel, a macOS privacy permission highlighted (local only)."),
+    ("app.mode_enter", "Enter a key mode of the config."),
+    ("app.mode_exit", "Leave the current key mode, or every one."),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1315,6 +1364,7 @@ pub const EVENTS: &[&str] = &[
     "changes.progress",
     "tools.changed",
     "tools.request",
+    "config.changed",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -1408,6 +1458,10 @@ pub enum Event {
     /// (sent to the provider only).
     #[serde(rename = "tools.request")]
     ToolRequest(ToolRequest),
+    /// The server's config was loaded again (feature `config`): read it
+    /// with `config.get`.
+    #[serde(rename = "config.changed")]
+    ConfigChanged { revision: u64 },
 }
 
 /// Who made a call: a client's label and, for a process in one of this

@@ -139,19 +139,29 @@ impl Grants {
         Ok(())
     }
 
-    /// Remove the grants `remove` selects and, transitively, every link
-    /// and token one of them created (`created_by_grant`); the removed
-    /// ones. Device grants are never removed this way, so the cascade stops
-    /// at them: removing one device must not cut off the devices it paired.
+    /// Remove the grants `remove` selects and, transitively, every link,
+    /// token and account grant one of them created (`created_by_grant`);
+    /// the removed ones. Device grants are never removed this way, so the
+    /// cascade stops at them: removing one device must not cut off the
+    /// devices it paired. The one exception: a device admitted through an
+    /// account grant (`login.admit` for another account) holds only what
+    /// that grant gave, and goes with it.
     pub fn remove_where(&mut self, remove: impl Fn(&Grant) -> bool) -> Result<Vec<Grant>, RpcError> {
         let before = self.grants.clone();
         let (mut gone, mut kept): (Vec<Grant>, Vec<Grant>) = std::mem::take(&mut self.grants).into_iter().partition(|g| remove(g));
         let mut from = 0;
         while from < gone.len() {
             let ids: Vec<String> = gone[from..].iter().map(|g| g.id.clone()).collect();
+            let accounts: Vec<String> = gone[from..].iter().filter(|g| matches!(g.who, Who::Account { .. })).map(|g| g.id.clone()).collect();
             from = gone.len();
-            let (created, rest): (Vec<Grant>, Vec<Grant>) =
-                kept.into_iter().partition(|g| matches!(g.who, Who::Secret { .. }) && g.created_by_grant.as_ref().is_some_and(|c| ids.contains(c)));
+            let (created, rest): (Vec<Grant>, Vec<Grant>) = kept.into_iter().partition(|g| {
+                let Some(by) = &g.created_by_grant else { return false };
+                match g.who {
+                    Who::Secret { .. } | Who::Account { .. } => ids.contains(by),
+                    Who::Device { .. } => accounts.contains(by),
+                    Who::Unknown => false,
+                }
+            });
             gone.extend(created);
             kept = rest;
         }
@@ -255,6 +265,43 @@ mod tests {
         // Removing f directly takes g with it.
         let gone: Vec<String> = grants.remove_where(|g| g.id == "f").unwrap().into_iter().map(|g| g.id).collect();
         assert_eq!(gone, ["f", "g"]);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_device_admitted_through_an_account_grant_goes_with_it_and_only_it() {
+        let home = PathBuf::from(format!("/tmp/silo-grants-account-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = home.join("state");
+        let mut grants = Grants::open(&dir, HostKey::load_or_create(&dir).unwrap()).unwrap();
+        let grant = |id: &str, who: Who, by: Option<&str>| Grant {
+            id: id.into(),
+            who,
+            scope: Scope::Server,
+            rights: Rights::View,
+            label: String::new(),
+            created_at: 0,
+            created_by: String::new(),
+            created_by_grant: by.map(Into::into),
+            expires_at: None,
+            last_seen: 0,
+        };
+        let device = |id: &str| Who::Device { id: id.into() };
+        // Laptop `p` made account grant `a` for ana; ana's phone `d` was
+        // admitted through it and made link `l`. `q` is a device `p` paired.
+        for g in [
+            grant("p", device("p"), None),
+            grant("a", Who::Account { name: "ana".into() }, Some("p")),
+            grant("d", device("d"), Some("a")),
+            grant("l", Who::Secret { kind: SecretKind::Link, hash: "l".into() }, Some("d")),
+            grant("q", device("q"), Some("p")),
+        ] {
+            grants.add(g).unwrap();
+        }
+        let gone: Vec<String> = grants.remove_where(|g| g.id == "a").unwrap().into_iter().map(|g| g.id).collect();
+        assert_eq!(gone, ["a", "d", "l"], "the admitted device and what it made go with the account grant");
+        let kept: Vec<&str> = grants.all().iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(kept, ["p", "q"], "devices are untouched otherwise");
         let _ = std::fs::remove_dir_all(&home);
     }
 }
