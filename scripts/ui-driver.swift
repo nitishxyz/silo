@@ -8,7 +8,7 @@
 //   ui-driver key CODE|CHAR [mods]              mods: cmd,shift,ctrl,alt (comma list)
 //   ui-driver perms                             -> "accessibility=0/1 screen=0/1"
 //   ui-driver drag x1 y1 x2 y2 [shift]
-//   ui-driver click x y [count] [shift]
+//   ui-driver click x y [count] [shift|cmd]
 //   ui-driver rclick x y
 //   ui-driver scroll x y lines [shift]          (positive = up; shift: shift+wheel as macOS delivers it,
 //                                                  sideways, positive = left)
@@ -229,8 +229,9 @@ case "drag":
 case "click":
     let p = CGPoint(x: num(2), y: num(3))
     let count = args.count > 4 ? Int64(args[4])! : 1
-    let flags: CGEventFlags = args.count > 5 ? .maskShift : []
-    post(.mouseMoved, p)
+    // A fifth argument holds shift, or `cmd` for a command-click.
+    let flags: CGEventFlags = args.count > 5 ? (args[5] == "cmd" ? .maskCommand : .maskShift) : []
+    post(.mouseMoved, p, flags: flags)
     usleep(30_000)
     for n in 1...count {
         post(.leftMouseDown, p, flags: flags, clicks: n)
