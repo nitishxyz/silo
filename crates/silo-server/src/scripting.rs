@@ -40,6 +40,8 @@ use crate::{
 
 /// Quiet time after a change to the config before it is loaded.
 const DEBOUNCE: Duration = Duration::from_millis(500);
+/// How often a config folder that does not exist is looked for.
+const POLL: Duration = Duration::from_secs(3);
 /// Longest wait for a replaced VM's running actions before it is stopped.
 const RETIRE_WAIT: Duration = Duration::from_secs(30);
 /// The owner stand-in's label (`owner_name` of what handlers make).
@@ -268,14 +270,17 @@ pub async fn run(server: Arc<Server>) {
     watch(&server).await;
 }
 
-/// What to watch for a set of files: folders (editors replace files by
-/// renaming, so a file is watched through its folder; a missing folder
-/// through its nearest existing ancestor) and the paths whose events mean
-/// a change.
+/// What to watch for a set of files: their folders (editors replace files
+/// by renaming, so a file is watched through its folder) and the paths
+/// whose events mean a change. A folder that does not exist is not watched
+/// through an ancestor (that could be the whole home folder): it is looked
+/// for every [`POLL`].
 #[derive(Default, PartialEq, Eq)]
 struct Plan {
     dirs: HashSet<PathBuf>,
     paths: HashSet<PathBuf>,
+    /// Whether a file's folder is missing.
+    missing: bool,
 }
 
 /// `path` with its longest existing ancestor resolved (the paths file
@@ -301,14 +306,13 @@ fn plan(files: &[PathBuf]) -> Plan {
     let mut plan = Plan::default();
     for file in files {
         let file = resolve(file);
-        let Some(dir) = file.ancestors().skip(1).find(|a| a.is_dir()) else { continue };
-        // The folders still missing between the watched one and the file:
-        // their creation may bring the file.
-        for missing in file.ancestors().skip(1).take_while(|a| *a != dir) {
-            plan.paths.insert(missing.to_owned());
+        match file.parent().filter(|dir| dir.is_dir()) {
+            Some(dir) => {
+                plan.dirs.insert(dir.to_owned());
+                plan.paths.insert(file);
+            }
+            None => plan.missing = true,
         }
-        plan.dirs.insert(dir.to_owned());
-        plan.paths.insert(file);
     }
     plan
 }
@@ -324,14 +328,10 @@ async fn watch(server: &Arc<Server>) {
             let _ = tx.send(event.paths);
         }
     };
-    let mut watcher = match notify::recommended_watcher(handler) {
-        Ok(watcher) => watcher,
-        Err(error) => {
-            tracing::warn!("config watch: {error}; reload with `silo config reload`");
-            scripting.reload(server).await;
-            return;
-        }
-    };
+    // Made with the first folder to watch: a server without a config
+    // folder has no watcher.
+    let mut handler = Some(handler);
+    let mut watcher = None;
     let mut current = Plan::default();
     let mut loaded = false;
     loop {
@@ -341,14 +341,25 @@ async fn watch(server: &Arc<Server>) {
         let next = plan(&scripting.files());
         if next != current {
             use notify::Watcher;
-            for dir in current.dirs.difference(&next.dirs) {
-                let _ = watcher.unwatch(dir);
+            if watcher.is_none()
+                && !next.dirs.is_empty()
+                && let Some(handler) = handler.take()
+            {
+                match notify::recommended_watcher(handler) {
+                    Ok(made) => watcher = Some(made),
+                    Err(error) => tracing::warn!("config watch: {error}; reload with `silo config reload`"),
+                }
             }
             let mut added = false;
-            for dir in next.dirs.difference(&current.dirs) {
-                match watcher.watch(dir, notify::RecursiveMode::NonRecursive) {
-                    Ok(()) => added = true,
-                    Err(error) => tracing::debug!(dir = %dir.display(), "config watch: {error}"),
+            if let Some(watcher) = &mut watcher {
+                for dir in current.dirs.difference(&next.dirs) {
+                    let _ = watcher.unwatch(dir);
+                }
+                for dir in next.dirs.difference(&current.dirs) {
+                    match watcher.watch(dir, notify::RecursiveMode::NonRecursive) {
+                        Ok(()) => added = true,
+                        Err(error) => tracing::debug!(dir = %dir.display(), "config watch: {error}"),
+                    }
                 }
             }
             current = next;
@@ -369,6 +380,8 @@ async fn watch(server: &Arc<Server>) {
         }
         tokio::select! {
             () = scripting.loaded.notified() => {}
+            // Look for the missing folder again.
+            () = tokio::time::sleep(POLL), if current.missing => {}
             paths = rx.recv() => {
                 let Some(paths) = paths else { return };
                 if !paths.iter().any(|p| current.paths.contains(p)) {
@@ -447,17 +460,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_missing_file_is_watched_through_its_nearest_folder() {
+    fn a_file_is_watched_through_its_folder_once_that_exists() {
         let root = std::env::temp_dir().join(format!("silo-scripting-plan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let real = root.canonicalize().unwrap();
         let file = root.join("config/init.lua");
         let planned = plan(std::slice::from_ref(&file));
-        assert_eq!(planned.dirs, HashSet::from([real.clone()]));
-        assert_eq!(planned.paths, HashSet::from([real.join("config"), real.join("config/init.lua")]));
+        assert!(planned.missing && planned.dirs.is_empty() && planned.paths.is_empty(), "no ancestor is watched");
         std::fs::create_dir_all(root.join("config")).unwrap();
         let planned = plan(&[file]);
+        assert!(!planned.missing);
         assert_eq!(planned.dirs, HashSet::from([real.join("config")]));
         assert_eq!(planned.paths, HashSet::from([real.join("config/init.lua")]));
         let _ = std::fs::remove_dir_all(&root);

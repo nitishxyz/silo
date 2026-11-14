@@ -359,8 +359,9 @@ As built:
 
 - `Server.scripting` (`scripting::Scripting`); `scripting::run` is spawned once the socket listens, so a config
   never delays or fails a start. A missing file is an empty config (`exists: false`) with no VM thread.
-- The watcher watches folders, not files (editors replace by rename): the config's folder, or its nearest existing
-  ancestor until it is made, and the folder of every file the VM or the last failed load read.
+- The watcher watches folders, not files (editors replace by rename): the config's folder and the folder of every
+  file the VM or the last failed load read. A folder that does not exist yet is looked for every 3 s, not watched
+  through an ancestor (that could be the home folder); a server without a config folder has no watcher.
 - `revision` bumps on every load that changes the state, a failed one too (its `failed` and `problems` changed),
   and `config.changed` goes out for both; a missing file that stays missing changes nothing.
 - On a swap the old VM's handlers and timers lose their owner connection at once (they would otherwise run beside
