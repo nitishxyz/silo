@@ -1158,8 +1158,8 @@ Order: P7-1 → (P7-2 ∥ P7-3 ∥ P7-4 ∥ P7-8) → (P7-5 ∥ P7-9) → P7-6 a
   builtin aren't seen. Neither is protected today either.
 - **Per-client event filtering** serializes `sessions.changed` per principal class. Cheap at Silo's client counts;
   measured in P7-1.
-- **Row anchors** depend on the mirror being exact, which the differential fuzz test already gates (GAPS §1).
-  The known upstream reflow divergence with small byte-limited scrollback (GAPS §1 findings) can misplace exit ticks
+- **Row anchors** depend on the mirror being exact, which the differential fuzz test already gates (`PLAN.md` §9, Phase 0).
+  The known upstream reflow divergence with small byte-limited scrollback (`PLAN.md` §9, Phase 0) can misplace exit ticks
   in that configuration only.
 - **bash 3.2** gives no duration and no command line.
 - **iroh WASM** may not support 1.3.0 relay-only dialing yet. Sharing between Silo apps doesn't depend on it; only

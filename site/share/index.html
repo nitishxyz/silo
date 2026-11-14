@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>silo: shared session</title>
+<meta name="description" content="Someone shared a Silo session with you.">
+<style>
+  :root { color-scheme: light dark; --fg: #1a1a1a; --muted: #6b6b6b; --bg: #fafaf8; --code: #efefeb; --accent: #2f6f4f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e4; --muted: #8d8d88; --bg: #111110; --code: #1c1c1a; --accent: #7fc4a0; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.5 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { width: min(36rem, 100% - 3rem); padding: 3rem 0; }
+  h1 { margin: 0; font: 600 1.1rem ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .02em; }
+  h1::before { content: "\25AE"; color: var(--accent); margin-right: .5em; }
+  .lead { margin: .75rem 0 1rem; font-size: 1.6rem; line-height: 1.25; letter-spacing: -.01em; }
+  .note { margin: 0 0 2rem; color: var(--muted); }
+  h2 { margin: 2rem 0 .5rem; font-size: .85rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  ol { margin: .5rem 0 0; padding-left: 1.25rem; }
+  li { margin: .25rem 0; }
+  kbd { font: .85rem ui-monospace, "SF Mono", Menlo, monospace; background: var(--code); border-radius: 4px; padding: .05rem .35rem; }
+  .cmd { display: flex; align-items: center; gap: .75rem; background: var(--code); border-radius: 8px; padding: .8rem 1rem; }
+  code { flex: 1; overflow-x: auto; white-space: nowrap; font: .9rem ui-monospace, "SF Mono", Menlo, monospace; }
+  .cmd.shell code::before { content: "$ "; color: var(--muted); }
+  #link { overflow: hidden; text-overflow: ellipsis; }
+  button { border: 0; background: none; color: var(--muted); font: inherit; font-size: .85rem; cursor: pointer; padding: 0; }
+  button:hover { color: var(--fg); }
+  .open { display: inline-block; margin-top: 1.25rem; padding: .55rem 1rem; border-radius: 8px; background: var(--accent); color: var(--bg); font-weight: 600; text-decoration: none; }
+  footer { margin-top: 2rem; font-size: .85rem; color: var(--muted); }
+  a { color: inherit; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>silo</h1>
+
+  <div id="shared" hidden>
+    <p class="lead">Someone shared a Silo session with you.</p>
+    <p class="note">The link opens a live session, or one pane of it, in the Silo app. Anyone who has it can open the session until it expires or is revoked, so keep it private. This page reads the link in your browser and sends it nowhere.</p>
+    <div class="cmd">
+      <code id="link"></code>
+      <button type="button" id="copy-link">copy link</button>
+    </div>
+    <p><a id="open" class="open" href="#">Open in Silo</a></p>
+    <h2>If nothing opens</h2>
+    <p class="note" style="margin-bottom: .5rem">Silo 0.1.33 and older do not open links from a web page.</p>
+    <ol>
+      <li>Copy the link.</li>
+      <li>In Silo, press <kbd>&#8984;P</kbd> and choose <b>Open Shared Link…</b></li>
+      <li>Paste the link into <b>Ticket</b> and click <b>Pair</b>.</li>
+    </ol>
+  </div>
+
+  <div id="invalid" hidden>
+    <p class="lead">This share link is incomplete.</p>
+    <p class="note">A Silo share link ends in <code style="white-space: normal">#silos1…</code>. Ask the person who sent it to copy the whole link again.</p>
+  </div>
+
+  <noscript>
+    <p class="lead">Someone shared a Silo session with you.</p>
+    <p class="note">Copy this page's full address. In Silo, press &#8984;P, choose Open Shared Link…, paste it into Ticket and click Pair.</p>
+  </noscript>
+
+  <h2>Get Silo</h2>
+  <p class="note" style="margin-bottom: 1rem">Shared links open in the Silo app for macOS (Apple silicon): download it from <a href="https://github.com/nitishxyz/silo/releases/latest">Releases</a>. To run a Silo server of your own on Linux or macOS:</p>
+  <div class="cmd shell">
+    <code id="cmd">curl -fsSL https://nitishxyz.github.io/silo/install.sh | sh</code>
+    <button type="button" id="copy-cmd">copy</button>
+  </div>
+  <footer><a href="https://nitishxyz.github.io/silo/">silo</a> · <a href="https://github.com/nitishxyz/silo">GitHub</a></footer>
+</main>
+<script>
+  // The ticket is in the fragment, which browsers never send to a server.
+  // It stays on this page: no requests, no storage.
+  let ticket = "";
+  try { ticket = decodeURIComponent(location.hash.slice(1)).trim(); } catch {}
+  const valid = /^silos1[a-z2-7]+$/i.test(ticket);
+  document.getElementById(valid ? "shared" : "invalid").hidden = false;
+  if (valid) {
+    document.getElementById("link").textContent = location.href;
+    // Handled by the Silo app (its silo:// scheme); the ticket still goes nowhere else.
+    document.getElementById("open").href = "silo://share#" + ticket;
+  }
+
+  const copy = (button, text) => button.addEventListener("click", async () => {
+    const label = button.textContent;
+    try {
+      await navigator.clipboard.writeText(text());
+      button.textContent = "copied";
+      setTimeout(() => (button.textContent = label), 1500);
+    } catch {}
+  });
+  copy(document.getElementById("copy-link"), () => location.href);
+  copy(document.getElementById("copy-cmd"), () => document.getElementById("cmd").textContent);
+</script>
+</body>
+</html>

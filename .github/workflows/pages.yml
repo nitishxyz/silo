@@ -1,6 +1,6 @@
 name: pages
 
-# Publishes site/ (index.html, install.sh) to https://nitishxyz.github.io/silo/
+# Publishes site/ (index.html, install.sh, share/ for share links) to https://nitishxyz.github.io/silo/
 # from main. Requires Pages with source "GitHub Actions" (build_type=workflow).
 # Other branches and pull requests only check install.sh.
 

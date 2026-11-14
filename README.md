@@ -81,6 +81,31 @@ silo update                # the latest release; a running server upgrades live
 
 `silo api list` and `silo do <method> --help` reach the whole control API: everything the app does is a method you can call.
 
+## Lua config and scripts
+
+Each server reads `~/.config/silo/init.lua` for key bindings, modes and actions: actions show in ⌘P, bind to keys and run with `silo do`, and handlers run in the server, so they react with no app open. Scripts call the same API with the caller's rights. See [`docs/LUA.md`](docs/LUA.md).
+
+```lua
+silo.bind("cmd-e", "SplitRight")
+silo.action{ name = "tests", title = "Run Tests",
+  run = function(ctx) silo.block.split{ axis = "horizontal", spawn = { command = { "cargo", "test" } } } end }
+```
+
+```sh
+silo do tests              # an action
+silo do ./layout.lua       # a script
+silo config check          # load init.lua without a server and list its problems
+```
+
+## Login server
+
+On a machine shared by several people, `silo login-server` (as root) lets each person's devices reach their own account's Silo server, started on demand, without pairing each account by hand. It only admits devices; sessions then talk to the account's server directly. See [`docs/LOGIN_SERVER.md`](docs/LOGIN_SERVER.md).
+
+```sh
+sudo silo login-server install          # the systemd unit and an empty accounts file
+sudo silo login-server invite alice     # prints a silol1… ticket; alice adds it in Silo (Add Machine)
+```
+
 ## Building from source
 
 You need a recent stable Rust and Xcode's command line tools. Zig and CEF are fetched for you.

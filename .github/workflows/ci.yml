@@ -41,9 +41,20 @@ jobs:
       # rustc peaks at several GB per job on the larger crates (iroh, ghostty
       # bindings); two jobs stay well inside the 16 GB runner.
       CARGO_BUILD_JOBS: 2
+      # Tested and linted here. The app and its app-only crates (silo-app,
+      # silo-web, silo-voice, silo-menubar) build on macOS only.
+      LINUX_CRATES: >-
+        -p silo-vt -p silo-pty -p silo-store -p silo-proto -p silo-server
+        -p silo-client -p silo-transport -p silo-cli -p silo-latency
+        -p silo-tools -p silo-lua -p silo-login
+        -p otto-llm -p otto-proto -p otto-store -p otto-tools -p otto-core
+        -p otto-mcp -p otto-media -p otto-server -p otto-client
+        -p otto-silo-tools -p otto-cli
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy
       # ~/.cargo registry/git and target/ dependency artifacts. Declared
       # before the other caches so its post step (which prunes target/) runs
       # after theirs.
@@ -55,10 +66,9 @@ jobs:
       - name: Build silo
         run: cargo build --locked -p silo-cli
       - name: Test
-        run: >
-          cargo test --locked
-          -p silo-vt -p silo-pty -p silo-store -p silo-proto -p silo-server
-          -p silo-client -p silo-transport -p silo-cli -p silo-latency
+        run: cargo test --locked $LINUX_CRATES
+      - name: Clippy
+        run: cargo clippy --locked --all-targets $LINUX_CRATES -- -D warnings
       # A build host with AVX-512 must not leak it into the binary (SIGILL
       # on older CPUs): libghostty-vt has no AVX code, and silo plus the VT
       # tests run on an emulated Haswell.
