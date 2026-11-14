@@ -62,7 +62,6 @@ pub async fn run(args: ServerArgs) -> Result<()> {
         build: silo_proto::BUILD.into(),
     })
     .await?;
-    tracing::info!(pid = server.info.pid, "otto starting");
     let phase = |phase, step, steps| otto_proto::Starting { phase, step, steps };
     let store = tokio::task::block_in_place(|| {
         otto_store::Store::open_with(paths::db(&home), &|migration| {
@@ -108,8 +107,8 @@ pub async fn run(args: ServerArgs) -> Result<()> {
     runtime.deliver_pending().await?;
     // Before clients see it ready: a SIGTERM right after must shut down cleanly, not kill it.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // Logs "otto ready" before clients see it ("otto starting" came with the lease).
     server.ready(otto_server::Services { runtime, models: services.clone(), auth: services, mcp, media }).await?;
-    tracing::info!(pid = server.info.pid, "otto ready");
     // Otto's settings as tools through silo, for every agent there.
     crate::settings_tools::spawn(home.clone());
     let serving = server.serve_forever();

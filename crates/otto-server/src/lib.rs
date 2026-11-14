@@ -119,6 +119,8 @@ impl ServerHandle {
         let globals = mcp::merge(services.runtime.events(), services.mcp.subscribe());
         self.state.ready.set(Ready { services, settings: Mutex::new(settings) }).map_err(|_| io::Error::other("the server is ready already"))?;
         *self.state.globals.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(globals);
+        // Logged before clients can see it: one that waited for ready finds it in the log.
+        tracing::info!(pid = self.state.info.pid, "otto ready");
         self.state.starting.send_replace(None);
         Ok(())
     }
@@ -217,6 +219,8 @@ impl Server {
             globals: std::sync::Mutex::new(None),
         });
         tokio::fs::write(paths::runtime(&state.home), serde_json::to_vec(&metadata).map_err(io::Error::from)?).await?;
+        // Before the accept loop answers anyone.
+        tracing::info!(pid = info.pid, "otto starting");
         let task = tokio::spawn(run(state.clone(), listener, lease, uid));
         Ok(ServerHandle { state, task: Some(task), info })
     }

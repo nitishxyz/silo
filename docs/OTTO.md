@@ -1159,7 +1159,7 @@ Idle ─prompt─▶ Building ─▶ Streaming ─tool calls─▶ Gating(approv
     `otto_claim` keeps a starting daemon of its own and waits for any other to be ready before replacing it. The
     agent pane shows "Starting otto…" or "Updating otto's data…" ("Step 3 of 6", "Freeing space") and loads on
     `server.ready`; the CLI waits, saying "otto is updating its data…". `server.log` (filter
-    `warn,otto_cli::daemon=info,otto_store::migrate=info`) logs "otto starting", each migration phase and "otto ready".
+    `warn,otto_server=info,otto_store::migrate=info`) logs "otto starting", each migration phase and "otto ready" (before clients see it ready).
   - The local app reaches its daemon through its own server too: `Connection::connect_dial` with a dial that calls
     `service.socket {name}` (owner only; the service's socket, or `not_found` / `unavailable`) on the app's silo
     server and connects to it. A loopback `silo/tunnel/1` would need the app paired with its own server, so the
