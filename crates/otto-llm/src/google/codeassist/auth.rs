@@ -64,7 +64,28 @@ pub fn stored_project(credential: &Credential) -> Option<String> {
 }
 
 fn finish<'a>(cx: Cx<'a>, credential: Credential, _: Option<&'a Credential>) -> Fut<'a, Credential> {
-    Box::pin(with_project(cx.client, endpoints(), credential, Duration::from_secs(5)))
+    Box::pin(async move { Ok(with_email(cx.client, with_project(cx.client, endpoints(), credential, Duration::from_secs(5)).await?).await) })
+}
+
+/// `credential` with the account's email (`extra.email`) from Google's userinfo when the token
+/// did not name it; best effort.
+async fn with_email(http: &reqwest::Client, mut credential: Credential) -> Credential {
+    if let Credential::OAuth { access, extra, .. } = &mut credential
+        && flows::email(extra).is_none()
+    {
+        let lookup = async {
+            let response = http.get("https://www.googleapis.com/oauth2/v2/userinfo").bearer_auth(access.as_str()).send().await.ok()?;
+            let body: serde_json::Value = response.error_for_status().ok()?.json().await.ok()?;
+            body["email"].as_str().filter(|e| e.contains('@')).map(String::from)
+        };
+        if let Ok(Some(email)) = tokio::time::timeout(Duration::from_secs(5), lookup).await {
+            if !extra.is_object() {
+                *extra = serde_json::json!({});
+            }
+            extra["email"] = email.into();
+        }
+    }
+    credential
 }
 
 /// `credential` with its project: the one it keeps (a refresh), else looked up or onboarded.

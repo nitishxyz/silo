@@ -189,9 +189,59 @@ pub fn no_plan(_: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// A JWT's claims, unverified (only for showing what the provider said about the account).
+#[must_use]
+pub fn jwt_claims(token: &str) -> Option<serde_json::Value> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let bytes = URL_SAFE_NO_PAD.decode(token.split('.').nth(1)?.trim_end_matches('=')).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn address(value: &serde_json::Value) -> Option<String> {
+    value.as_str().map(str::trim).filter(|e| e.contains('@')).map(String::from)
+}
+
+/// An OpenID token's email: its `email` claim, else ChatGPT's profile claim.
+fn id_token_email(id_token: &str) -> Option<String> {
+    let claims = jwt_claims(id_token)?;
+    address(&claims["email"]).or_else(|| address(&claims["https://api.openai.com/profile"]["email"]))
+}
+
+/// The signed-in account's email, from a credential's `extra`: what the sign-in stored
+/// (`email`), else the stored id token's claim.
+#[must_use]
+pub fn email(extra: &serde_json::Value) -> Option<String> {
+    address(&extra["email"]).or_else(|| extra["id_token"].as_str().and_then(id_token_email))
+}
+
+/// The email a token response names: the id token's (OpenID providers) or Claude's
+/// `account.email_address`.
+fn token_email(token: &TokenResponse) -> Option<String> {
+    token.id_token.as_deref().and_then(id_token_email).or_else(|| address(&token.raw["account"]["email_address"]))
+}
+
+/// `credential` with `extra.email` set from the token response, else kept from `previous`.
+fn with_email(mut credential: Credential, token: &TokenResponse, previous: Option<&Credential>) -> Credential {
+    if let Credential::OAuth { extra, .. } = &mut credential
+        && email(extra).is_none()
+    {
+        let old = match previous {
+            Some(Credential::OAuth { extra, .. }) => email(extra),
+            _ => None,
+        };
+        if let Some(email) = token_email(token).or(old) {
+            if !extra.is_object() {
+                *extra = serde_json::json!({});
+            }
+            extra["email"] = email.into();
+        }
+    }
+    credential
+}
+
 /// A token response as the stored credential, through the spec's mapping and `finish` hook.
 pub async fn complete(spec: &SubscriptionSpec, cx: Cx<'_>, token: &TokenResponse, previous: Option<&Credential>) -> Result<Credential, LlmError> {
-    let credential = (spec.credential)(token, previous)?;
+    let credential = with_email((spec.credential)(token, previous)?, token, previous);
     match spec.finish {
         Some(finish) => finish(cx, credential, previous).await,
         None => Ok(credential),
@@ -702,5 +752,31 @@ mod tests {
         assert!(expires_at_ms > now_ms() + 3_500_000);
         assert!(rejected_on_auth_status(&LlmError::new(ErrorClass::Auth, "")) && !rejected_on_auth_status(&LlmError::new(ErrorClass::Server, "")));
         assert!(rejected_on_invalid_grant(&LlmError::new(ErrorClass::InvalidRequest, r#"{"error":"invalid_grant"}"#)));
+    }
+
+    #[test]
+    fn the_email_comes_from_the_token_else_the_previous_sign_in() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let jwt = |claims: serde_json::Value| format!("h.{}.s", URL_SAFE_NO_PAD.encode(claims.to_string()));
+        let token = |id_token: Option<String>, raw| TokenResponse { access: "a".into(), refresh: Some("r".into()), expires_in: 0, id_token, raw };
+        let bare = |extra| Credential::OAuth { access: "a".into(), refresh: "r".into(), expires_at_ms: 0, account_id: None, extra };
+        let extra = |c: Credential| match c {
+            Credential::OAuth { extra, .. } => extra,
+            Credential::ApiKey { .. } => panic!(),
+        };
+        // Claude names the account in the token response.
+        let claude = token(None, serde_json::json!({"account":{"uuid":"u","email_address":"ada@example.com"}}));
+        assert_eq!(
+            extra(with_email(bare(serde_json::json!({"plan":"Max"})), &claude, None)),
+            serde_json::json!({"plan":"Max","email":"ada@example.com"})
+        );
+        // OpenID: the id token's claim.
+        let openid = token(Some(jwt(serde_json::json!({"email":"bo@example.com"}))), serde_json::Value::Null);
+        assert_eq!(extra(with_email(bare(serde_json::Value::Null), &openid, None))["email"], "bo@example.com");
+        // A refresh that names none keeps the previous one.
+        let previous = bare(serde_json::json!({"email":"cy@example.com"}));
+        let none = token(None, serde_json::Value::Null);
+        assert_eq!(extra(with_email(bare(serde_json::Value::Null), &none, Some(&previous)))["email"], "cy@example.com");
+        assert_eq!(extra(with_email(bare(serde_json::Value::Null), &none, None)), serde_json::Value::Null);
     }
 }

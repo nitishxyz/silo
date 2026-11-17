@@ -17,9 +17,11 @@ pub(super) fn used(window: &otto_llm::PlanWindow, now: i64) -> f32 {
     if window.resets_at.is_some_and(|at| at <= now) { 0.0 } else { window.used.clamp(0.0, 1.0) }
 }
 
-/// The ring's fill: the tightest window's share; `None` without windows.
-pub(super) fn tightest(usage: &PlanUsage, now: i64) -> Option<f32> {
-    usage.windows.iter().map(|w| used(w, now)).max_by(f32::total_cmp)
+/// The ring's fill: the shortest window's share (the 5-hour one, else the weekly), unless a longer
+/// one has run out, since that is what stops replies then; `None` without windows.
+pub(super) fn fill(usage: &PlanUsage, now: i64) -> Option<f32> {
+    let shortest = used(usage.shortest()?, now);
+    Some(if usage.windows.iter().any(|w| used(w, now) >= 1.0) { 1.0 } else { shortest })
 }
 
 /// `1h 40m`, `40m` (rounded up to the minute).
@@ -162,12 +164,12 @@ impl AgentPane {
         }));
     }
 
-    /// The ring after the token count, before the buttons: `provider`'s subscription usage, filled to its tightest
-    /// window. None for API keys and local models, while nothing is known, or when too narrow. Opens the usage card.
+    /// The ring after the token count, before the buttons: `provider`'s subscription usage, filled to its shortest
+    /// window ([`fill`]). None for API keys and local models, while nothing is known, or when too narrow. Opens the usage card.
     pub(super) fn render_plan(&self, fit: Fit, provider: Option<&str>, cx: &mut Context<Self>) -> Option<AnyElement> {
         let provider = provider.filter(|_| fit.ring)?;
         let plan = self.catalog.as_ref()?.subscription(provider)?;
-        let fill = tightest(self.plan_of(provider)?, unix_now())?;
+        let fill = fill(self.plan_of(provider)?, unix_now())?;
         let pane = cx.entity().downgrade();
         let owner = provider.to_owned();
         let tip = Tooltip::live(move |cx| {
@@ -208,14 +210,29 @@ mod tests {
     const NOW: i64 = 1_799_323_200;
 
     #[test]
-    fn the_ring_fills_to_the_tightest_window() {
-        let usage = PlanUsage { windows: vec![window("5h", "5-hour", 0.62, None), window("7d", "Weekly", 0.91, None)] };
-        assert_eq!(tightest(&usage, NOW), Some(0.91));
+    fn the_ring_fills_to_the_shortest_window() {
+        let usage = PlanUsage {
+            windows: vec![
+                window("5h", "5-hour", 0.03, None),
+                window("7d", "Weekly", 0.37, None),
+                window("7d_oi", "Weekly overage allowance", 0.58, None),
+            ],
+        };
+        assert_eq!(fill(&usage, NOW), Some(0.03), "the 5-hour window, not the fullest");
+        // Codex names its windows; their labels give the length.
+        let usage = PlanUsage { windows: vec![window("secondary", "Weekly", 0.4, None), window("primary", "5-hour", 0.1, None)] };
+        assert_eq!(fill(&usage, NOW), Some(0.1));
+        // Only a weekly window: that one.
+        let usage = PlanUsage { windows: vec![window("7d", "Weekly", 0.91, None)] };
+        assert_eq!(fill(&usage, NOW), Some(0.91));
         assert_eq!(ring::Fill::of(0.91), ring::Fill::Warn);
-        assert_eq!(tightest(&PlanUsage::default(), NOW), None, "nothing known: no ring");
+        // A longer window that ran out: full, it is what blocks.
+        let usage = PlanUsage { windows: vec![window("5h", "5-hour", 0.2, None), window("7d", "Weekly", 1.0, None)] };
+        assert_eq!(fill(&usage, NOW), Some(1.0));
+        assert_eq!(fill(&PlanUsage::default(), NOW), None, "nothing known: no ring");
         // A window whose reset has passed counts as empty until the next report.
         let usage = PlanUsage { windows: vec![window("5h", "5-hour", 0.99, Some(NOW - 1)), window("7d", "Weekly", 0.2, Some(NOW + 10))] };
-        assert_eq!(tightest(&usage, NOW), Some(0.2));
+        assert_eq!(fill(&usage, NOW), Some(0.0));
     }
 
     #[test]

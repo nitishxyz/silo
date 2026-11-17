@@ -23,6 +23,24 @@ pub struct PlanWindow {
     pub resets_at: Option<i64>,
 }
 
+impl PlanWindow {
+    /// How long the window is, in minutes: from its id (`5h`, `7d_opus`), else its label
+    /// (`5-hour`, `Weekly Opus`, `1d`; Codex names its windows `primary` and `secondary`).
+    #[must_use]
+    pub fn minutes(&self) -> Option<u64> {
+        minutes(&self.name).map(|(m, _)| m).or_else(|| {
+            let first = self.label.split_whitespace().next()?;
+            match first {
+                "5-hour" => Some(300),
+                "Daily" => Some(1440),
+                "Weekly" => Some(10_080),
+                "Monthly" => Some(43_200),
+                other => minutes(other).filter(|(_, rest)| rest.is_empty()).map(|(m, _)| m),
+            }
+        })
+    }
+}
+
 impl PlanUsage {
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -32,6 +50,12 @@ impl PlanUsage {
     #[must_use]
     pub fn tightest(&self) -> Option<&PlanWindow> {
         self.windows.iter().max_by(|a, b| a.used.total_cmp(&b.used))
+    }
+    /// The shortest window (the 5-hour one when there is one); the first of equals, and the
+    /// first of all when no length is known.
+    #[must_use]
+    pub fn shortest(&self) -> Option<&PlanWindow> {
+        self.windows.iter().enumerate().min_by_key(|(i, w)| (w.minutes().unwrap_or(u64::MAX), *i)).map(|(_, w)| w)
     }
     /// `newer`'s windows replace those of the same name; the rest stay.
     pub fn merge(&mut self, newer: PlanUsage) {
@@ -73,6 +97,15 @@ fn minutes(name: &str) -> Option<(u64, &str)> {
     (rest.is_empty() || rest.starts_with(['_', '-'])).then(|| (n * unit, rest.trim_start_matches(['_', '-'])))
 }
 
+/// What follows a window's length in Claude's ids, as people say it (`oi`: the weekly allowance
+/// of models served from extra usage, Anthropic's `seven_day_overage_included` claim).
+fn suffix(rest: &str) -> String {
+    match rest {
+        "oi" => "overage allowance".into(),
+        rest => capitalize(rest),
+    }
+}
+
 fn capitalize(s: &str) -> String {
     let s = s.replace(['_', '-'], " ");
     let mut chars = s.chars();
@@ -84,7 +117,7 @@ fn capitalize(s: &str) -> String {
 pub fn window_label(name: &str) -> String {
     match minutes(name) {
         Some((m, "")) => label(m),
-        Some((m, rest)) => format!("{} {}", label(m), capitalize(rest)),
+        Some((m, rest)) => format!("{} {}", label(m), suffix(rest)),
         None => capitalize(name),
     }
 }
@@ -92,7 +125,7 @@ pub fn window_label(name: &str) -> String {
 /// Shortest first, then by name.
 fn sort(windows: &mut [PlanWindow]) {
     windows.sort_by(|a, b| {
-        let len = |w: &PlanWindow| minutes(&w.name).map_or(u64::MAX, |m| m.0);
+        let len = |w: &PlanWindow| w.minutes().unwrap_or(u64::MAX);
         len(a).cmp(&len(b)).then_with(|| a.name.cmp(&b.name))
     });
 }

@@ -47,3 +47,32 @@ fn status_reports_stored_plans() {
     assert_eq!(plan("xai"), None);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn status_reports_the_signed_in_email() {
+    use otto_llm::auth::flows::email;
+    assert_eq!(email(&json!({"plan":"Team","email":"ada@example.com"})).as_deref(), Some("ada@example.com"));
+    // OpenID providers: the stored id token's claim, else ChatGPT's profile claim.
+    assert_eq!(email(&json!({"id_token":jwt(json!({"email":"bo@example.com"}))})).as_deref(), Some("bo@example.com"));
+    assert_eq!(
+        email(&json!({"id_token":jwt(json!({"https://api.openai.com/profile":{"email":"cy@example.com"}}))})).as_deref(),
+        Some("cy@example.com")
+    );
+    assert_eq!(email(&json!({"plan":"Max"})), None);
+    assert_eq!(email(&json!({"email":"not an address"})), None);
+    assert_eq!(email(&serde_json::Value::Null), None);
+
+    let dir = std::env::temp_dir().join(format!("otto-email-{}-{}", std::process::id(), otto_llm::auth::now_ms()));
+    let store = otto_llm::auth::CredentialStore::open(dir.join("auth")).unwrap();
+    let oauth =
+        |extra| otto_llm::auth::Credential::OAuth { access: "a".into(), refresh: "r".into(), expires_at_ms: u64::MAX, account_id: None, extra };
+    store.set("anthropic", oauth(json!({"plan":"Team","email":"ada@example.com"}))).unwrap();
+    store.set("openai", oauth(json!({"id_token":jwt(json!({"email":"bo@example.com"}))}))).unwrap();
+    store.set("xai", otto_llm::auth::Credential::ApiKey { key: "k".into() }).unwrap();
+    let providers = otto_llm::Providers::new(dir.join("auth"), dir.clone()).unwrap();
+    let email = |id: &str| providers.status().into_iter().find(|s| s.provider == id).unwrap().email;
+    assert_eq!(email("anthropic").as_deref(), Some("ada@example.com"));
+    assert_eq!(email("openai").as_deref(), Some("bo@example.com"));
+    assert_eq!(email("xai"), None);
+    std::fs::remove_dir_all(dir).unwrap();
+}

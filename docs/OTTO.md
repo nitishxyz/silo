@@ -466,7 +466,8 @@ How much of a subscription's limits is used, for the agent block's footer ring (
   Over WebSocket the upgrade response's headers are reported by the connection's first call.
 - **API keys and local models:** neither family appears, so nothing.
 - Labels from the window length: 300 min `5-hour`, 10080 `Weekly`, else `{n}d` / `{n}h`; a per-model suffix
-  follows (`Weekly Opus`); unknown lengths use the window's name.
+  follows (`Weekly Opus`; Claude's `7d_oi`, its `seven_day_overage_included` claim, reads `Weekly overage
+  allowance`); unknown lengths use the window's name.
 - Evidence: Claude live (2026-10-24, subscription): `-unified-5h-utilization` (a fraction), `-5h-reset`, `-5h-status`
   plus window-less `-unified-{status,reset,representative-claim,fallback,fallback-percentage,overage-status,
   overage-disabled-reason}`; no `7d` header on that response, so only `5-hour` was recorded. Codex names follow the

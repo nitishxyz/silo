@@ -67,24 +67,38 @@ fn build(token: &TokenResponse, previous: Option<&Credential>) -> Result<Credent
     let Credential::OAuth { access, refresh, expires_at_ms, account_id, .. } = flows::plain_credential(token, previous)? else {
         unreachable!("plain_credential builds OAuth")
     };
+    // `flows::complete` adds the token's `account.email_address`.
     let extra = plan(&token.raw).map_or(Value::Null, |plan| json!({"plan":plan}));
     Ok(Credential::OAuth { access, refresh, expires_at_ms, account_id, extra })
 }
-/// Without a plan from the token: the profile's (best effort), else the previous one.
+/// Without a plan or email from the token: the profile's (best effort), else the previous ones.
 fn finish<'a>(_: Cx<'a>, mut credential: Credential, previous: Option<&'a Credential>) -> Fut<'a, Credential> {
     Box::pin(async move {
         if let Credential::OAuth { access, extra, .. } = &mut credential
-            && extra["plan"].is_null()
+            && (extra["plan"].is_null() || flows::email(extra).is_none())
         {
-            let previous = match previous {
-                Some(Credential::OAuth { extra, .. }) => stored_plan(extra),
-                _ => None,
+            let profile = profile(access).await;
+            let old = match previous {
+                Some(Credential::OAuth { extra, .. }) => extra.clone(),
+                _ => Value::Null,
             };
-            let plan = profile_plan(access).await.or(previous);
-            *extra = plan.map_or(Value::Null, |plan| json!({"plan":plan}));
+            let plan = stored_plan(extra).or_else(|| profile.as_ref().and_then(plan)).or_else(|| stored_plan(&old));
+            let email = flows::email(extra).or_else(|| profile.as_ref().and_then(profile_email)).or_else(|| flows::email(&old));
+            let mut fresh = json!({});
+            if let Some(plan) = plan {
+                fresh["plan"] = plan.into();
+            }
+            if let Some(email) = email {
+                fresh["email"] = email.into();
+            }
+            *extra = if fresh.as_object().is_some_and(serde_json::Map::is_empty) { Value::Null } else { fresh };
         }
         Ok(credential)
     })
+}
+/// The account's email in a `/api/oauth/profile` response.
+fn profile_email(value: &Value) -> Option<String> {
+    value["account"]["email"].as_str().or_else(|| value["account"]["email_address"].as_str()).filter(|e| e.contains('@')).map(String::from)
 }
 /// Subscription plan label from a token or `/api/oauth/profile` response:
 /// `organization.organization_type`, else the account's `has_claude_max` / `has_claude_pro`.
@@ -101,13 +115,13 @@ pub fn plan(value: &Value) -> Option<String> {
     };
     Some(label.into())
 }
-async fn profile_plan(token: &str) -> Option<String> {
+async fn profile(token: &str) -> Option<Value> {
     let profile = async {
         let response = client().ok()?.get(PROFILE).bearer_auth(token).header("anthropic-beta", "oauth-2025-04-20").send().await.ok()?;
         if !response.status().is_success() {
             return None;
         }
-        plan(&serde_json::from_str(&response.text().await.ok()?).ok()?)
+        serde_json::from_str(&response.text().await.ok()?).ok()
     };
     tokio::time::timeout(std::time::Duration::from_secs(10), profile).await.ok().flatten()
 }

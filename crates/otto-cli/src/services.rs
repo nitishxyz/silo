@@ -80,6 +80,7 @@ impl Services {
                     default_model: None,
                     base_url: status.base_url,
                     plan: status.plan,
+                    email: status.email,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -95,6 +96,7 @@ impl Services {
                 default_model: None,
                 base_url: None,
                 plan: None,
+                email: None,
             });
         }
         if let Some((provider, model)) = otto_core::ModelResolver::default_model(self)

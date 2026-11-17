@@ -269,6 +269,7 @@ mod tests {
             default_model: default_model.map(Into::into),
             base_url: None,
             plan: None,
+            email: None,
         }
     }
 

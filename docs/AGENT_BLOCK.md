@@ -229,7 +229,8 @@ Units are points.
   session or a known window; the model button has no
   usage tooltip and the model picker no usage header. A sub-agent's block shows its own.
   As built (plan usage, `agent/plan.rs`): after the count, before the buttons, the 14 ring of `agent/ring.rs`
-  in a 22-tall slot, filled to the subscription's tightest window (highest `used`) and tinted by the same levels.
+  in a 22-tall slot, filled to the subscription's shortest window (the 5-hour one, else the weekly; full when a
+  longer window ran out) and tinted by the same levels.
   Tooltip: a line per window, `5-hour: 62% · resets in 1h 40m` (relative under 24 h), `Weekly: 18% · resets Mon
   09:00` (local day and time), then the plan's name when the catalog knows it (`Claude Max`, `ChatGPT Plus`). A
   window past its reset reads 0% until the next report. Hidden for API keys and local models (no subscription

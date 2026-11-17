@@ -21,19 +21,20 @@ pub async fn run(command: AuthCommand, providers: &Providers) -> Result<()> {
         }
         AuthCommand::Status => {
             providers.discover_local().await;
-            println!("PROVIDER\tMODE\tSIGNED IN\tEXPIRES (unix ms)\tACCOUNT\tENDPOINT");
+            println!("PROVIDER\tMODE\tSIGNED IN\tEXPIRES (unix ms)\tACCOUNT\tENDPOINT\tEMAIL");
             for status in providers.status() {
                 if let Some(error) = status.error {
                     bail!("{error}");
                 }
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     status.provider,
                     status.mode.as_deref().unwrap_or("-"),
                     if status.signed_in { "yes" } else { "no" },
                     status.expires_at_ms.map_or_else(|| "-".into(), |v| v.to_string()),
                     status.account_id.as_deref().unwrap_or("-"),
-                    status.base_url.as_deref().unwrap_or("-")
+                    status.base_url.as_deref().unwrap_or("-"),
+                    status.email.as_deref().unwrap_or("-")
                 );
             }
             Ok(())

@@ -25,6 +25,22 @@ fn labels_come_from_the_window_length() {
     assert_eq!(window_label("7d_opus"), "Weekly Opus");
     assert_eq!(window_label("24h"), "1d");
     assert_eq!(window_label("overage"), "Overage");
+    // Claude's `seven_day_overage_included` claim.
+    assert_eq!(window_label("7d_oi"), "Weekly overage allowance");
+}
+
+#[test]
+fn the_shortest_window_by_id_or_label() {
+    let claude = PlanUsage { windows: vec![window("7d_oi", "Weekly overage allowance", 0.58, None), window("5h", "5-hour", 0.03, None)] };
+    assert_eq!(claude.shortest().map(|w| w.name.as_str()), Some("5h"));
+    let codex = PlanUsage { windows: vec![window("secondary", "Weekly", 0.4, None), window("primary", "5-hour", 0.1, None)] };
+    assert_eq!(codex.shortest().map(|w| w.name.as_str()), Some("primary"));
+    let weekly = PlanUsage { windows: vec![window("7d", "Weekly", 0.4, None), window("7d_opus", "Weekly Opus", 0.9, None)] };
+    assert_eq!(weekly.shortest().map(|w| w.name.as_str()), Some("7d"), "the first of equals");
+    let credits = PlanUsage { windows: vec![window("credits", "Credits", 0.2, None)] };
+    assert_eq!(credits.shortest().map(|w| w.name.as_str()), Some("credits"));
+    assert_eq!(PlanUsage::default().shortest(), None);
+    assert_eq!(window("secondary", "1d", 0.0, None).minutes(), Some(1440));
 }
 
 #[test]

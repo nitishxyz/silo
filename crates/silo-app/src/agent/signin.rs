@@ -361,12 +361,18 @@ fn url_valid(url: &str) -> bool {
     (url.starts_with("http://") || url.starts_with("https://")) && url.len() > 10 && !url.contains(char::is_whitespace)
 }
 
-/// The row's second line when connected.
+/// The row's second line when connected; a subscription names its account's email when known.
 fn connection_label(status: &AuthStatus) -> String {
     match status.provider.as_str() {
         "ollama" | "lmstudio" => "Connected · local".into(),
         "custom" => "Connected".into(),
-        _ if status.mode == AuthMode::Subscription => format!("Connected · {}", status.plan.as_deref().unwrap_or("subscription")),
+        _ if status.mode == AuthMode::Subscription => {
+            let plan = status.plan.as_deref().unwrap_or("subscription");
+            match status.email.as_deref().filter(|e| !e.trim().is_empty()) {
+                Some(email) => format!("Connected · {plan} · {email}"),
+                None => format!("Connected · {plan}"),
+            }
+        }
         _ => "Connected · API key".into(),
     }
 }
@@ -1150,11 +1156,12 @@ impl AgentPane {
             _ if asking => div().text_color(rgb(theme::foreground())).child(disconnect_prompt(status)),
             (Some(e), _) => div().text_color(rgb(theme::danger())).child(e.clone()),
             (None, true) => div()
+                .min_w_0()
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .child(div().size(px(6.0)).rounded_full().bg(rgb(theme::success())))
-                .child(connection_label(status)),
+                .child(div().flex_none().size(px(6.0)).rounded_full().bg(rgb(theme::success())))
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(connection_label(status))),
             (None, false) => div().child(offer(status)),
         };
         let p = provider.clone();
@@ -1542,6 +1549,7 @@ mod tests {
             default_model: None,
             base_url: None,
             plan: None,
+            email: None,
         }
     }
 
@@ -1748,6 +1756,8 @@ mod tests {
         assert_eq!(connection_label(&sub), "Connected · subscription");
         sub.plan = Some("Max".into());
         assert_eq!(connection_label(&sub), "Connected · Max");
+        sub.email = Some("ada@example.com".into());
+        assert_eq!(connection_label(&sub), "Connected · Max · ada@example.com");
         assert_eq!(connection_label(&status("openai", vec![])), "Connected · API key");
     }
 

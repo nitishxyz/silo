@@ -6918,6 +6918,12 @@
                   "null"
                 ]
               },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "expires_at": {
                 "format": "int64",
                 "type": [
@@ -7872,6 +7878,12 @@
               "null"
             ]
           },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "expires_at": {
             "format": "int64",
             "type": [
@@ -8711,6 +8723,12 @@
                 ]
               },
               "default_model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "email": {
                 "type": [
                   "string",
                   "null"

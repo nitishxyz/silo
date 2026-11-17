@@ -619,6 +619,9 @@ pub struct AuthStatus {
     /// Subscription plan label (`Pro`, `Max`, `Plus`, `Team`, …) when the sign-in reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// The signed-in account's email, when the sign-in names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

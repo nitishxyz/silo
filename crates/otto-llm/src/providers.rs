@@ -110,6 +110,9 @@ pub struct AuthStatus {
     /// Subscription plan label (`Max`, `Pro`, `Plus`, …) when the sign-in reports it.
     #[serde(default)]
     pub plan: Option<String>,
+    /// The signed-in account's email, when the sign-in names it.
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -596,6 +599,7 @@ impl Providers {
                     error: None,
                     base_url: compat::dialect(provider).filter(|d| d.discovery.is_some()).and_then(|_| self.base_url(provider)),
                     plan: None,
+                    email: None,
                 };
                 match self.credential(provider) {
                     Ok(Some(Credential::ApiKey { .. })) => {
@@ -608,6 +612,7 @@ impl Providers {
                         status.expires_at_ms = Some(expires_at_ms);
                         status.account_id = account_id;
                         status.plan = flows::spec(provider).and_then(|spec| (spec.plan)(&extra));
+                        status.email = flows::email(&extra);
                     }
                     // A running local server needs no sign-in.
                     Ok(None) if !self.local_models(provider).is_empty() => {
