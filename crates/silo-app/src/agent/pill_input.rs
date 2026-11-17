@@ -301,7 +301,7 @@ impl Render for PillInput {
             text: rgb(theme::foreground()).into(),
             placeholder: rgb(muted).into(),
             caret: rgb(theme::accent()).into(),
-            selection: hsla(theme::selection(), 0.6),
+            selection: hsla(theme::selection(), theme::selection_alpha()),
         };
         let enabled = self.valid && !self.loading;
         let glyph = if self.loading {

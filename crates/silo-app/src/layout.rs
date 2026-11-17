@@ -766,7 +766,7 @@ impl Workspace {
     pub(crate) fn render_pane_ghosts(&self, now: Instant, window: &mut Window) -> Vec<AnyElement> {
         let metrics = silo_render::CellMetrics::for_window(window);
         let cursor = silo_render::CursorPresentation { focused: false, phase_visible: true };
-        let selection = rgb(theme::selection()).opacity(0.55);
+        let selection = theme::selection_tint();
         let comfortable = self.density() == Density::Comfortable;
         let corner = if comfortable { radius::window_corner(window) } else { None };
         let viewport = window.viewport_size();

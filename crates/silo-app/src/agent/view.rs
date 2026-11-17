@@ -2340,7 +2340,7 @@ impl AgentPane {
             text: rgb(theme::foreground()).into(),
             placeholder: rgb(theme::muted()).into(),
             caret: rgb(theme::foreground()).into(),
-            selection: hsla(theme::selection(), 0.6),
+            selection: hsla(theme::selection(), theme::selection_alpha()),
         };
         let editor = Editor::element(&self.editor, 8, colors, cx);
         // Always send: while a turn runs it steers (stopping is the activity row's, and esc).

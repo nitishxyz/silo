@@ -286,11 +286,7 @@ impl ChangesPane {
             text: rgb(theme::foreground()).into(),
             placeholder: rgb(theme::muted()).into(),
             caret: rgb(theme::foreground()).into(),
-            selection: {
-                let mut h: gpui::Hsla = rgb(theme::selection()).into();
-                h.a = 0.6;
-                h
-            },
+            selection: theme::selection_tint().into(),
         };
         let well = || div().px(px(8.0)).continuous(6.0).bg(theme::well_fill());
         let list = form.bases_open.then(|| {

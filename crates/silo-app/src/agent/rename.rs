@@ -180,9 +180,7 @@ impl AgentPane {
 
 /// The selection's fill in a title field (as the composer's).
 pub(super) fn selection() -> gpui::Hsla {
-    let mut h: gpui::Hsla = rgb(theme::selection()).into();
-    h.a *= 0.6;
-    h
+    theme::selection_tint().into()
 }
 
 /// The title field: one line of the composer's editor (a caret to move, a click or drag to select, word and line

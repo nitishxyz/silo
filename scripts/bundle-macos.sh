@@ -53,6 +53,9 @@ cp "$out/silo-app" "$app/Contents/MacOS/Silo"
 # The app icon (scripts/make-icons.sh): Assets.car for macOS 26 and later,
 # Silo.icns before; shared with Silo Server.app below.
 cp "$root/packaging/macos/Assets.car" "$root/packaging/macos/Silo.icns" "$app/Contents/Resources/"
+# The UI font embedded in the binary (Allo, crates/silo-app/src/assets.rs)
+# ships with its license, as the SIL OFL asks.
+cp "$root/crates/silo-app/assets/fonts/allo/OFL.txt" "$app/Contents/Resources/Allo-OFL.txt"
 # The server bundle: Contents/Helpers/Silo Server.app/Contents/MacOS/silo. It
 # is the responsible process of every shell (it disclaims whoever started
 # it, crates/silo-cli/src/disclaim.rs), so privacy prompts and System

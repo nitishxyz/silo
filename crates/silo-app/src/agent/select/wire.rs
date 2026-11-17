@@ -17,9 +17,7 @@ use crate::{agent::AgentPane, commands::act, theme};
 
 /// The selection's colour (the composer's).
 pub(super) fn colour() -> Hsla {
-    let mut c: Hsla = gpui::rgb(theme::selection()).into();
-    c.a = 0.6;
-    c
+    theme::selection_tint().into()
 }
 
 /// The pane's rows and parsed texts (a macro, so `self.select` stays free to borrow mutably).

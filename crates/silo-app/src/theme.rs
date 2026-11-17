@@ -17,7 +17,8 @@ use crate::{
 
 /// The family chrome text renders in (titlebar, tabs, popovers, Settings,
 /// palette, pane headers, sheets): the UI font preference resolved against
-/// the installed families, [`fonts::UI_SYSTEM_FONT`] by default. Every UI
+/// the installed families, the bundled [`fonts::UI_DEFAULT_FONT`] (Allo) by
+/// default. Every UI
 /// surface takes its family from here; only the terminal grid (and the
 /// Settings preview of it) uses the terminal font.
 #[must_use]
@@ -28,17 +29,17 @@ pub fn ui_font() -> gpui::SharedString {
 /// The UI font preference and how it resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiFont {
-    /// Exact stored family, or empty for Automatic (the system font).
+    /// Exact stored family, or empty for Automatic (the bundled font).
     pub preferred: String,
     /// The family rendering.
     pub family: gpui::SharedString,
-    /// The preferred family is not installed (using the system font).
+    /// The preferred family is not installed (using Automatic).
     pub missing: bool,
 }
 
 impl Default for UiFont {
     fn default() -> Self {
-        Self { preferred: String::new(), family: fonts::UI_SYSTEM_FONT.into(), missing: false }
+        Self { preferred: String::new(), family: fonts::UI_DEFAULT_FONT.into(), missing: false }
     }
 }
 
@@ -52,9 +53,10 @@ fn ui_slot() -> &'static RwLock<UiFont> {
 /// when Settings re-reads the installed fonts). Callers refresh the window.
 pub fn apply_ui_font(preferred: &str, cx: &gpui::App) -> UiFont {
     let preferred = preferred.trim();
-    let resolved = if preferred.is_empty() { fonts::resolve_ui("", &[]) } else { fonts::resolve_ui(preferred, &font_names(cx)) };
+    let resolved = fonts::resolve_ui(preferred, &font_names(cx));
     if resolved.missing {
-        tracing::warn!("{}", fonts::missing_problem(preferred, "the system font"));
+        let using = if resolved.family == fonts::UI_SYSTEM_FONT { "the system font" } else { resolved.family.as_str() };
+        tracing::warn!("{}", fonts::missing_problem(preferred, using));
     }
     let ui = UiFont { preferred: preferred.to_owned(), family: resolved.family.into(), missing: resolved.missing };
     *ui_slot().write().unwrap_or_else(std::sync::PoisonError::into_inner) = ui.clone();
@@ -597,9 +599,47 @@ pub fn list_selection() -> u32 {
     let bg = background();
     mix(bg, accent(), if luminance(bg) > 0.5 { 0.22 } else { 0.34 })
 }
+/// The theme's selection colour as set. Too bright to fill behind text on
+/// most dark themes (Silo Dark's `#74bdf8` under `#d6d8dc` reads at 1.4:1):
+/// highlights use [`selection_tint`] or [`selection_fill`].
 #[must_use]
 pub fn selection() -> u32 {
     current().effective.selection
+}
+
+/// How strongly selected text is tinted: the most a highlight blends in.
+pub const SELECTION_ALPHA: f32 = 0.55;
+/// The least: below it a selection barely shows (the text then wins).
+const SELECTION_MIN_ALPHA: f32 = 0.2;
+
+/// The alpha of `selection` over `bg` for highlighting text: up to
+/// [`SELECTION_ALPHA`], lowered until `fg` reads on the blend
+/// ([`TEXT_CONTRAST`]), never below [`SELECTION_MIN_ALPHA`].
+#[must_use]
+pub fn selection_alpha_for(bg: u32, fg: u32, selection: u32) -> f32 {
+    let steps = ((SELECTION_ALPHA - SELECTION_MIN_ALPHA) * 100.0).round() as u32;
+    (0..=steps)
+        .map(|step| SELECTION_ALPHA - 0.01 * step as f32)
+        .find(|&a| contrast(fg, mix(bg, selection, a)) >= TEXT_CONTRAST)
+        .unwrap_or(SELECTION_MIN_ALPHA)
+}
+
+/// [`selection_alpha_for`] the current theme.
+#[must_use]
+pub fn selection_alpha() -> f32 {
+    selection_alpha_for(background(), foreground(), selection())
+}
+
+/// The text selection highlight, translucent: terminal, editors, fields, diffs.
+#[must_use]
+pub fn selection_tint() -> gpui::Rgba {
+    gpui::rgb(selection()).opacity(selection_alpha())
+}
+
+/// [`selection_tint`] over the theme background, as one solid colour.
+#[must_use]
+pub fn selection_fill_for(bg: u32, fg: u32, selection: u32) -> u32 {
+    mix(bg, selection, selection_alpha_for(bg, fg, selection))
 }
 /// Text on an accent-colored button.
 #[must_use]
@@ -879,9 +919,25 @@ mod tests {
     }
 
     #[test]
+    fn selected_text_reads_in_every_built_in_theme() {
+        use super::{SELECTION_ALPHA, TEXT_CONTRAST, contrast, selection_alpha_for, selection_fill_for};
+        for t in crate::terminal_prefs::THEMES {
+            let fill = selection_fill_for(t.background, t.foreground, t.selection);
+            assert!(contrast(t.foreground, fill) >= TEXT_CONTRAST, "{}: text on its selection", t.id);
+            assert!(contrast(t.background, fill) >= 1.4, "{}: the selection shows", t.id);
+        }
+        // Silo Dark's bright blue: toned down from the full blend, which read at 3.6:1.
+        let dark = &crate::terminal_prefs::THEMES[0];
+        let a = selection_alpha_for(dark.background, dark.foreground, dark.selection);
+        assert!(a < SELECTION_ALPHA && a > 0.3, "{a}");
+        // A selection that already reads keeps the full blend.
+        assert!((selection_alpha_for(0x00ff_ffff, 0, 0x00b4_d5fe) - SELECTION_ALPHA).abs() < 1e-6);
+    }
+
+    #[test]
     fn chrome_takes_its_family_from_the_ui_font() {
         assert_eq!(super::ui_font_state(), super::UiFont::default());
-        assert_eq!(super::ui_font(), crate::fonts::UI_SYSTEM_FONT);
+        assert_eq!(super::ui_font(), crate::fonts::UI_DEFAULT_FONT);
         // No chrome module hard-codes a family; all go through `ui_font()`.
         let chrome = [
             ("titlebar.rs", include_str!("titlebar.rs")),

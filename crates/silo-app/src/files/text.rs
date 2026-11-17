@@ -145,7 +145,7 @@ fn alpha(c: u32, a: f32) -> Hsla {
 
 /// The selection's colour (the agent pane's).
 fn selection_bg() -> Hsla {
-    alpha(theme::selection(), 0.6)
+    alpha(theme::selection(), theme::selection_alpha())
 }
 
 impl FilesPane {

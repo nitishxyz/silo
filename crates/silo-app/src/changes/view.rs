@@ -654,7 +654,7 @@ impl ChangesPane {
             .flex_row()
             .whitespace_nowrap()
             .when_some(tints.line(line.kind), |el, c| el.bg(c.paint))
-            .when(picked, |el| el.bg(alpha(theme::selection(), 0.55)))
+            .when(picked, |el| el.bg(alpha(theme::selection(), theme::selection_alpha())))
             .child(self.number(("changes-old", ix), &path, Side::Old, line.old.filter(|_| line.kind != LineKind::Added), numbers, cx))
             .child(self.number(("changes-new", ix), &path, Side::New, line.new.filter(|_| line.kind != LineKind::Removed), numbers, cx))
             .child(div().flex_none().w(px(m.cell + 6.0)).text_color(rgb(theme::muted())).child(sign))
@@ -706,7 +706,7 @@ impl ChangesPane {
             .flex_row()
             .whitespace_nowrap()
             .when_some(tint, |el, c| el.bg(c.paint))
-            .when(picked, |el| el.bg(alpha(theme::selection(), 0.55)))
+            .when(picked, |el| el.bg(alpha(theme::selection(), theme::selection_alpha())))
             .child(self.number((id, ix), &path, side, n, numbers, cx))
             .child(div().flex_none().w(px(m.cell + 6.0)).text_color(rgb(theme::muted())).child(sign))
             .child(
@@ -1000,7 +1000,7 @@ impl ChangesPane {
                 text: rgb(theme::foreground()).into(),
                 placeholder: rgb(theme::muted()).into(),
                 caret: rgb(theme::foreground()).into(),
-                selection: alpha(theme::selection(), 0.6),
+                selection: alpha(theme::selection(), theme::selection_alpha()),
             };
             let amend = self.amend;
             row = row

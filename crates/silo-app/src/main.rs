@@ -276,6 +276,8 @@ fn main() {
         if let Some(agent) = agent {
             menubar::start(agent, menubar_home);
         }
+        // Bundled Allo first: the UI font resolves against the families it lists.
+        assets::register_fonts(cx);
         theme::apply_font(cx);
         theme::warm_fonts(cx);
         // System Settings › Accessibility › Display › Reduce motion, read

@@ -6,10 +6,12 @@
 //! prompt icons and Powerline glyphs render, and falls back to
 //! [`FALLBACK_FONT`] (always present on macOS) when none is installed. A
 //! stored family that is no longer installed is flagged and falls back the
-//! same way. Nothing is downloaded or bundled.
+//! same way. Nothing is downloaded; no terminal font is bundled.
 //!
 //! The UI font works the same way, except that Automatic (and a missing
-//! family) is the macOS system UI font, [`UI_SYSTEM_FONT`].
+//! family) is the bundled [`UI_DEFAULT_FONT`], Allo (`assets.rs`), and the
+//! macOS system UI font, [`UI_SYSTEM_FONT`], is a choice of its own (and the
+//! last resort, should the bundled font fail to load).
 
 /// Supported Nerd Font families, in order of preference. "Mono" variants
 /// first: their icons are one cell wide, so the grid stays stable.
@@ -34,8 +36,12 @@ pub const NERD_FONT_CANDIDATES: &[&str] = &[
 /// Used when no supported Nerd Font is installed.
 pub const FALLBACK_FONT: &str = "Menlo";
 
-/// GPUI's name for the macOS system UI font: the UI font's Automatic.
+/// GPUI's name for the macOS system UI font; stored as the UI font
+/// preference when the user picks it.
 pub const UI_SYSTEM_FONT: &str = ".SystemUIFont";
+
+/// The bundled UI font: the UI font's Automatic.
+pub const UI_DEFAULT_FONT: &str = "Allo";
 
 /// Installed families that draw symbols or emoji instead of text; never
 /// offered as the UI font.
@@ -116,17 +122,28 @@ pub fn missing_problem(preferred: &str, using: &str) -> String {
     format!("Font \u{201c}{preferred}\u{201d} is not installed; using {using}")
 }
 
-/// Resolve a UI font preference (`""` = Automatic, the system UI font). A
-/// family that is not installed falls back to the system font, flagged.
+/// What the UI font's Automatic renders in: the bundled font when it
+/// loaded, else the system font.
+#[must_use]
+pub fn ui_automatic(installed: &[String]) -> String {
+    find(UI_DEFAULT_FONT, installed).cloned().unwrap_or_else(|| UI_SYSTEM_FONT.into())
+}
+
+/// Resolve a UI font preference (`""` = Automatic, the bundled font;
+/// [`UI_SYSTEM_FONT`] = the system font). A family that is not installed
+/// falls back to Automatic, flagged.
 #[must_use]
 pub fn resolve_ui(preferred: &str, installed: &[String]) -> Resolved {
     let preferred = preferred.trim();
     if preferred.is_empty() {
+        return Resolved { family: ui_automatic(installed), missing: false };
+    }
+    if key(preferred) == key(UI_SYSTEM_FONT) {
         return Resolved { family: UI_SYSTEM_FONT.into(), missing: false };
     }
     match find(preferred, installed) {
         Some(family) => Resolved { family: family.clone(), missing: false },
-        None => Resolved { family: UI_SYSTEM_FONT.into(), missing: true },
+        None => Resolved { family: ui_automatic(installed), missing: true },
     }
 }
 
@@ -257,15 +274,21 @@ mod tests {
     }
 
     #[test]
-    fn ui_font_defaults_to_system_and_flags_missing() {
-        let fonts = installed(&["Helvetica Neue", "Inter", "Menlo"]);
-        assert_eq!(resolve_ui("", &fonts), Resolved { family: UI_SYSTEM_FONT.into(), missing: false });
-        assert_eq!(resolve_ui("  ", &fonts), Resolved { family: UI_SYSTEM_FONT.into(), missing: false });
+    fn ui_font_defaults_to_the_bundled_font_and_flags_missing() {
+        let fonts = installed(&["Allo", "Helvetica Neue", "Inter", "Menlo"]);
+        assert_eq!(resolve_ui("", &fonts), Resolved { family: "Allo".into(), missing: false });
+        assert_eq!(resolve_ui("  ", &fonts), Resolved { family: "Allo".into(), missing: false });
         assert_eq!(resolve_ui(" inter ", &fonts), Resolved { family: "Inter".into(), missing: false });
+        // The system font is a choice of its own.
+        assert_eq!(resolve_ui(UI_SYSTEM_FONT, &fonts), Resolved { family: UI_SYSTEM_FONT.into(), missing: false });
         // Monospaced families are allowed for the UI too.
         assert_eq!(resolve_ui("Menlo", &fonts), Resolved { family: "Menlo".into(), missing: false });
-        // A removed family falls back to the system font, not the terminal's.
-        assert_eq!(resolve_ui("Removed Sans", &fonts), Resolved { family: UI_SYSTEM_FONT.into(), missing: true });
+        // A removed family falls back to Automatic, not the terminal's font.
+        assert_eq!(resolve_ui("Removed Sans", &fonts), Resolved { family: "Allo".into(), missing: true });
+        // Should the bundled font fail to load: the system font.
+        let without = installed(&["Inter"]);
+        assert_eq!(resolve_ui("", &without), Resolved { family: UI_SYSTEM_FONT.into(), missing: false });
+        assert_eq!(resolve_ui("Removed Sans", &without), Resolved { family: UI_SYSTEM_FONT.into(), missing: true });
     }
 
     #[test]

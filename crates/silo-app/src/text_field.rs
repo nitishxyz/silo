@@ -365,12 +365,9 @@ impl Render for TextField {
                 .flex_row()
                 .text_color(rgb(palette.ink))
                 .child(self.text.clone())
-                .child(div().continuous(2.0).bg(rgb(theme::selection()).opacity(0.55)).child(self.completion.clone()))
+                .child(div().continuous(2.0).bg(theme::selection_tint()).child(self.completion.clone()))
         } else {
-            div()
-                .text_color(rgb(palette.ink))
-                .when(self.all, |el| el.continuous(2.0).bg(rgb(theme::selection()).opacity(0.55)))
-                .child(self.text.clone())
+            div().text_color(rgb(palette.ink)).when(self.all, |el| el.continuous(2.0).bg(theme::selection_tint())).child(self.text.clone())
         };
         div()
             .id("text-field")

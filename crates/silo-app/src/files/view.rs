@@ -387,7 +387,8 @@ impl FilesPane {
                     let is_selected = selected.as_deref() == Some(row.path.as_str());
                     let is_active = active.as_deref() == Some(row.path.as_str());
                     let fill = if is_selected && focused {
-                        Some(rgb(theme::selection()))
+                        // The focused list's selection: readable under the row's text.
+                        Some(rgb(theme::list_selection()))
                     } else if is_selected || is_active {
                         Some(theme::row_fill())
                     } else {

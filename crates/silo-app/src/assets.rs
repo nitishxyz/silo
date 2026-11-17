@@ -128,6 +128,46 @@ impl AssetSource for Assets {
     }
 }
 
+/// Allo (`fonts/allo/`, SIL OFL 1.1, by Josh Puckett): the bundled UI
+/// font. The static faces (Text optical size, Friendly roundness): nine
+/// weights and a true oblique of each, so `FontWeight` and italics select
+/// drawn faces. GPUI matches families face by face, which a variable font
+/// (one face, axes) would defeat.
+macro_rules! fonts {
+    ($($name:literal),* $(,)?) => {
+        const FONTS: &[&[u8]] = &[$(include_bytes!(concat!("../assets/fonts/allo/Allo-", $name, ".otf"))),*];
+    };
+}
+
+fonts!(
+    "Thin",
+    "ThinOblique",
+    "ExtraLight",
+    "ExtraLightOblique",
+    "Light",
+    "LightOblique",
+    "Regular",
+    "Oblique",
+    "Medium",
+    "MediumOblique",
+    "SemiBold",
+    "SemiBoldOblique",
+    "Bold",
+    "BoldOblique",
+    "ExtraBold",
+    "ExtraBoldOblique",
+    "Black",
+    "BlackOblique",
+);
+
+/// Register the bundled fonts with the text system, before anything
+/// resolves a family (they then list among the installed families).
+pub fn register_fonts(cx: &gpui::App) {
+    if let Err(error) = cx.text_system().add_fonts(FONTS.iter().map(|bytes| Cow::Borrowed(*bytes)).collect()) {
+        tracing::warn!("bundled fonts: {error:#}");
+    }
+}
+
 /// An icon element: `icon("laptop", 16.0, color)`.
 pub fn icon(name: &'static str, size: f32, color: u32) -> gpui::Svg {
     use gpui::{Styled, px, rgb};

@@ -226,7 +226,8 @@ impl TerminalSettings {
 /// terminal font is separate ([`TerminalSettings`]).
 #[derive(Clone, Debug, Default)]
 pub struct UiFontSettings {
-    /// The preferred family; empty = Automatic (the system font).
+    /// The preferred family; empty = Automatic (the bundled Allo),
+    /// [`crate::fonts::UI_SYSTEM_FONT`] = the system font.
     pub family: String,
     /// Installed text families for the picker, alphabetically.
     pub choices: Vec<String>,
@@ -235,10 +236,15 @@ pub struct UiFontSettings {
 }
 
 impl UiFontSettings {
+    /// Automatic (Allo), then the system font, then the installed families.
     fn font_entries(&self, query: &str) -> Vec<Option<String>> {
         let query = query.trim().to_lowercase();
-        let automatic = query.is_empty() || "automatic default".contains(&query) || "system font".contains(&query);
-        font_entries(&self.choices, automatic, &query)
+        let automatic = query.is_empty() || "automatic default allo".contains(&query);
+        let mut out = font_entries(&self.choices, automatic, &query);
+        if query.is_empty() || "system font".contains(&query) || "san francisco sf pro".contains(&query) {
+            out.insert(usize::from(automatic), Some(crate::fonts::UI_SYSTEM_FONT.into()));
+        }
+        out
     }
 
     fn font_selected(&self, entry: Option<&str>) -> bool {
@@ -248,13 +254,18 @@ impl UiFontSettings {
     /// Short state shown under the UI font row.
     fn font_status(&self) -> Option<String> {
         if self.missing {
-            Some("Not installed; using the system font".into())
+            Some(format!("Not installed; using {}", crate::fonts::UI_DEFAULT_FONT))
         } else if self.family.is_empty() {
-            Some("System font".into())
+            Some(format!("{}, built in", crate::fonts::UI_DEFAULT_FONT))
         } else {
             None
         }
     }
+}
+
+/// A UI font preference as shown: the system font by name, else the family.
+fn ui_font_name(family: &str) -> String {
+    if crate::fonts::key(family) == crate::fonts::key(crate::fonts::UI_SYSTEM_FONT) { "System font".into() } else { family.to_owned() }
 }
 
 /// Picker rows over `choices` for a lowercased `query`: `None` (Automatic)
@@ -1285,7 +1296,8 @@ impl SettingsPanel {
         let fg = t.color(ColorSlot::Foreground).0;
         let bg = t.color(ColorSlot::Background).0;
         let cursor = t.color(ColorSlot::Cursor).0;
-        let selection = t.color(ColorSlot::Selection).0;
+        // As panes draw it: the selection colour blended in only as far as text stays readable.
+        let selection = theme::selection_fill_for(bg, fg, t.color(ColorSlot::Selection).0);
         let p = t.palette;
         let span = |text: &'static str, color: u32| div().text_color(rgb(color)).child(text);
         let line = || div().flex().whitespace_nowrap();
@@ -1583,7 +1595,7 @@ impl SettingsPanel {
             FontTarget::Terminal => (&self.snapshot.terminal.font_family, self.snapshot.terminal.font_missing),
             FontTarget::Ui => (&self.snapshot.ui_font.family, self.snapshot.ui_font.missing),
         };
-        let label = if preference.is_empty() { "Automatic".to_owned() } else { preference.clone() };
+        let label = if preference.is_empty() { "Automatic".to_owned() } else { ui_font_name(preference) };
         let border = if missing {
             theme::danger()
         } else if open {
@@ -1637,7 +1649,12 @@ impl SettingsPanel {
                 let highlighted = index == self.font_highlight;
                 let (name, detail, face): (String, Option<String>, gpui::SharedString) = match (&entry, target) {
                     (None, FontTarget::Terminal) => ("Automatic".into(), Some(self.snapshot.terminal.font_automatic.clone()), theme::ui_font()),
-                    (None, FontTarget::Ui) => ("Automatic".into(), Some("System font".into()), crate::fonts::UI_SYSTEM_FONT.into()),
+                    (None, FontTarget::Ui) => {
+                        ("Automatic".into(), Some(format!("{}, built in", crate::fonts::UI_DEFAULT_FONT)), crate::fonts::UI_DEFAULT_FONT.into())
+                    }
+                    (Some(family), FontTarget::Ui) if family == crate::fonts::UI_SYSTEM_FONT => {
+                        (ui_font_name(family), Some("San Francisco".into()), family.clone().into())
+                    }
                     (Some(family), FontTarget::Terminal) => {
                         (family.clone(), crate::fonts::is_nerd(family).then(|| "Nerd Font".into()), family.clone().into())
                     }
@@ -2811,12 +2828,20 @@ mod tests {
         let mut ui = snapshot.ui_font.clone();
         assert_eq!(ui.family, "", "Automatic by default");
         assert!(ui.font_selected(None));
-        assert_eq!(ui.font_status().as_deref(), Some("System font"));
-        ui.choices = vec!["Helvetica Neue".into(), "Inter".into(), "Menlo".into()];
-        assert_eq!(ui.font_entries(""), vec![None, Some("Helvetica Neue".into()), Some("Inter".into()), Some("Menlo".into())]);
-        assert_eq!(ui.font_entries("system"), vec![None]);
+        assert_eq!(ui.font_status().as_deref(), Some("Allo, built in"));
+        ui.choices = vec!["Allo".into(), "Helvetica Neue".into(), "Inter".into(), "Menlo".into()];
+        let system = Some(crate::fonts::UI_SYSTEM_FONT.to_owned());
+        assert_eq!(
+            ui.font_entries(""),
+            vec![None, system.clone(), Some("Allo".into()), Some("Helvetica Neue".into()), Some("Inter".into()), Some("Menlo".into())]
+        );
+        assert_eq!(ui.font_entries("system"), vec![system.clone()]);
+        assert_eq!(ui.font_entries("allo"), vec![None, Some("Allo".into())]);
         assert_eq!(ui.font_entries("int"), vec![Some("Inter".into())]);
         assert!(ui.font_entries("zzz").is_empty());
+        assert_eq!(ui_font_name(crate::fonts::UI_SYSTEM_FONT), "System font");
+        ui.family = crate::fonts::UI_SYSTEM_FONT.into();
+        assert!(ui.font_selected(system.as_deref()) && !ui.font_selected(None));
 
         ui.family = "inter".into();
         assert!(ui.font_selected(Some("Inter")) && !ui.font_selected(None));
@@ -2826,7 +2851,7 @@ mod tests {
 
         ui.family = "Removed Sans".into();
         ui.missing = true;
-        assert_eq!(ui.font_status().as_deref(), Some("Not installed; using the system font"));
+        assert_eq!(ui.font_status().as_deref(), Some("Not installed; using Allo"));
     }
 
     #[test]

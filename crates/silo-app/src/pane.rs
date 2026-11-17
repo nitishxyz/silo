@@ -1863,7 +1863,7 @@ impl Render for Pane {
         let focused = self.focus.is_focused(window) && window.is_window_active();
         let phase_visible = self.blink_phase(focused, window.is_window_active(), cx);
         let cursor = CursorPresentation { focused, phase_visible };
-        let selection = rgb(theme::selection()).opacity(0.55);
+        let selection = theme::selection_tint();
         let status = self.status_text();
         let lifecycle = self.lifecycle_text();
         let attaching = self.status == Status::Connecting && self.blank() && self.control.as_ref().is_some_and(|c| !c.is_closed());

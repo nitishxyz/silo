@@ -1386,7 +1386,7 @@ impl AgentsSettings {
             text: rgb(theme::foreground()).into(),
             placeholder: rgb(theme::muted()).into(),
             caret: rgb(theme::foreground()).into(),
-            selection: hsla(theme::selection(), 0.6),
+            selection: hsla(theme::selection(), theme::selection_alpha()),
         };
         let prompt_box = div()
             .w_full()
