@@ -372,6 +372,7 @@ pub fn need(method: &Method) -> Need {
         | M::AppPaneHeaders { .. }
         | M::AppFullScreen { .. }
         | M::AppConnectionInfo { .. }
+        | M::AppVoice { .. }
         | M::AppSettingsOpen { .. }
         | M::AppSettingsReload { .. }
         | M::AppSettingsOpenFile { .. }

@@ -465,6 +465,9 @@ impl Workspace {
             Command::AppearanceComfortable => self.set_density(crate::hosts::Density::Comfortable, cx),
             Command::AppearanceCompact => self.set_density(crate::hosts::Density::Compact, cx),
             Command::ToggleConnectionInfo => self.toggle_link(cx),
+            Command::VoiceTyping => {
+                self.voice_toggle(None, window, cx);
+            }
             Command::ShowPaneHeaders => self.set_pane_headers(crate::pane_header::PaneHeaders::all(true), cx),
             Command::HidePaneHeaders => self.set_pane_headers(crate::pane_header::PaneHeaders::all(false), cx),
             Command::OpenTerminalSettingsFile => self.open_terminal_settings_file(cx),

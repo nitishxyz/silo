@@ -326,21 +326,23 @@ impl SettingsPanel {
             }
         }
         for group in groups {
-            let rows: Vec<AnyElement> = self
+            let mut rows: Vec<AnyElement> = self
                 .snapshot
                 .shortcuts
                 .iter()
-                .filter(|s| s.command.group() == group && (show_all || self.text_matches(&format!("{} {} {group}", s.label, s.hints()))))
+                .filter(|s| {
+                    let voice = if s.command == Command::VoiceTyping { " dictation dictate" } else { "" };
+                    s.command.group() == group && (show_all || self.text_matches(&format!("{} {} {group}{voice}", s.label, s.hints())))
+                })
                 .map(|s| self.shortcut_row(s, cx))
                 .collect();
+            // The Fn trigger is not a chord: shown, not remappable.
+            if group == Command::VoiceTyping.group() && (show_all || self.text_matches("voice typing dictation dictate fn globe")) {
+                rows.push(Self::row("Voice Typing (Fn)", Some("Hold, or press twice to keep talking".into()), Some(keycap("fn")), false));
+            }
             if !rows.is_empty() {
                 out.push(self.group(Some(group), rows));
             }
-        }
-        // The Fn trigger is not a chord: shown, not remappable.
-        if show_all || self.text_matches("voice typing dictation fn globe") {
-            let row = Self::row("Voice Typing", Some("Hold, or press twice to keep talking".into()), Some(keycap("fn")), false);
-            out.push(self.group(Some("Voice"), vec![row]));
         }
         out
     }

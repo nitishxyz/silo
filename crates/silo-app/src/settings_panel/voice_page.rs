@@ -105,7 +105,10 @@ impl SettingsPanel {
         let mut out = Vec::new();
         let mut typing = vec![Self::row(
             SettingId::VoiceTyping.label(),
-            Some("Hold Fn to dictate, or press it twice to keep listening. Esc cancels.".into()),
+            Some(match crate::commands::Command::VoiceTyping.hint() {
+                Some(keys) => format!("Hold Fn to dictate, or press it twice (or {keys}) to keep listening. Esc cancels.").into(),
+                None => "Hold Fn to dictate, or press it twice to keep listening. Esc cancels.".into(),
+            }),
             Some(self.voice_toggle("settings-voice-on", "Voice typing", prefs.on, |p, on| p.on = on, cx)),
             false,
         )];

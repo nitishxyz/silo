@@ -877,6 +877,15 @@ pub enum Method {
         #[serde(default)]
         client_id: Option<ClientId>,
     },
+    /// Start (`on`), stop and insert, or toggle (`on` omitted) hands-free
+    /// voice typing into the focused block, as Fn pressed twice does.
+    #[serde(rename = "app.voice")]
+    AppVoice {
+        #[serde(default)]
+        on: Option<bool>,
+        #[serde(default)]
+        client_id: Option<ClientId>,
+    },
     #[serde(rename = "app.settings_open")]
     AppSettingsOpen {
         #[serde(default)]
@@ -1156,6 +1165,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("app.pane_headers", "Show or hide pane headers."),
     ("app.full_screen", "Enter, leave or toggle full screen."),
     ("app.connection_info", "Show, hide or toggle the connection (direct or relay, and its round trip) in the session pill."),
+    ("app.voice", "Start, stop (inserting the text) or toggle hands-free voice typing into the focused block."),
     ("app.settings_open", "Open Settings."),
     ("app.settings_reload", "Reload the terminal settings file."),
     ("app.settings_open_file", "Open the terminal settings file."),

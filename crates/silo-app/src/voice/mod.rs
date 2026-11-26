@@ -1,5 +1,5 @@
-//! Voice typing: Fn held or pressed twice dictates into the focused block,
-//! on this Mac. `silo_voice` does the listening; this is the trigger's
+//! Voice typing: Fn held or pressed twice (or the Voice Typing shortcut,
+//! ⌃⌘V by default) dictates into the focused block, on this Mac. `silo_voice` does the listening; this is the trigger's
 //! wiring, the pill ([`pill`]), insertion ([`insert`]) and model
 //! downloads ([`fetch`]).
 
@@ -152,6 +152,27 @@ impl Workspace {
                 let _ = this.update(cx, |this, _| this.voice.ticker = None);
             }));
         }
+    }
+
+    /// The Voice Typing command (⌃⌘V by default, `app.voice`): start
+    /// hands-free, or stop and insert; `on` forces one. Whether it listens after.
+    pub(crate) fn voice_toggle(&mut self, on: Option<bool>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.state.voice.on && !self.voice.trigger.recording() {
+            if on != Some(false) {
+                self.flash(Status::info("Voice typing is off; turn it on in Settings › Voice"), cx);
+            }
+            return false;
+        }
+        let action = self.voice.trigger.toggle(on);
+        if let Some(action) = action {
+            tracing::info!(?action, "voice: shortcut");
+        }
+        match action {
+            Some(Action::StartHandsFree) => self.voice_start(true, window, cx),
+            Some(Action::Stop) => self.voice_stop(false, cx),
+            _ => {}
+        }
+        self.voice.trigger.recording()
     }
 
     fn voice_start(&mut self, hands_free: bool, window: &mut Window, cx: &mut Context<Self>) {

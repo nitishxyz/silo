@@ -243,6 +243,7 @@ fn result_schema(method: &Method) -> Schema {
         | M::AppPaneHeaders { .. }
         | M::AppFullScreen { .. }
         | M::AppConnectionInfo { .. }
+        | M::AppVoice { .. }
         | M::AppSettingsOpen { .. }
         | M::AppSettingsReload { .. }
         | M::AppSettingsOpenFile { .. }
@@ -543,6 +544,7 @@ pub fn examples() -> Vec<Method> {
         M::AppPaneHeaders { visible: false, client_id: None },
         M::AppFullScreen { on: None, client_id: Some(3) },
         M::AppConnectionInfo { on: Some(true), client_id: None },
+        M::AppVoice { on: None, client_id: None },
         M::AppSettingsOpen { section: Some("terminal".into()), client_id: None },
         M::AppSettingsReload { client_id: None },
         M::AppSettingsOpenFile { client_id: None },

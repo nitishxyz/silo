@@ -512,6 +512,7 @@ fn slow(method: &Method) -> bool {
         method,
         M::AppAppearance { .. }
             | M::AppConnectionInfo { .. }
+            | M::AppVoice { .. }
             | M::AppCopy { .. }
             | M::AppCopyOutput { .. }
             | M::AppFullScreen { .. }
@@ -1151,6 +1152,7 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::AppPaneHeaders { .. }
         | Method::AppFullScreen { .. }
         | Method::AppConnectionInfo { .. }
+        | Method::AppVoice { .. }
         | Method::AppSettingsOpen { .. }
         | Method::AppSettingsReload { .. }
         | Method::AppSettingsOpenFile { .. }

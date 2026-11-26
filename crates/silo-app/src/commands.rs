@@ -151,6 +151,8 @@ commands! {
     JumpToNextPrompt => "Jump to Next Prompt", "Terminal", ["cmd-down"];
     SelectCommandOutput => "Select Command Output", "Terminal", ["cmd-shift-a"], "The last command's output";
     CopyCommandOutput => "Copy Command Output", "Terminal", ["cmd-alt-c"], "The last command's output";
+    // Voice
+    VoiceTyping => "Voice Typing", "Voice", ["ctrl-cmd-v"], "Start listening, or stop and insert; Esc cancels. Fn works too";
     // Server & app
     RestartServer => "Restart Server", "Server", [], "Ends every session";
     StopServer => "Stop Server", "Server", [], "Ends every session";
@@ -253,6 +255,7 @@ impl Command {
             Self::ShowPaneHeaders | Self::HidePaneHeaders => Method("app.pane_headers"),
             Self::ToggleFullScreen => Method("app.full_screen"),
             Self::ToggleConnectionInfo => Method("app.connection_info"),
+            Self::VoiceTyping => Method("app.voice"),
             Self::CycleWindows => Method("app.window_cycle"),
             Self::OpenSettings => Method("app.settings_open"),
             Self::Permissions => Method("app.permissions_show"),
@@ -377,6 +380,7 @@ mod tests {
         assert_eq!(Command::SelectCommandOutput.hint().as_deref(), Some("⇧⌘A"));
         assert_eq!(Command::CopyCommandOutput.hint().as_deref(), Some("⌥⌘C"));
         assert_eq!(Command::BrowseBlocks.hint().as_deref(), Some("⇧⌘B"));
+        assert_eq!(Command::VoiceTyping.hint().as_deref(), Some("⌃⌘V"), "for keyboards without Fn");
     }
 
     #[test]

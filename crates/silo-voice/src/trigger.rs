@@ -4,6 +4,8 @@
 //! - pressed twice within [`DOUBLE`]: records hands-free until the next
 //!   press, which stops;
 //! - Esc cancels either;
+//! - a shortcut ([`Trigger::toggle`]) starts hands-free recording, or
+//!   stops it;
 //! - Fn with another key or modifier (Fn+arrow, Fn+F-keys) never records,
 //!   and a single short tap does nothing.
 //!
@@ -93,6 +95,24 @@ impl Trigger {
     /// Recording ended elsewhere (a failure, the pill's own stop).
     pub fn reset(&mut self) {
         self.state = if self.function { State::Spent } else { State::Idle };
+    }
+
+    /// The voice typing shortcut: start hands-free recording, or stop the
+    /// recording going on (hands-free or held) and insert.
+    pub fn toggle(&mut self, on: Option<bool>) -> Option<Action> {
+        let recording = self.recording();
+        let want = on.unwrap_or(!recording);
+        if want == recording {
+            return None;
+        }
+        if want {
+            // As if Fn were pressed twice and let go: its next press stops.
+            self.state = State::HandsFree { released: !self.function };
+            Some(Action::StartHandsFree)
+        } else {
+            self.state = if self.function { State::Spent } else { State::Idle };
+            Some(Action::Stop)
+        }
     }
 
     /// The machine's answer to `input` at `now`.
@@ -236,6 +256,30 @@ mod tests {
     fn losing_focus_cancels_a_hold_and_keeps_hands_free() {
         assert_eq!(run(&[(FN, 0), (Input::Tick, 250), (Input::Blur, 400), (UP, 500)]), [(Action::StartHold, 250), (Action::Cancel, 400)]);
         assert_eq!(run(&[(FN, 0), (UP, 50), (FN, 100), (Input::Blur, 120), (FN, 900)]), [(Action::StartHandsFree, 100), (Action::Stop, 900)]);
+    }
+
+    #[test]
+    fn the_shortcut_toggles_hands_free_recording() {
+        let mut t = Trigger::default();
+        let ms = Duration::from_millis;
+        assert_eq!(t.toggle(None), Some(Action::StartHandsFree));
+        assert!(t.hands_free() && !t.wants_ticks());
+        assert_eq!(t.toggle(Some(true)), None, "already listening");
+        assert_eq!(t.input(KEY, ms(100)), None, "typing keeps it running");
+        assert_eq!(t.toggle(None), Some(Action::Stop));
+        assert!(!t.recording());
+        assert_eq!(t.toggle(Some(false)), None, "nothing to stop");
+        // Fn stops what the shortcut started, and the shortcut stops a hold.
+        t.toggle(None);
+        assert_eq!(t.input(FN, ms(200)), Some(Action::Stop));
+        assert_eq!(t.input(UP, ms(250)), None);
+        t.input(FN, ms(1000));
+        assert_eq!(t.input(Input::Tick, ms(1300)), Some(Action::StartHold));
+        assert_eq!(t.toggle(None), Some(Action::Stop));
+        assert_eq!(t.input(UP, ms(1500)), None, "the held press is spent");
+        // Esc cancels it as it does the others.
+        t.toggle(None);
+        assert_eq!(t.input(ESC, ms(2000)), Some(Action::Cancel));
     }
 
     #[test]
