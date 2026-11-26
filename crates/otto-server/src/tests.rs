@@ -4,6 +4,8 @@ mod api_tests;
 mod limits_tests;
 #[path = "mcp_tests.rs"]
 mod mcp_tests;
+#[path = "studio_tests.rs"]
+mod studio_tests;
 #[path = "view_tests.rs"]
 mod view_tests;
 

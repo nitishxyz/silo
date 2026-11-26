@@ -615,7 +615,13 @@ the file changed after that edit). The history is kept in the store with the ses
   no such agent for the project, or no such path under the session's folder (inside it only). At request time the
   item gets one note after its text, for the found ones only: `Mentioned agents: build. Delegate the matching part
   with subagent {agent:"build"}.` and `Mentioned files: src/main.rs, docs/ (paths relative to the project; read them
-  as needed).` Contents are never inlined. A native steer sends the note with it.
+  as needed).` Contents are never inlined. A native steer sends the note with it. Other kinds: `model` (a media
+  model handle, `docs/MEDIA.md` §3.0.1), `entity` and `canvas` (a studio's world entity, canvas or `canvas#node_id`,
+  `docs/STUDIO.md` §6.3), and `skill`: a skill of the project by name, `/name` in the text (not `@`; a run that
+  starts with one isn't expanded as a `/command`), `missing` when no such skill is discovered. Its note line comes
+  first: `Mentioned skills: action-choreography. Load it with skill {name: "action-choreography"} before you answer,
+  unless it is already loaded in this conversation, and follow it.` (several: `Load each with skill {name:
+  "<name>"} … and follow them.`).
 - **`files.complete {cwd, query, limit = 50}`** → `[{path, dir}]` (`otto-tools/src/complete.rs`): files and
   folders under `cwd` for an `@` popup, `.gitignore` respected (`ignore`, as `glob`/`search`), `.git` skipped, at
   most 20k entries walked, limit capped at 200. Fuzzy subsequence on the relative path, a basename match first,
@@ -859,7 +865,9 @@ nav/aside/header/footer; a candidate with under 200 characters and under a third
     model's family, `skill`, `subagent`, extras, `cwd`'s MCP tools) with its own default loading.
 - **Skills**: `SKILL.md` folders (user `skills/`, `.claude/skills`, `.agents/skills`, `.otto/skills`), loaded on
   demand by the `skill` tool with their folder path; names and descriptions only in the prompt;
-  `disable-model-invocation` hides one from the model. `skills.list` lists them.
+  `disable-model-invocation` hides one from the model: it isn't in the prompt's list, and the `skill` tool refuses
+  it unless a user item of the session mentions it (`MentionKind::Skill`, not missing), so a user's `/name` mention
+  is the one way it is used. `skills.list` lists them all (the app's `/` menu).
 - **Commands**: `/name args` from markdown templates (user `commands/`, `.claude/commands`, `.otto/commands`;
   subfolders give `folder:name`), with `$ARGUMENTS`, `$1`…`$9`, or the arguments appended; `description` and
   `argument-hint` frontmatter; `commands.list` lists them.

@@ -3,12 +3,12 @@
 //! uses, its inputs, its run.
 mod audio;
 mod generate;
-mod list;
+pub(crate) mod list;
 mod media;
-mod model_schema;
-mod pick;
-mod result;
-mod save;
+pub(crate) mod model_schema;
+pub(crate) mod pick;
+pub(crate) mod result;
+pub(crate) mod save;
 mod video;
 
 use crate::{AudioType, Call, Media, MediaError, MediaErrorKind, MediaKind, MediaProvider, Output, Reference};
@@ -25,7 +25,59 @@ pub(crate) fn all(media: &Arc<Media>) -> Vec<Arc<dyn Tool>> {
         Arc::new(list::ListMediaModels::new(media.clone())),
         Arc::new(model_schema::MediaModelSchema::new(media.clone())),
         Arc::new(media::GenerateMedia::new(media.clone())),
+        Arc::new(crate::studio::CanvasRun::new(media.clone())),
     ]
+}
+
+/// One of the generation tools by name (a compiled card's `tool`).
+pub(crate) fn named(media: &Arc<Media>, name: &str) -> Option<Box<dyn Tool>> {
+    Some(match name {
+        "generate_image" => Box::new(generate::GenerateImage::new(media.clone())),
+        "generate_video" => Box::new(video::GenerateVideo::new(media.clone())),
+        "generate_audio" => Box::new(audio::GenerateAudio::new(media.clone())),
+        "generate_media" => Box::new(media::GenerateMedia::new(media.clone())),
+        _ => return None,
+    })
+}
+
+/// `generate_audio`'s schema without its routing fields (an Automatic audio card's options).
+pub(crate) fn audio_schema() -> Value {
+    let mut schema = audio::schema();
+    if let Some(props) = schema["properties"].as_object_mut() {
+        for key in ["provider", "model", "path", "background"] {
+            props.remove(key);
+        }
+    }
+    schema
+}
+
+pub(crate) fn audio_type_name(kind: AudioType) -> &'static str {
+    audio::type_name(kind)
+}
+
+/// The generation tools' `canvas` field (docs/STUDIO.md §6.2).
+pub(crate) fn canvas_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Make it a card on a Studio canvas: the card is added (or node gets a new take), wired from inputs that are canvas nodes or world entity files, sized from the canvas's format, and the result becomes its take",
+        "properties": {
+            "name": {"type": "string", "description": "The canvas (its folder name, as canvas_read shows)"},
+            "frame": {"type": "string", "description": "A frame node id to add the card in"},
+            "node": {"type": "string", "description": "An existing card's node id: it gets this as a new take"},
+            "title": {"type": "string", "description": "The new card's title"},
+            "style": {"type": "boolean", "description": "false: don't add the project's style line, nor on video its motion line (default true)"}
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    })
+}
+
+/// `schema` with the `canvas` field.
+pub(crate) fn with_canvas(mut schema: Value) -> Value {
+    if let Some(props) = schema["properties"].as_object_mut() {
+        props.insert("canvas".into(), canvas_schema());
+    }
+    schema
 }
 
 /// A generation tool's spec: network and write (it may save `path`), not exclusive, eager.

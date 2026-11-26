@@ -9,6 +9,8 @@ license.workspace = true
 otto-tools.workspace = true
 otto-llm.workspace = true
 otto-proto.workspace = true
+# The mention parser of card prompts (silo_proto::studio::mention), shared with the server and the app.
+silo-proto.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 futures.workspace = true

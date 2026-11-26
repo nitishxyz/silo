@@ -7,6 +7,7 @@ mod patch;
 mod patch_edges;
 mod policy;
 mod safety;
+mod studio;
 mod terminals;
 mod undo;
 mod web;

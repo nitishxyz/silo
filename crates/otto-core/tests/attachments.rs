@@ -342,3 +342,174 @@ async fn model_mentions_resolve_through_the_media_catalog() {
     assert_eq!(missing, [vec![true], vec![false], vec![false, true, false, false]]);
     r.shutdown().await.unwrap();
 }
+
+/// A studio (docs/STUDIO.md §6.3): Mara with a sheet and a ref, Harbor without a sheet, a canvas with a card,
+/// an asset and a note.
+fn studio(root: &std::path::Path) {
+    let write = |path: &str, text: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("studio.toml", "name = \"Show\"\n");
+    write(
+        "world/characters/mara/mara.md",
+        "---\nname: Mara Venn\nsheet: sheet.png\nrefs:\n  - refs/face.png\n  - file: refs/coat.png\n    name: Coat\n    defines: the oilskin coat\n---\n",
+    );
+    write("world/characters/mara/refs/coat.png", "png");
+    write("world/characters/mara/sheet.png", "png");
+    write("world/characters/mara/refs/face.png", "png");
+    write("world/places/harbor/harbor.md", "The harbor.\n");
+    let canvas = serde_json::json!({"version": 1, "title": "Pilot", "nodes": [
+        {"id": "n_card", "x": 0, "y": 0, "w": 1, "h": 1, "body": {"kind": "gen", "makes": "video", "title": "Shot 1", "prompt": "Mara dives\ninto the dark", "status": "done", "model": "vid-1",
+            "takes": [{"path": "canvases/ep01/assets/a.mp4", "media": "video"}, {"path": "canvases/ep01/assets/b.mp4", "media": "video"}], "pick": 0}},
+        {"id": "n_draft", "x": 0, "y": 0, "w": 1, "h": 1, "body": {"kind": "gen", "makes": "image"}},
+        {"id": "n_plate", "x": 0, "y": 0, "w": 1, "h": 1, "body": {"kind": "asset", "path": "plates/harbor.png", "media": "image"}},
+        {"id": "n_note", "x": 0, "y": 0, "w": 1, "h": 1, "body": {"kind": "note", "text": "Keep it cold."}}
+    ], "edges": []});
+    write("canvases/ep01/canvas.json", &canvas.to_string());
+}
+
+#[tokio::test]
+async fn entity_and_canvas_mentions_are_noted_from_the_studio() {
+    let (dir, r, _, model) = setup(false).await;
+    let root = std::fs::canonicalize(dir.path()).unwrap().join("show");
+    studio(&root);
+    std::fs::create_dir_all(root.join("canvases/ep01/assets")).unwrap();
+    let project = r.open_project(&root).await.unwrap();
+    // A cwd inside a studio subfolder still finds the studio.
+    let s = r
+        .create_session(CreateSession { project_id: project.id, cwd: root.join("canvases/ep01/assets"), agent: "build".into(), ..Default::default() })
+        .await
+        .unwrap();
+    model.scripts.lock().unwrap().extend([text("ok"), text("ok")]);
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    let mention = |kind, target: &str| InputPart::Mention { kind, target: target.into() };
+    let input = vec![
+        mention(MentionKind::Entity, "characters/mara"),
+        mention(MentionKind::Entity, "places/harbor"),
+        mention(MentionKind::Entity, "characters/nobody"),
+        mention(MentionKind::Entity, "characters/mara#coat"),
+        mention(MentionKind::Entity, "characters/mara#nope"),
+        mention(MentionKind::Canvas, "ep01"),
+        mention(MentionKind::Canvas, "ep01#n_card"),
+        mention(MentionKind::Canvas, "ep01#n_draft"),
+        mention(MentionKind::Canvas, "ep01#n_plate"),
+        mention(MentionKind::Canvas, "ep01#n_note"),
+        mention(MentionKind::Canvas, "ep01#n_gone"),
+        mention(MentionKind::Canvas, "ep99"),
+    ];
+    r.prompt(&s.id, input, Delivery::Queue).await.unwrap();
+    finish(&mut live).await;
+    let parts = model.requests.lock().unwrap()[0].items[0].parts.clone();
+    assert_eq!(
+        parts[1],
+        Part::text(
+            "Mentioned world entities:\n\
+             - Mara Venn (character): world/characters/mara/mara.md; sheet world/characters/mara/sheet.png; refs world/characters/mara/refs/face.png, world/characters/mara/refs/coat.png. Pass the sheet (and refs that fit) as references when generating them; read the file for details.\n\
+             - harbor (place): world/places/harbor/harbor.md. No sheet yet; read the file for details.\n\
+             - Mara Venn, Coat (character reference characters/mara#coat): world/characters/mara/refs/coat.png; defines the oilskin coat. Pass this file as a reference when generating them (a card prompt's @characters/mara#coat wires it and states its job); entity file world/characters/mara/mara.md.\n\
+             Mentioned canvases and nodes:\n\
+             - ep01: canvas \"Pilot\", 4 nodes; canvas_read {canvas: \"ep01\"} shows it.\n\
+             - ep01#n_card: video card \"Shot 1\"; status done; model vid-1; take canvases/ep01/assets/a.mp4 (1 of 2); prompt \"Mara dives into the dark\"\n\
+             - ep01#n_draft: image card; status draft\n\
+             - ep01#n_plate: image asset plates/harbor.png\n\
+             - ep01#n_note: note \"Keep it cold.\""
+        )
+    );
+    let item = s.view().await.unwrap().items[0].clone();
+    let missing: Vec<(&str, bool)> = item.mentions.iter().map(|m| (m.target.as_str(), m.missing)).collect();
+    assert_eq!(
+        missing,
+        [
+            ("characters/mara", false),
+            ("places/harbor", false),
+            ("characters/nobody", true),
+            ("characters/mara#coat", false),
+            ("characters/mara#nope", true),
+            ("ep01", false),
+            ("ep01#n_card", false),
+            ("ep01#n_draft", false),
+            ("ep01#n_plate", false),
+            ("ep01#n_note", false),
+            ("ep01#n_gone", true),
+            ("ep99", true)
+        ]
+    );
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn studio_mentions_outside_a_studio_are_missing_without_a_note() {
+    let (_dir, r, s, model) = setup(false).await;
+    model.scripts.lock().unwrap().push_back(text("ok"));
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    let input = vec![
+        InputPart::Text { text: "see ".into() },
+        InputPart::Mention { kind: MentionKind::Entity, target: "characters/mara".into() },
+        InputPart::Mention { kind: MentionKind::Canvas, target: "ep01".into() },
+    ];
+    r.prompt(&s.id, input, Delivery::Queue).await.unwrap();
+    finish(&mut live).await;
+    assert_eq!(model.requests.lock().unwrap()[0].items[0].parts, [Part::text("see @characters/mara@ep01")]);
+    let item = s.view().await.unwrap().items[0].clone();
+    assert!(item.mentions.iter().all(|m| m.missing));
+    r.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn skill_mentions_read_as_slash_names_and_unlock_user_only_skills() {
+    let (dir, r, s, model) = setup(false).await;
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(".otto/skills/fight/SKILL.md", "---\nname: fight\ndescription: Fights\n---\nFight steps.");
+    write(".otto/skills/secret/SKILL.md", "---\nname: secret\ndescription: Hidden\ndisable-model-invocation: true\n---\nSecret steps.");
+    // A command of the same name: a leading skill mention isn't expanded as one.
+    write(".otto/commands/fight.md", "Command body");
+    model.scripts.lock().unwrap().extend([
+        text("ok"),
+        call("c1", "skill", serde_json::json!({"name": "secret"})),
+        text("refused"),
+        call("c2", "skill", serde_json::json!({"name": "secret"})),
+        text("loaded"),
+    ]);
+    let (_, mut live) = r.subscribe(&s.id, 0).await.unwrap();
+    let skill = |target: &str| InputPart::Mention { kind: MentionKind::Skill, target: target.into() };
+    let words = |text: &str| InputPart::Text { text: text.into() };
+    r.prompt(&s.id, vec![skill("fight"), words(" the quay "), skill("nope")], Delivery::Queue).await.unwrap();
+    finish(&mut live).await;
+    let parts = model.requests.lock().unwrap()[0].items[0].parts.clone();
+    assert_eq!(
+        parts,
+        [
+            Part::text("/fight the quay /nope"),
+            Part::text(
+                "Mentioned skills: fight. Load it with skill {name: \"fight\"} before you answer, unless it is already loaded in this conversation, and follow it."
+            )
+        ]
+    );
+    let item = s.view().await.unwrap().items[0].clone();
+    let text = item.text();
+    let found: Vec<(&str, bool)> = item.mentions.iter().map(|m| (&text[m.range[0]..m.range[1]], m.missing)).collect();
+    assert_eq!(found, [("/fight", false), ("/nope", true)]);
+    // The model can't load a user-only skill on its own…
+    r.prompt(&s.id, vec![words("go")], Delivery::Queue).await.unwrap();
+    finish(&mut live).await;
+    let refused = serde_json::to_string(&model.requests.lock().unwrap()[2].items).unwrap();
+    assert!(refused.contains("skill secret is the user's to invoke") && !refused.contains("Secret steps."), "{refused}");
+    // …but once the user mentions it, it loads.
+    r.prompt(&s.id, vec![words("use "), skill("secret"), words(" and "), skill("fight")], Delivery::Queue).await.unwrap();
+    finish(&mut live).await;
+    let requests = model.requests.lock().unwrap().clone();
+    assert_eq!(
+        requests[3].items.last().unwrap().parts[1],
+        Part::text(
+            "Mentioned skills: secret, fight. Load each with skill {name: \"<name>\"} before you answer, unless it is already loaded in this conversation, and follow them."
+        )
+    );
+    assert!(serde_json::to_string(&requests[4].items).unwrap().contains("Secret steps."));
+    r.shutdown().await.unwrap();
+}

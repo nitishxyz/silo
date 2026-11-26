@@ -6,7 +6,9 @@ use std::{
 };
 
 /// Built-in agent names; a user or project file of the same name overrides one.
-pub const BUILTINS: &[&str] = &["build"];
+pub const BUILTINS: &[&str] = &["build", "studio"];
+/// The `studio` agent's prompt (its body; frontmatter, if any, is dropped).
+const STUDIO: &str = include_str!("../agents/studio.md");
 #[derive(Clone, Debug, Default)]
 pub struct Agent {
     pub name: String,
@@ -146,7 +148,47 @@ pub fn discover(root: &Path, user: &Path) -> Vec<Agent> {
         prompt: "Complete the user's task accurately and verify the result.".into(),
         ..Default::default()
     };
-    let mut agents = BTreeMap::from([(build.name.clone(), build)]);
+    let studio = Agent {
+        name: "studio".into(),
+        description: "Co-creates images, video, audio and series in a Studio: world, characters, scripts, shots, sound.".into(),
+        prompt: frontmatter(STUDIO).1.trim().to_owned(),
+        // Its own, media, file and shell tools up front; `*` makes everything else
+        // loadable (the longer pattern wins, so the names above stay shown).
+        tools: [
+            "studio_*",
+            "canvas_*",
+            "generate_image",
+            "generate_video",
+            "generate_audio",
+            "generate_media",
+            "list_media_models",
+            "media_model_schema",
+            "read",
+            "write",
+            "edit",
+            "multiedit",
+            "apply_patch",
+            "ls",
+            "tree",
+            "glob",
+            "search",
+            "copy_attachment",
+            "undo_edit",
+            "shell",
+            "job",
+            "web_fetch",
+            "web_search",
+            "ask_user",
+            "update_todos",
+            "skill",
+            "subagent",
+        ]
+        .map(String::from)
+        .into(),
+        loadable: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut agents = BTreeMap::from([(build.name.clone(), build), (studio.name.clone(), studio)]);
     for scope in [AgentScope::User, AgentScope::Project] {
         for dir in dirs(root, user, scope) {
             agents.extend(scan(&dir, scope).into_iter().map(|a| (a.name.clone(), a)));

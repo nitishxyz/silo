@@ -97,6 +97,13 @@ pub async fn run(args: ServerArgs) -> Result<()> {
     runtime.add_tools(silo.tools);
     runtime.set_terminals(silo.terminals);
     runtime.set_renderer(silo.renderer);
+    // Studio cards (docs/STUDIO.md §6.2) read and write canvases through silo; cards a previous daemon was running
+    // are marked stopped.
+    media.set_studio(silo.studio);
+    {
+        let media = media.clone();
+        tokio::spawn(async move { otto_media::studio::recover(&media).await });
+    }
     // Tools clients provide through silo, under their own names.
     runtime.add_source(silo.provided);
     let mcp = otto_mcp::Mcp::new(paths::user_config(), paths::auth_dir(&home).join("mcp"));

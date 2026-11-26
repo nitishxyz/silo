@@ -169,3 +169,68 @@ impl Tool for ListMediaModels {
         Ok(ToolOutput::text(text.join("\n")).with_metadata(json!({"providers": listed})))
     }
 }
+
+/// `media.models`: the models `list_media_models` lists, as data (no row limit).
+pub(crate) async fn infos(
+    media: &Media,
+    kind: Option<MediaKind>,
+    query: Option<&str>,
+    input: Option<MediaKind>,
+    provider: Option<&str>,
+    refresh: bool,
+) -> Result<Vec<otto_proto::MediaModelInfo>, ToolError> {
+    let only = match provider.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(id) => Some(media.provider(id).ok_or_else(|| ToolError::invalid(format!("Unknown media provider {id}")))?),
+        None => None,
+    };
+    let query = query.map(str::trim).filter(|q| !q.is_empty());
+    media.refresh_catalogs(refresh).await;
+    let defaults = media.defaults();
+    let out = media
+        .catalog()
+        .into_iter()
+        .filter(|m| kind.is_none_or(|k| k == m.kind))
+        .filter(|m| query.is_none_or(|q| matches(m, q)))
+        .filter(|m| input.is_none_or(|w| takes(m).iter().any(|t| t.noun() == noun(w))))
+        .filter(|m| only.as_ref().is_none_or(|o| o.id() == m.provider.id()))
+        .map(|m| {
+            let chosen = defaults.get(&m.kind).is_some_and(|c| {
+                c.provider.as_deref() == Some(m.provider.id()) && c.model.as_deref().is_none_or(|id| m.named(id)) && (c.model.is_some() || m.default)
+            });
+            otto_proto::MediaModelInfo {
+                handle: m.handle.clone(),
+                id: m.id.clone(),
+                name: m.name.clone(),
+                about: m.about.clone(),
+                kind: m.kind,
+                provider: m.provider.id().into(),
+                provider_name: m.provider.name().into(),
+                connected: media.key(m.provider.as_ref()).is_some(),
+                default: m.default,
+                chosen,
+                price: m.price().map(str::to_owned),
+                inputs: m.entry.as_ref().map(|e| e.inputs.clone()).unwrap_or_default(),
+                takes: takes(&m).iter().map(|t| t.noun().to_owned()).collect(),
+                modes: m
+                    .modes
+                    .iter()
+                    .map(|(mode, e)| otto_proto::MediaModeInfo {
+                        mode: mode.clone(),
+                        endpoint: e.id.clone(),
+                        price: e.price.clone(),
+                        takes: e.schema.as_ref().map(schema::fields).unwrap_or_default().iter().map(|f| f.media.noun().to_owned()).fold(
+                            Vec::new(),
+                            |mut a, t| {
+                                if !a.contains(&t) {
+                                    a.push(t);
+                                }
+                                a
+                            },
+                        ),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    Ok(out)
+}

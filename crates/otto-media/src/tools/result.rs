@@ -66,23 +66,29 @@ pub(crate) async fn result(
     output: Output,
     path: Option<&str>,
 ) -> Result<ToolOutput, ToolError> {
-    let root = cx.attachments.clone().ok_or_else(|| ToolError::failed("This session can't keep generated media"))?;
-    let session = cx.sessions.first().cloned().ok_or_else(|| ToolError::failed("This session can't keep generated media"))?;
+    // A session keeps every result as an attachment; a session-less card run (docs/STUDIO.md §6.2) only saves `path`.
+    let store = cx.attachments.clone().zip(cx.sessions.first().cloned());
+    if store.is_none() && path.is_none() {
+        return Err(ToolError::failed("This session can't keep generated media"));
+    }
     let (cx2, prompt, path) = (cx.clone(), prompt.to_owned(), path.map(str::to_owned));
     let media = output.media.clone();
     let stored = tokio::task::spawn_blocking(move || -> Result<Stored, ToolError> {
-        let dir = attachments::dir(&root, &session);
+        let dir = store.map(|(root, session)| attachments::dir(&root, &session));
         let (slug, n) = (save::slug(&prompt, noun(kind)), media.len());
         let (mut lines, mut meta, mut parts) = (Vec::new(), Vec::new(), Vec::new());
         let mut saved = Vec::new();
         for (i, item) in media.iter().enumerate() {
             let ext = save::extension(&item.mime);
             let file = if n > 1 { format!("{slug}-{}.{ext}", i + 1) } else { format!("{slug}.{ext}") };
-            let stored = attachments::put(&dir, &file, &item.mime, &item.bytes)
-                .map_err(|e| ToolError::failed(format!("can't keep the {}: {e}", noun(kind))))?;
             let (size, seconds) = measure(&item.bytes, &item.mime);
-            lines.push(line(&stored, size, seconds));
-            let mut entry = json!({"id": stored.id, "name": stored.name, "mime": stored.mime, "size": stored.size});
+            let mut entry = json!({"mime": item.mime, "size": item.bytes.len()});
+            if let Some(dir) = &dir {
+                let stored = attachments::put(dir, &file, &item.mime, &item.bytes)
+                    .map_err(|e| ToolError::failed(format!("can't keep the {}: {e}", noun(kind))))?;
+                lines.push(line(&stored, size, seconds));
+                entry = json!({"id": stored.id, "name": stored.name, "mime": stored.mime, "size": stored.size});
+            }
             if let Some((w, h)) = size {
                 entry["width"] = w.into();
                 entry["height"] = h.into();

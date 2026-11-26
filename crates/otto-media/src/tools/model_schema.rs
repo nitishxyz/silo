@@ -119,3 +119,71 @@ pub(crate) fn mode_line(model: &Model) -> Vec<String> {
         })
         .collect()
 }
+
+/// A schema's media fields as data, each with the studio card port a run fills it from.
+fn field_infos(schema: &Value, kind: crate::MediaKind) -> Vec<otto_proto::MediaFieldInfo> {
+    schema::fields(schema)
+        .into_iter()
+        .map(|f| {
+            let top = !f.name.contains(['.', '[']);
+            let port = top.then(|| crate::studio::port_of(&f.name, f.media, f.many.is_some(), kind)).flatten();
+            otto_proto::MediaFieldInfo {
+                media: f.media.noun().into(),
+                many: f.many.is_some(),
+                min: f.many.and_then(|(min, _)| min),
+                max: f.many.and_then(|(_, max)| max),
+                required: f.required,
+                port: port.map(|p| p.id().to_owned()),
+                name: f.name,
+            }
+        })
+        .collect()
+}
+
+/// `media.model_schema`: `media_model_schema`'s data: the model's (or `mode`'s) trimmed input schemas and media fields.
+pub(crate) async fn info(media: &Media, name: &str, mode: Option<&str>) -> Result<otto_proto::MediaModelSchema, ToolError> {
+    let (model, named) = pick::model(media, name).await?;
+    let mut modes = Vec::new();
+    if model.modes.is_empty() {
+        let schema = pick::quick_schema(&model);
+        let mut fields = field_infos(&schema, model.kind);
+        // The quick tool's frames and references are a card's ports where the model takes them.
+        let inputs = model.entry.as_ref().map(|e| e.inputs.clone()).unwrap_or_default();
+        let has = |w: &str| inputs.iter().any(|i| i == w);
+        for f in &mut fields {
+            let takes = match f.name.as_str() {
+                "first_frame" => has("first frame") || has("first/last frame"),
+                "last_frame" => has("first/last frame"),
+                "references" => has("reference images"),
+                _ => false,
+            };
+            f.port =
+                if takes { f.port.take().or_else(|| Some(if f.name == "references" { "reference".into() } else { f.name.clone() })) } else { None };
+        }
+        modes.push(otto_proto::MediaModeSchema { mode: String::new(), endpoint: None, price: model.price().map(str::to_owned), schema, fields });
+    } else {
+        let picked: Vec<usize> = match pick::mode(&model, mode.or(named.as_deref()))? {
+            Some(i) => vec![i],
+            None => (0..model.modes.len()).collect(),
+        };
+        for i in picked {
+            let Ok(endpoint) = pick::with_schema(media, &model, i).await else { continue };
+            let schema = endpoint.schema.clone().unwrap_or(Value::Null);
+            modes.push(otto_proto::MediaModeSchema {
+                mode: model.modes[i].0.clone(),
+                endpoint: Some(endpoint.id.clone()),
+                price: endpoint.price.clone(),
+                fields: field_infos(&schema, model.kind),
+                schema,
+            });
+        }
+    }
+    Ok(otto_proto::MediaModelSchema {
+        handle: model.handle.clone(),
+        name: model.name.clone(),
+        kind: model.kind,
+        provider: model.provider.id().into(),
+        connected: media.key(model.provider.as_ref()).is_some(),
+        modes,
+    })
+}

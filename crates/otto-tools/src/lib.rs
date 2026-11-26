@@ -11,6 +11,7 @@ pub mod output;
 pub mod policy;
 pub mod registry;
 pub mod spec;
+pub mod studio;
 
 pub use spec::{
     Approver, CallMode, Effects, Loading, Mailbox, OutputPart, Presentation, Progress, ProjectSources, Source, Tool, ToolCx, ToolError,

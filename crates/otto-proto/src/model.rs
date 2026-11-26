@@ -262,9 +262,10 @@ pub enum InputPart {
     Attachment {
         id: String,
     },
-    /// `@target` at this point of the text: an agent or a project path (a
-    /// folder ends in `/`). The model gets a note naming them; the user item
-    /// keeps them as `Item::mentions`.
+    /// `@target` at this point of the text (`/target` for a skill): an agent,
+    /// a project path (a folder ends in `/`), a media model, a studio entity,
+    /// canvas or canvas node, or a skill. The model gets a note naming them;
+    /// the user item keeps them as `Item::mentions`.
     Mention {
         kind: MentionKind,
         target: String,
@@ -349,6 +350,190 @@ pub struct MediaProviderInfo {
     pub source: Option<MediaKeySource>,
     #[serde(default)]
     pub models: Vec<MediaModel>,
+}
+
+/// `media.models`: one model of the catalog `list_media_models` reads (built-in models, then live families).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaModelInfo {
+    /// What `model` takes everywhere (`seedance-2.5`).
+    pub handle: String,
+    /// The built-in model's id, else the family's key.
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub about: String,
+    pub kind: MediaKind,
+    pub provider: String,
+    pub provider_name: String,
+    pub connected: bool,
+    /// The provider's default for `kind`.
+    #[serde(default)]
+    pub default: bool,
+    /// The kind's chosen default (`media.set_default`).
+    #[serde(default)]
+    pub chosen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<String>,
+    /// A built-in model's inputs as listed (`text`, `reference images`, `first/last frame`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
+    /// The media its fields take, any mode: `image`, `video`, `audio`, `file`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<String>,
+    /// Live modes; none: it runs through the quick tool (`generate_image`, …) alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<MediaModeInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaModeInfo {
+    /// `text-to-video`, `reference-to-video`, …; empty when the family has one unnamed endpoint.
+    pub mode: String,
+    pub endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<String>,
+    /// Known when its schema is cached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<String>,
+}
+
+/// `media.model_schema`: what `media_model_schema` shows, per mode.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaModelSchema {
+    pub handle: String,
+    pub name: String,
+    pub kind: MediaKind,
+    pub provider: String,
+    pub connected: bool,
+    /// One with `mode` empty and `endpoint` none for a model run by its quick tool.
+    pub modes: Vec<MediaModeSchema>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaModeSchema {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<String>,
+    /// Trimmed JSON Schema of its input (for a quick model: the quick tool's, routing fields left out).
+    pub schema: Value,
+    pub fields: Vec<MediaFieldInfo>,
+}
+
+/// A media field of an input schema (docs/MEDIA.md §3.2).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MediaFieldInfo {
+    /// `image_urls`, `elements[].frontal_image_url`.
+    pub name: String,
+    /// `image`, `video`, `audio`, `file`.
+    pub media: String,
+    #[serde(default)]
+    pub many: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u64>,
+    #[serde(default)]
+    pub required: bool,
+    /// The studio card port it serves (`first_frame`, `reference`, `video`, …), when a run fills it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
+}
+
+/// `studio.preview_card`: the request a card compiles to now, without running it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CardPreview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled: Option<CompiledCard>,
+    /// Why it can't run now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<CardProblem>,
+    /// Wired cards still queued or running (a run waits for them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting: Vec<String>,
+    /// The ports the chosen (or automatically picked) model takes, as wired now.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<String>,
+    /// One per model asked about (`models`), in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fits: Vec<ModelFit>,
+}
+
+/// A compiled card: exactly a call of `tool` with `input`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CompiledCard {
+    /// `generate_image`, `generate_video`, `generate_audio` or `generate_media`.
+    pub tool: String,
+    pub input: Value,
+    /// The model's handle; empty when the provider picks (audio on Automatic).
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub model_name: String,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    pub prompt: String,
+    /// Wired files by port, numbered within each (`reference` 1 is "image 1").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<CardFile>,
+    /// Sizes it couldn't take as asked, options left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CardFile {
+    pub port: String,
+    /// From 1, within its port.
+    pub index: u32,
+    /// Root-relative.
+    pub path: String,
+    pub label: String,
+    /// The request field it fills (`references`, `first_frame`, `video_url`).
+    pub field: String,
+}
+
+/// Why a card can't run. `code`: `no_provider` (connect a `kind` provider, then run again), `input` (a wire's
+/// problem: `Run Keyframe 3 first`, wrong media), `model` (the chosen model can't take what is wired, or is
+/// unknown), `invalid` (no prompt, a bad option).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CardProblem {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<MediaKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+/// Whether a model can make a card as wired.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelFit {
+    /// As asked.
+    pub model: String,
+    /// The mode it would use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    pub fits: bool,
+    /// Why not: `no video input`, `takes 1 reference, 3 wired`, `not connected`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `studio.mentions`: an `@` candidate of a studio (an entity, a canvas, or, for a `canvas#…` query, one of
+/// that canvas's nodes).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StudioMention {
+    pub kind: MentionKind,
+    /// `characters/mara`, `ep01-pilot`, `ep01-pilot#n_3f2a9c`.
+    pub target: String,
+    /// `Mara Venn`, `Pilot`, a node's title (a note's first line, a document's file name).
+    pub name: String,
+    /// The entity's section singular (`Character`, `Place`); `Canvas · Ep 1` for an episode, else `Canvas`; a
+    /// node's kind and the frame it sits in (`Video card · Pass 3A`, `Shot`, `Note`, `Document`).
+    pub detail: String,
 }
 
 /// The provider and model a kind uses by default; `None` fields: automatic (the first connected provider, its default).

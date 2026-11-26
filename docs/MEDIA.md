@@ -125,7 +125,8 @@ The composer's `@` popup (agents, files) also lists media models once a query is
   `GPT Image 2.6 Flare` → `gpt-image-2.6-flare`); the same name at two providers gets the provider in front for
   every provider but the model's maker/first in list order (`higgsfield-grok-imagine-2.0`). Stable, unique,
   lowercase `[a-z0-9.-]`.
-- Popup: models after agents and before files, at most 6, fuzzy on handle, name and provider; a row shows the
+- Popup: models after agents and before files, at most 6, fuzzy on handle, name and provider, connected providers'
+  first (then by score); `media.status` is fetched again each time the popup opens; a row shows the
   kind's icon (image/video/audio), the name, and `Provider · Kind` muted, plus `Not connected` when its
   provider has no key (still pickable: the setup card asks when it runs). Not listed for an empty query.
 - Handles cover the live catalogs' families too (§3.2), after the built-in ones so those never change.
@@ -148,7 +149,8 @@ images; Kling 4.0 video edit). Instead of a tool per model, the model reads a mo
   text→audio/speech (public; no schemas, so `MediaProvider::endpoint` reads one on demand: `?endpoint_id=<id>&expand=openapi-3.0`,
   the input schema at `paths["/<id>"].post.requestBody`, `$ref`s inlined). Kept in memory and in
   `<state>/media-catalog/<provider>.json` (`{fetched_at, endpoints}`), fetched again after 6 h (`refresh` forces;
-  a failed fetch keeps the old copy and waits a minute); the daemon refreshes stale ones at start. Without a key
+  a failed fetch keeps the old copy and waits a minute); the daemon refreshes stale ones at start and behind each
+  `media.status`, and `media.set_key` with a key fetches that provider's at once. Without a key
   or offline: the built-in models only.
 - **Families**: endpoints group by the provider's group (fal `group.key`) or their id without its mode segment
   (`bytedance/seedance-2.5/{text-to-video,image-to-video,…}` → one model, modes named by what their ids don't
@@ -185,7 +187,10 @@ generate_media { model: string, mode?: string, input: {…}, path?: string, back
 - Chaining: each result's `att_` id is an input of the next call (image → image-to-video → motion transfer).
 - Agent block: the line is `Generating video · Seedance 2.5 · reference` (kind and name from the model in
   `media.status`, else the result, else the model/mode words), its files and placeholders placed like the quick
-  tools'; the setup card shows for its question by the kind the question names.
+  tools'; the setup card shows for its question by the kind the question names. While nothing says the kind yet
+  (the call's input still arriving, the status not loaded and no telling word), the line reads `Generating ·
+  <model>` with a `sparkles` glyph on it and on the placeholder, not a video's that turns into an image's. A new
+  pane starts from the status the app loaded last (any pane's) while its own loads.
 
 ### 3.1 No provider set up
 
@@ -266,6 +271,9 @@ A sub-agent's question shows the same card with its `Sub-agent · title` label.
 An overlay over the whole agent pane (composer included): a near-black backdrop, opaque once open (it blurs
 what's behind while it fades), the image fit to the pane.
 
+A shared component (`src/media_viewer/`, a gpui entity fed by its host's items and media, telling it of close and
+steps), hosted by the agent block (the session's images and videos) and the Studio block (STUDIO.md §4.2).
+
 - Zoom: pinch, ⌘-scroll or scroll, `+`/`-`, around the pointer; 10 %–800 %. `0` fits, `1` is 100 %.
   Double-click toggles fit / 100 % at the pointer.
 - Pan: drag, or scroll when zoomed in.
@@ -342,7 +350,8 @@ generate_audio {
 - **Video row**: like an image tile (aspect ratio from the line, 320 pt max): the poster frame (first frame,
   `AVAssetImageGenerator`, off the main thread), a play badge and the duration. While running: a placeholder
   at the requested aspect ratio with the elapsed time and the provider's progress text.
-- **Video viewer**: the image viewer's overlay; the video is drawn by gpui (no native view): an `AVPlayer`
+- **Video viewer**: the image viewer's overlay (the same shared component, `media_viewer/player/`, in the agent and
+  Studio blocks); the video is drawn by gpui (no native view): an `AVPlayer`
   whose item feeds an `AVPlayerItemVideoOutput` of IOSurface-backed BGRA pixel buffers, each shown by gpui's
   `surface` element (contain). A poll on the main thread (8 ms while playing or settling a seek, else 100 ms)
   wakes the pane only for a newer frame (at least every 100 ms while playing), so a 24 fps clip redraws 24

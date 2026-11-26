@@ -16,8 +16,8 @@ impl GenerateAudio {
     pub(crate) fn new(media: Arc<Media>) -> Self {
         let spec = super::spec(
             "generate_audio",
-            "Make speech, a sound effect or music with the user's audio provider (ElevenLabs makes all three, OpenAI speech). The MP3 is kept with the session: a [generated att_…] line with its length (copy_attachment saves it); you don't hear it. type speech: text is what to say, voice a voice id or name (list_media_models with kind audio lists them; else the provider's default voice); sound and music: text describes it, duration in seconds; path: also save into the project (replaces what is there). Picking a model or voice: if the user named one, use it (list_media_models first when the id isn't obvious); if the choice matters (a particular voice, style or cost) and they didn't say, list_media_models, then pick and say why in one line, or ask_user with 2–4 options when they differ a lot; otherwise leave provider, model and voice out for the defaults. For anything beyond this (a model's own modes and options, video or audio inputs, video edit/extend, motion transfer): media_model_schema, then generate_media. With no provider connected, the user is asked to connect one. Music runs in the background by default (background: true for the others): the call returns at once; tell the user it's generating and keep talking, don't poll; the result arrives as a message.",
-            schema(),
+            "Make speech, a sound effect or music with the user's audio provider (ElevenLabs makes all three, OpenAI speech). The MP3 is kept with the session: a [generated att_…] line with its length (copy_attachment saves it); you don't hear it. type speech: text is what to say, voice a voice id or name (list_media_models with kind audio lists them; else the provider's default voice); sound and music: text describes it, duration in seconds; path: also save into the project (replaces what is there). Picking a model or voice: if the user named one, use it (list_media_models first when the id isn't obvious); if the choice matters (a particular voice, style or cost) and they didn't say, list_media_models, then pick and say why in one line, or ask_user with 2–4 options when they differ a lot; otherwise leave provider, model and voice out for the defaults. For anything beyond this (a model's own modes and options, video or audio inputs, video edit/extend, motion transfer): media_model_schema, then generate_media. With no provider connected, the user is asked to connect one. Music runs in the background by default (background: true for the others): the call returns at once; tell the user it's generating and keep talking, don't poll; the result arrives as a message. canvas: {name, frame?, node?, title?, style?} makes it a card on that Studio canvas (in frame, or node's new take): wired from inputs that are canvas nodes or world entity files, sized from the canvas's format, the project's style line added (style: false leaves it out); the result line says where it was placed.",
+            super::with_canvas(schema()),
         );
         Self { media, spec }
     }
@@ -48,6 +48,9 @@ impl Tool for GenerateAudio {
         &self.spec
     }
     async fn call(&self, input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
+        if input.get("canvas").is_some_and(|c| !c.is_null()) {
+            return crate::studio::place(&self.media, "generate_audio", input, cx).await;
+        }
         let kind = match choice(&input, "type", TYPES)? {
             Some("speech") => AudioType::Speech,
             Some("sound") => AudioType::Sound,

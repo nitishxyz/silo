@@ -503,7 +503,11 @@ async fn skills_commands_and_agents_are_discovered_claude_style() {
     let runtime = Runtime::new(config(root, Store::open_in_memory().unwrap(), model.clone())).await.unwrap();
     let skills = runtime.skills(Some(root));
     assert_eq!(
-        skills.iter().map(|s| (s.name.as_str(), s.description.as_str())).collect::<Vec<_>>(),
+        skills
+            .iter()
+            .filter(|s| !otto_core::skills::BUNDLED.iter().any(|(name, _)| *name == s.name))
+            .map(|s| (s.name.as_str(), s.description.as_str()))
+            .collect::<Vec<_>>(),
         [("private", "Hidden"), ("release", "Cut a release")]
     );
     let commands = runtime.commands(Some(root));

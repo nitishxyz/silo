@@ -163,6 +163,20 @@ fn mention_and_file_complete_shapes() {
         json!([{"kind": "agent", "target": "build", "range": [4, 10]}, {"kind": "file", "target": "gone.rs", "range": [0, 0], "missing": true}])
     );
     assert_eq!(serde_json::from_value::<Item>(wire).unwrap(), item);
+    // Every kind by its snake_case name (a skill reads `/name` in the text).
+    for (kind, name) in [
+        (MentionKind::Agent, "agent"),
+        (MentionKind::File, "file"),
+        (MentionKind::Model, "model"),
+        (MentionKind::Entity, "entity"),
+        (MentionKind::Canvas, "canvas"),
+        (MentionKind::Skill, "skill"),
+    ] {
+        assert_eq!(serde_json::to_value(kind).unwrap(), json!(name));
+        assert_eq!(serde_json::from_value::<MentionKind>(json!(name)).unwrap(), kind);
+    }
+    let skill = InputPart::Mention { kind: MentionKind::Skill, target: "action-choreography".into() };
+    assert_eq!(serde_json::to_value(&skill).unwrap(), json!({"type": "mention", "kind": "skill", "target": "action-choreography"}));
 }
 
 #[test]

@@ -13,6 +13,11 @@
 //! [`connect`]'s renderer loads pages for otto's `web_fetch`/`web_search`
 //! through silo's `browser_fetch` (a hidden page in the app's off-screen
 //! browser host, docs/AGENTS.md).
+//!
+//! Its [`Studio`](otto_tools::studio::Studio) bridge reads and edits Studio canvases for card runs
+//! (docs/STUDIO.md §6.2).
+
+mod studio;
 
 use std::{collections::BTreeMap, collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -120,6 +125,8 @@ pub struct Silo {
     pub terminals: Arc<dyn Terminals>,
     /// Rendered fetches for `web_fetch`/`web_search` (`browser_fetch`).
     pub renderer: Arc<dyn Renderer>,
+    /// Studio canvases for card runs (`studio.*`).
+    pub studio: Arc<dyn otto_tools::studio::Studio>,
     /// The tools clients provide through silo (`tools.list`), under their
     /// own names, listed again before every model request. Like Silo's own
     /// (`tools`) their source is [`Source::Silo`]: the grant `silo:*` takes
@@ -181,6 +188,7 @@ pub fn connect(config: Config) -> Silo {
         tools,
         terminals: Arc::new(SiloTerminals { shared: shared.clone() }),
         renderer: Arc::new(SiloRenderer { shared: shared.clone() }),
+        studio: Arc::new(studio::SiloStudio { shared: shared.clone() }),
         provided: Arc::new(SiloProvided { shared }),
     }
 }
@@ -285,8 +293,10 @@ impl Tool for SiloTool {
         let tools = self.shared.tools(&cx.cwd).await?;
         // One connection serves every session: relative paths start from
         // this session's folder, not the first caller's.
-        if matches!(self.spec.name.as_str(), "files_show" | "changes_show")
-            && let Some(input) = input.as_object_mut()
+        if matches!(
+            self.spec.name.as_str(),
+            "files_show" | "changes_show" | "studio_open" | "studio_read" | "canvas_read" | "canvas_create" | "canvas_edit"
+        ) && let Some(input) = input.as_object_mut()
         {
             input.entry("cwd").or_insert_with(|| Value::String(cx.cwd.to_string_lossy().into_owned()));
         }

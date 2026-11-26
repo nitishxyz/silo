@@ -163,7 +163,8 @@ async fn parts(cx: &Context, input: Vec<InputPart>) -> Result<(Vec<Part>, Vec<Me
     Ok((parts, mentions))
 }
 /// Text parts in a row: each its own part, or with a mention among them one part with each
-/// mention as `@target`, its range in [`Item::text`] noted and checked (an unknown agent, a missing path).
+/// mention as `@target` (a skill's `/name`), its range in [`Item::text`] noted and checked (an unknown agent,
+/// a missing path, no such skill).
 fn text_run(cx: &Context, run: Vec<InputPart>, parts: &mut Vec<Part>, mentions: &mut Vec<Mention>) -> Result<()> {
     let user = &cx.runtime.0.config.user_config_dir;
     if !run.iter().any(|p| matches!(p, InputPart::Mention { .. })) {
@@ -176,26 +177,35 @@ fn text_run(cx: &Context, run: Vec<InputPart>, parts: &mut Vec<Part>, mentions: 
     }
     let base: usize = parts.iter().map(|p| if let Part::Text { text, .. } = p { text.len() } else { 0 }).sum();
     let agents: Vec<String> = crate::agents::discover(&cx.root(), user).into_iter().map(|a| a.name).collect();
+    // A leading skill reads `/name`: not a command to expand.
+    let skill_first = matches!(run.first(), Some(InputPart::Mention { kind: MentionKind::Skill, .. }));
+    let skills = std::cell::OnceCell::new();
+    let skills = || skills.get_or_init(|| crate::skills::discover(&cx.root(), user).into_iter().map(|s| s.name).collect::<Vec<_>>());
     let models = cx.runtime.mention_models();
+    let studio = std::cell::OnceCell::new();
+    let studio = || studio.get_or_init(|| otto_tools::studio::root_for(std::path::Path::new(&cx.cwd()))).as_deref();
     let mut text = String::new();
     for part in run {
         match part {
             InputPart::Text { text: t } => text.push_str(&t),
             InputPart::Mention { kind, target } => {
                 let start = base + text.len();
-                text.push('@');
+                text.push(if kind == MentionKind::Skill { '/' } else { '@' });
                 text.push_str(&target);
                 let found = match kind {
                     MentionKind::Agent => agents.contains(&target),
                     MentionKind::File => project_path(&cx.cwd(), &target),
                     MentionKind::Model => models.as_ref().is_some_and(|m| m.resolve(&target).is_some()),
+                    MentionKind::Entity => studio().is_some_and(|root| otto_tools::studio::mention_target(root, &target).is_some()),
+                    MentionKind::Canvas => studio().is_some_and(|root| canvas_node(root, &target).is_some()),
+                    MentionKind::Skill => skills().contains(&target),
                 };
                 mentions.push(Mention { kind, range: [start, base + text.len()], missing: !found, target });
             }
             _ => {}
         }
     }
-    parts.push(Part::text(crate::commands::expand(&cx.root(), user, &text)?));
+    parts.push(Part::text(if skill_first { text } else { crate::commands::expand(&cx.root(), user, &text)? }));
     Ok(())
 }
 /// `target` is a file, or a folder when it ends in `/`, inside `cwd`.
@@ -204,9 +214,69 @@ fn project_path(cwd: &str, target: &str) -> bool {
     let inside = !target.is_empty() && relative.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir));
     inside && std::fs::metadata(std::path::Path::new(cwd).join(relative)).is_ok_and(|m| !target.ends_with('/') || m.is_dir())
 }
-/// The model's note on a user item's mentions (those found): which agents to delegate to, which paths to read,
-/// which media models to generate with (resolved through `models`).
-pub(crate) fn mention_note(mentions: &[Mention], models: Option<&dyn crate::MentionModels>) -> Option<String> {
+/// A canvas mention's canvas (`ep01-pilot`) and node (`ep01-pilot#n_3f2a9c`) from `canvas.json`, read only:
+/// the canvas, and the node when one is named (`Value::Null` for none).
+fn canvas_node(root: &std::path::Path, target: &str) -> Option<(serde_json::Value, serde_json::Value)> {
+    let (name, node) = target.split_once('#').map_or((target, None), |(c, n)| (c, Some(n)));
+    let canvas = otto_tools::studio::canvas_file(root, name)?;
+    let found = match node {
+        Some(id) => canvas["nodes"].as_array()?.iter().find(|n| n["id"] == id)?.clone(),
+        None => serde_json::Value::Null,
+    };
+    Some((canvas, found))
+}
+/// One line on a mentioned canvas or node: its kind, path, prompt and status.
+fn canvas_line(target: &str, canvas: &serde_json::Value, node: &serde_json::Value) -> String {
+    let short = |s: &str| {
+        let s = s.trim().replace('\n', " ");
+        if s.chars().count() > 300 { format!("{}…", s.chars().take(300).collect::<String>()) } else { s }
+    };
+    let name = target.split('#').next().unwrap_or(target);
+    if node.is_null() {
+        let count = canvas["nodes"].as_array().map_or(0, Vec::len);
+        let title = canvas["title"].as_str().unwrap_or(name);
+        return format!("- {target}: canvas \"{title}\", {count} nodes; canvas_read {{canvas: \"{name}\"}} shows it.");
+    }
+    let body = &node["body"];
+    let s = |k: &str| body[k].as_str().filter(|v| !v.is_empty());
+    let mut parts: Vec<String> = Vec::new();
+    match s("kind").unwrap_or("node") {
+        "gen" => {
+            let makes = s("makes").unwrap_or("image");
+            parts.push(format!("{makes} card{}", s("title").map_or_else(String::new, |t| format!(" \"{t}\""))));
+            parts.push(format!("status {}", s("status").unwrap_or("draft")));
+            if let Some(m) = s("model") {
+                parts.push(format!("model {m}"));
+            }
+            let takes = body["takes"].as_array().cloned().unwrap_or_default();
+            let picked = body["pick"].as_u64().and_then(|i| takes.get(usize::try_from(i).ok()?)).or_else(|| takes.last());
+            if let Some(path) = picked.and_then(|t| t["path"].as_str()) {
+                parts.push(format!("take {path} ({} of {})", body["pick"].as_u64().map_or(takes.len() as u64, |i| i + 1), takes.len()));
+            }
+            if let Some(p) = s("prompt") {
+                parts.push(format!("prompt \"{}\"", short(p)));
+            }
+            if let Some(e) = s("error") {
+                parts.push(format!("error: {}", short(e)));
+            }
+        }
+        "asset" => {
+            parts.push(format!("{} asset {}", s("media").unwrap_or("file"), s("path").unwrap_or("?")));
+            if let Some(p) = s("prompt") {
+                parts.push(format!("prompt \"{}\"", short(p)));
+            }
+        }
+        "note" => parts.push(format!("note \"{}\"", short(s("text").unwrap_or_default()))),
+        "entity" => parts.push(format!("world entity {} (its sheet)", s("id").unwrap_or("?"))),
+        "frame" => parts.push(format!("{} frame \"{}\"", s("role").unwrap_or("group"), s("title").unwrap_or_default())),
+        other => parts.push(other.to_owned()),
+    }
+    format!("- {target}: {}", parts.join("; "))
+}
+/// The model's note on a user item's mentions (those found): which skills to load first, which agents to delegate
+/// to, which paths to read, which media models to generate with (resolved through `models`), and the studio's
+/// entities and canvas nodes (read from the studio holding `cwd`).
+pub(crate) fn mention_note(mentions: &[Mention], models: Option<&dyn crate::MentionModels>, cwd: &str) -> Option<String> {
     let named = |kind: MentionKind| {
         let mut names: Vec<&str> = Vec::new();
         for m in mentions.iter().filter(|m| m.kind == kind && !m.missing) {
@@ -218,6 +288,16 @@ pub(crate) fn mention_note(mentions: &[Mention], models: Option<&dyn crate::Ment
     };
     let (agents, files) = (named(MentionKind::Agent), named(MentionKind::File));
     let mut lines = Vec::new();
+    match named(MentionKind::Skill).as_slice() {
+        [] => {}
+        [one] => lines.push(format!(
+            "Mentioned skills: {one}. Load it with skill {{name: \"{one}\"}} before you answer, unless it is already loaded in this conversation, and follow it."
+        )),
+        several => lines.push(format!(
+            "Mentioned skills: {}. Load each with skill {{name: \"<name>\"}} before you answer, unless it is already loaded in this conversation, and follow them.",
+            several.join(", ")
+        )),
+    }
     if let [one] = agents.as_slice() {
         lines.push(format!("Mentioned agents: {one}. Delegate the matching part with subagent {{agent:\"{one}\"}}."));
     } else if !agents.is_empty() {
@@ -244,12 +324,53 @@ pub(crate) fn mention_note(mentions: &[Mention], models: Option<&dyn crate::Ment
             media.join("; ")
         ));
     }
+    let (entities, canvases) = (named(MentionKind::Entity), named(MentionKind::Canvas));
+    if let Some(root) = (!entities.is_empty() || !canvases.is_empty()).then(|| otto_tools::studio::root_for(std::path::Path::new(cwd))).flatten() {
+        let found: Vec<String> = entities
+            .iter()
+            .filter_map(|target| otto_tools::studio::mention_target(&root, target))
+            .map(|(e, look)| {
+                // One of its named references (`characters/mara#coat`): that file and its job.
+                if let Some(look) = look {
+                    let mut line = format!("- {}, {} ({} reference {}#{}): {}", e.name, look.name, e.kind(), e.id, look.id, look.path);
+                    if let Some(defines) = &look.defines {
+                        line.push_str(&format!("; defines {defines}"));
+                    }
+                    line.push_str(&format!(
+                        ". Pass this file as a reference when generating them (a card prompt's @{}#{} wires it and states its job); entity file {}.",
+                        e.id, look.id, e.file
+                    ));
+                    return line;
+                }
+                let mut line = format!("- {} ({}): {}", e.name, e.kind(), e.file);
+                if let Some(sheet) = &e.sheet {
+                    line.push_str(&format!("; sheet {sheet}"));
+                }
+                if !e.refs.is_empty() {
+                    line.push_str(&format!("; refs {}", e.refs.join(", ")));
+                }
+                line.push_str(if e.sheet.is_some() {
+                    ". Pass the sheet (and refs that fit) as references when generating them; read the file for details."
+                } else {
+                    ". No sheet yet; read the file for details."
+                });
+                line
+            })
+            .collect();
+        if !found.is_empty() {
+            lines.push(format!("Mentioned world entities:\n{}", found.join("\n")));
+        }
+        let nodes: Vec<String> = canvases.iter().filter_map(|t| canvas_node(&root, t).map(|(canvas, node)| canvas_line(t, &canvas, &node))).collect();
+        if !nodes.is_empty() {
+            lines.push(format!("Mentioned canvases and nodes:\n{}", nodes.join("\n")));
+        }
+    }
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 /// User items with mentions get their note after the text, for the model only.
-pub(crate) fn noted(models: Option<&dyn crate::MentionModels>, mut items: Vec<Item>) -> Vec<Item> {
+pub(crate) fn noted(models: Option<&dyn crate::MentionModels>, cwd: &str, mut items: Vec<Item>) -> Vec<Item> {
     for item in &mut items {
-        if let Some(note) = mention_note(&item.mentions, models) {
+        if let Some(note) = mention_note(&item.mentions, models, cwd) {
             item.parts.push(Part::text(note));
         }
     }
@@ -386,7 +507,7 @@ async fn hand_off(cx: &Context, session: &dyn ModelSession, built: &mut std::col
             Ok((parts, mentions)) => {
                 let mut item = Item::new(next.id.clone(), Role::User, parts);
                 item.mentions = mentions;
-                let shown = noted(cx.runtime.mention_models().as_deref(), vec![item.clone()]).remove(0).parts;
+                let shown = noted(cx.runtime.mention_models().as_deref(), &cx.cwd(), vec![item.clone()]).remove(0).parts;
                 match session.steer(&next.id, shown).await {
                     Ok(true) => {
                         built.insert(next.id.clone(), item);
@@ -549,7 +670,11 @@ async fn run_inner(cx: Arc<Context>, first: QueuedInput, turn: i64, cancel: &Can
             input(&cx, queued, turn, step).await?;
         }
         let items = visible(
-            noted(cx.runtime.mention_models().as_deref(), crate::compaction::trim(cx.items().await?, live.model.info().caps.context_window)),
+            noted(
+                cx.runtime.mention_models().as_deref(),
+                &cx.cwd(),
+                crate::compaction::trim(cx.items().await?, live.model.info().caps.context_window),
+            ),
             live.model.info().caps.vision,
         );
         let items = tokio::task::spawn_blocking(move || fitted(items)).await.map_err(|e| Error::Invalid(e.to_string()))?;

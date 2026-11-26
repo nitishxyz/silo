@@ -10,6 +10,7 @@ mod probe;
 pub mod providers;
 mod schema;
 mod service;
+pub mod studio;
 mod tools;
 
 pub use catalog::{ModelEntry, Voice, handles, slug};

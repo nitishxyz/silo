@@ -565,7 +565,7 @@ async fn server_discovery_defaults_and_fork_replay() {
     let (dir, r, s, _) = setup(vec![text("answer")], "build").await;
     let projects = r.list_projects().await.unwrap();
     assert_eq!(projects.len(), 1);
-    assert_eq!(r.agents(Some(dir.path())).iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["build"]);
+    assert_eq!(r.agents(Some(dir.path())).iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["build", "studio"]);
     std::fs::create_dir_all(dir.path().join("user/agents")).unwrap();
     std::fs::write(dir.path().join("user/agents/helper.md"), "---\ndescription: Helps\n---\nHelp.").unwrap();
     let tools = r.tools(&s.id).await.unwrap();

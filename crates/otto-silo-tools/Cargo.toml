@@ -9,6 +9,7 @@ license.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 otto-tools.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 silo-client.workspace = true
 silo-proto.workspace = true
@@ -20,3 +21,7 @@ tracing.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile.workspace = true
+# tests/studio.rs: card runs end to end against a real Silo server, with a fake media provider.
+otto-llm.workspace = true
+otto-media.workspace = true
+silo-server.workspace = true

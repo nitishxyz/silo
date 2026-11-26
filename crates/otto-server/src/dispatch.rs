@@ -303,17 +303,74 @@ pub(crate) async fn dispatch(state: &State, method: Method, sink: &Sink, subs: &
         }
         Method::MediaStatus {} => {
             let media = ready.services.media.clone();
+            // Stale live catalogs are fetched behind this answer; the next status has them.
+            let behind = media.clone();
+            tokio::spawn(async move { behind.refresh_catalogs(false).await });
             blocking(move || Ok(json!(media.status()))).await
         }
         Method::MediaSetKey { provider, api_key } => {
             let media = ready.services.media.clone();
-            blocking(move || media.set_key(&provider, api_key).map(|info| json!(info)).map_err(media_error)).await
+            let added = api_key.as_deref().is_some_and(|k| !k.trim().is_empty());
+            let (behind, id) = (media.clone(), provider.clone());
+            let info = blocking(move || media.set_key(&provider, api_key).map(|info| json!(info)).map_err(media_error)).await?;
+            // A new key opens catalogs that need one (Higgsfield's); fetch it now, not at the next start.
+            if added {
+                tokio::spawn(async move { behind.refresh_catalog(&id).await });
+            }
+            Ok(info)
         }
         Method::MediaSetDefault { kind, provider, model } => {
             let media = ready.services.media.clone();
             blocking(move || media.set_default(kind, provider, model).map(|status| json!(status)).map_err(media_error)).await
         }
+        Method::MediaModels { kind, query, input, provider, refresh } => {
+            let media = &ready.services.media;
+            Ok(json!(media.models(kind, query.as_deref(), input, provider.as_deref(), refresh).await.map_err(media_error)?))
+        }
+        Method::MediaModelSchema { model, mode } => Ok(json!(ready.services.media.model_schema(&model, mode.as_deref()).await.map_err(media_error)?)),
+        Method::StudioRunCard { cwd, canvas, node } => {
+            otto_media::studio::start_card(&ready.services.media, std::path::Path::new(&cwd), &canvas, &node).await.map_err(card_error)?;
+            Ok(json!({}))
+        }
+        Method::StudioStopCard { cwd, canvas, node } => {
+            otto_media::studio::stop_card(&ready.services.media, std::path::Path::new(&cwd), &canvas, &node).await.map_err(card_error)?;
+            Ok(json!({}))
+        }
+        Method::StudioPreviewCard { cwd, canvas, node, models } => Ok(json!(
+            otto_media::studio::preview_card(&ready.services.media, std::path::Path::new(&cwd), &canvas, &node, &models).await.map_err(card_error)?
+        )),
+        Method::StudioMentions { cwd, query, limit } => {
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+            blocking(move || Ok(json!(studio_mentions(std::path::Path::new(&cwd), &query, limit)))).await
+        }
     }
+}
+/// A card problem as an error: `no_provider` keeps its code, with `data: {kind, provider?}` for the media setup card.
+fn card_error(p: otto_media::studio::Problem) -> RpcError {
+    let mut error = match p.code {
+        "not_found" => RpcError::not_found(&p.message),
+        "no_silo" => RpcError::new("no_silo", p.message.clone()),
+        "no_provider" => RpcError::new("no_provider", p.message.clone()),
+        _ => RpcError::bad_request(p.message.clone()),
+    };
+    if p.code == "no_provider" {
+        error.data = Some(json!({"kind": p.kind, "provider": p.provider}));
+    }
+    error
+}
+/// `studio.mentions`: the studio's entities and canvases matching `query` (fuzzy, as `files.complete`), or for
+/// `canvas#text` that canvas's nodes (canvas mentions of `canvas#node_id`).
+fn studio_mentions(cwd: &std::path::Path, query: &str, limit: usize) -> Vec<StudioMention> {
+    let Some(root) = otto_tools::studio::root_for(cwd) else { return Vec::new() };
+    otto_tools::studio::mentions(&root, query, limit)
+        .into_iter()
+        .map(|c| StudioMention {
+            kind: if c.entity { MentionKind::Entity } else { MentionKind::Canvas },
+            target: c.target,
+            name: c.name,
+            detail: c.detail,
+        })
+        .collect()
 }
 async fn blocking(f: impl FnOnce() -> Result<Value, RpcError> + Send + 'static) -> Result<Value, RpcError> {
     tokio::task::spawn_blocking(f).await.map_err(RpcError::internal)?

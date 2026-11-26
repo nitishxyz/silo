@@ -8,4 +8,5 @@ mod plan_usage;
 mod restart;
 mod runtime;
 mod snapshots;
+mod studio;
 mod update;

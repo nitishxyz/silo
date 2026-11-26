@@ -310,6 +310,25 @@ impl Tool for SessionTool {
                     .into_iter()
                     .find(|s| s.name == name)
                     .ok_or_else(|| ToolError::invalid("unknown skill"))?;
+                // Hidden from the model (`disable-model-invocation`): loaded only when the user mentioned it here.
+                if skill.user_only {
+                    let (id, wanted) = (self.cx.row.id.clone(), name.to_owned());
+                    let mentioned = self
+                        .cx
+                        .runtime
+                        .db(move |store| {
+                            Ok(store
+                                .items_of_role(&id, otto_llm::Role::User)?
+                                .iter()
+                                .flat_map(|i| &i.mentions)
+                                .any(|m| m.kind == otto_proto::MentionKind::Skill && !m.missing && m.target == wanted))
+                        })
+                        .await
+                        .map_err(|e| ToolError::failed(e.to_string()))?;
+                    if !mentioned {
+                        return Err(ToolError::invalid(format!("skill {name} is the user's to invoke: they mention it as /{name}")));
+                    }
+                }
                 Ok(ToolOutput::text(crate::skills::load(&skill).map_err(|e| ToolError::failed(e.to_string()))?))
             }
             _ => crate::subagents::call(&self.cx, input).await.map(ToolOutput::text).map_err(|e| ToolError::failed(e.to_string())),

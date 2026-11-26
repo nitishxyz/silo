@@ -494,6 +494,27 @@ impl Connection {
     pub async fn media_set_default(&self, kind: MediaKind, provider: Option<String>, model: Option<String>) -> Result<MediaStatus> {
         self.call_typed(Method::MediaSetDefault { kind, provider, model }).await
     }
+    /// The media catalog (`list_media_models`'s data), narrowed by `kind`, `query` and `input`.
+    pub async fn media_models(&self, kind: Option<MediaKind>, query: Option<String>, input: Option<MediaKind>) -> Result<Vec<MediaModelInfo>> {
+        self.call_typed(Method::MediaModels { kind, query, input, provider: None, refresh: false }).await
+    }
+    /// A model's input schema per mode, with its media fields.
+    pub async fn media_model_schema(&self, model: &str, mode: Option<String>) -> Result<MediaModelSchema> {
+        self.call_typed(Method::MediaModelSchema { model: model.into(), mode }).await
+    }
+    /// Run a studio card; fails `no_provider` (`data.kind`) when no provider for it is connected.
+    pub async fn studio_run_card(&self, cwd: &str, canvas: &str, node: &str) -> Result<Empty> {
+        self.call_typed(Method::StudioRunCard { cwd: cwd.into(), canvas: canvas.into(), node: node.into() }).await
+    }
+    pub async fn studio_stop_card(&self, cwd: &str, canvas: &str, node: &str) -> Result<Empty> {
+        self.call_typed(Method::StudioStopCard { cwd: cwd.into(), canvas: canvas.into(), node: node.into() }).await
+    }
+    pub async fn studio_preview_card(&self, cwd: &str, canvas: &str, node: &str, models: Vec<String>) -> Result<CardPreview> {
+        self.call_typed(Method::StudioPreviewCard { cwd: cwd.into(), canvas: canvas.into(), node: node.into(), models }).await
+    }
+    pub async fn studio_mentions(&self, cwd: &str, query: &str, limit: u32) -> Result<Vec<StudioMention>> {
+        self.call_typed(Method::StudioMentions { cwd: cwd.into(), query: query.into(), limit }).await
+    }
 }
 struct PendingGuard {
     id: u64,

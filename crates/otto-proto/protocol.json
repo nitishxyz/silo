@@ -555,6 +555,18 @@
           {
             "const": "model",
             "type": "string"
+          },
+          {
+            "const": "entity",
+            "type": "string"
+          },
+          {
+            "const": "canvas",
+            "type": "string"
+          },
+          {
+            "const": "skill",
+            "type": "string"
           }
         ]
       },
@@ -2896,6 +2908,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -3300,6 +3324,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -3787,6 +3823,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -4217,6 +4265,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -4710,6 +4770,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -5119,6 +5191,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -5525,6 +5609,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -5934,6 +6030,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -6381,6 +6489,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -6816,6 +6936,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -7400,6 +7532,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -7794,6 +7938,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -8265,6 +8421,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -8659,6 +8827,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -9122,6 +9302,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -9543,6 +9735,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -9944,6 +10148,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -10340,6 +10556,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -10766,6 +10994,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -11164,6 +11404,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -11617,6 +11869,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -12235,6 +12499,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -12840,6 +13116,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -13278,6 +13566,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -13672,6 +13972,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -14278,6 +14590,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -14679,6 +15003,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -15086,6 +15422,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -15367,6 +15715,1084 @@
         ],
         "title": "McpServer",
         "type": "object"
+      }
+    },
+    "media.model_schema": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
+          "McpScope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "type": "string"
+          },
+          "McpTransport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "stdio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "MediaFieldInfo": {
+            "properties": {
+              "many": {
+                "default": false,
+                "type": "boolean"
+              },
+              "max": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "media": {
+                "type": "string"
+              },
+              "min": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "port": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "required": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "media"
+            ],
+            "type": "object"
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MediaModeSchema": {
+            "properties": {
+              "endpoint": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "fields": {
+                "items": {
+                  "$ref": "#/$defs/MediaFieldInfo"
+                },
+                "type": "array"
+              },
+              "mode": {
+                "type": "string"
+              },
+              "price": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "schema": {}
+            },
+            "required": [
+              "mode",
+              "schema",
+              "fields"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "connected": {
+            "type": "boolean"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/MediaKind"
+          },
+          "modes": {
+            "items": {
+              "$ref": "#/$defs/MediaModeSchema"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "handle",
+          "name",
+          "kind",
+          "provider",
+          "connected",
+          "modes"
+        ],
+        "title": "MediaModelSchema",
+        "type": "object"
+      }
+    },
+    "media.models": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
+          "McpScope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "type": "string"
+          },
+          "McpTransport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "stdio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "refresh": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MediaModeInfo": {
+            "properties": {
+              "endpoint": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string"
+              },
+              "price": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "takes": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "mode",
+              "endpoint"
+            ],
+            "type": "object"
+          },
+          "MediaModelInfo": {
+            "properties": {
+              "about": {
+                "type": "string"
+              },
+              "chosen": {
+                "default": false,
+                "type": "boolean"
+              },
+              "connected": {
+                "type": "boolean"
+              },
+              "default": {
+                "default": false,
+                "type": "boolean"
+              },
+              "handle": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "inputs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "$ref": "#/$defs/MediaKind"
+              },
+              "modes": {
+                "items": {
+                  "$ref": "#/$defs/MediaModeInfo"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "price": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "provider": {
+                "type": "string"
+              },
+              "provider_name": {
+                "type": "string"
+              },
+              "takes": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "handle",
+              "id",
+              "name",
+              "kind",
+              "provider",
+              "provider_name",
+              "connected"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "items": {
+          "$ref": "#/$defs/MediaModelInfo"
+        },
+        "title": "Array_of_MediaModelInfo",
+        "type": "array"
       }
     },
     "media.set_default": {
@@ -15710,6 +17136,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -16260,6 +17698,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -16754,6 +18204,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -17281,6 +18743,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -17908,6 +19382,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -18294,6 +19780,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -18752,6 +20250,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -19168,6 +20678,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -19591,6 +21113,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -20010,6 +21544,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -20490,6 +22036,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -20876,6 +22434,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -21272,6 +22842,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -21667,6 +23249,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -22061,6 +23655,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -22831,6 +24437,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -23550,6 +25168,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -23944,6 +25574,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -24667,6 +26309,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -25081,6 +26735,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -25479,6 +27145,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -25883,6 +27561,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -26282,6 +27972,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -26680,6 +28382,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -27096,6 +28810,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -27490,6 +29216,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -28245,6 +29983,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -28786,6 +30536,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -30153,6 +31915,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -30552,6 +32326,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -30623,6 +32409,1916 @@
         },
         "title": "Array_of_SkillInfo",
         "type": "array"
+      }
+    },
+    "studio.mentions": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
+          "McpScope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "type": "string"
+          },
+          "McpTransport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "stdio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "cwd": {
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "query": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cwd"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
+              }
+            ]
+          },
+          "StudioMention": {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/MentionKind"
+              },
+              "name": {
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "target",
+              "name",
+              "detail"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "items": {
+          "$ref": "#/$defs/StudioMention"
+        },
+        "title": "Array_of_StudioMention",
+        "type": "array"
+      }
+    },
+    "studio.preview_card": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
+          "McpScope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "type": "string"
+          },
+          "McpTransport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "stdio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "canvas": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "node": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cwd",
+          "canvas",
+          "node"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "CardFile": {
+            "properties": {
+              "field": {
+                "type": "string"
+              },
+              "index": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "label": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "port": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "port",
+              "index",
+              "path",
+              "label",
+              "field"
+            ],
+            "type": "object"
+          },
+          "CardProblem": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MediaKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "CompiledCard": {
+            "properties": {
+              "files": {
+                "items": {
+                  "$ref": "#/$defs/CardFile"
+                },
+                "type": "array"
+              },
+              "input": true,
+              "mode": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "default": "",
+                "type": "string"
+              },
+              "model_name": {
+                "default": "",
+                "type": "string"
+              },
+              "notes": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool",
+              "input",
+              "provider",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "ModelFit": {
+            "properties": {
+              "fits": {
+                "type": "boolean"
+              },
+              "mode": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "model",
+              "fits"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "compiled": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CompiledCard"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CardProblem"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fits": {
+            "items": {
+              "$ref": "#/$defs/ModelFit"
+            },
+            "type": "array"
+          },
+          "ports": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "waiting": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "title": "CardPreview",
+        "type": "object"
+      }
+    },
+    "studio.run_card": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
+          "McpScope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "type": "string"
+          },
+          "McpTransport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "stdio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "canvas": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "node": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cwd",
+          "canvas",
+          "node"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "studio.stop_card": {
+      "params": {
+        "$defs": {
+          "AgentDef": {
+            "properties": {
+              "approval_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "disallowed": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "loadable": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "overrides_builtin": {
+                "default": false,
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "scope": {
+                "$ref": "#/$defs/AgentScope"
+              },
+              "tools": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "prompt",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "AgentScope": {
+            "enum": [
+              "builtin",
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "ApprovalDecision": {
+            "enum": [
+              "allow",
+              "deny",
+              "always_allow"
+            ],
+            "type": "string"
+          },
+          "ApprovalMode": {
+            "enum": [
+              "auto",
+              "ask_on_effects",
+              "ask_all"
+            ],
+            "type": "string"
+          },
+          "AuthMode": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ],
+            "type": "string"
+          },
+          "Delivery": {
+            "enum": [
+              "queue",
+              "steer",
+              "interrupt"
+            ],
+            "type": "string"
+          },
+          "Effort": {
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "InputPart": {
+            "oneOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "mime": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "image",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mime",
+                  "data_base64"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "file",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "attachment",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/MentionKind"
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "mention",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "target"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "McpOAuth": {
+            "properties": {
+              "callback_port": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "client_id": {
+                "type": "string"
+              },
+              "client_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "client_id"
+            ],
+            "type": "object"
+          },
+          "McpScope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "type": "string"
+          },
+          "McpTransport": {
+            "oneOf": [
+              {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "stdio",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "headers": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "oauth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/McpOAuth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MediaKind": {
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "MentionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "agent"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
+              }
+            ]
+          },
+          "QuestionAction": {
+            "oneOf": [
+              {
+                "const": "accept",
+                "type": "string"
+              },
+              {
+                "const": "decline",
+                "type": "string"
+              },
+              {
+                "const": "cancel",
+                "type": "string"
+              }
+            ]
+          },
+          "TextStyle": {
+            "oneOf": [
+              {
+                "const": "line",
+                "type": "string"
+              },
+              {
+                "const": "prose",
+                "type": "string"
+              },
+              {
+                "const": "markdown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "canvas": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "node": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cwd",
+          "canvas",
+          "node"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
       }
     },
     "text.polish": {
@@ -30966,6 +34662,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -31380,6 +35088,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -31811,6 +35531,18 @@
               {
                 "const": "model",
                 "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
+                "type": "string"
               }
             ]
           },
@@ -32236,6 +35968,18 @@
               },
               {
                 "const": "model",
+                "type": "string"
+              },
+              {
+                "const": "entity",
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "skill",
                 "type": "string"
               }
             ]
@@ -34039,6 +37783,18 @@
           },
           {
             "const": "model",
+            "type": "string"
+          },
+          {
+            "const": "entity",
+            "type": "string"
+          },
+          {
+            "const": "canvas",
+            "type": "string"
+          },
+          {
+            "const": "skill",
             "type": "string"
           }
         ]

@@ -28,6 +28,12 @@ pub struct Media {
     /// When each provider's catalog was last tried.
     tried: Mutex<HashMap<String, Instant>>,
     writing: Mutex<()>,
+    /// Silo's Studio blocks (docs/STUDIO.md §6.2), when otto runs with Silo.
+    studio: Mutex<Option<Arc<dyn otto_tools::studio::Studio>>>,
+    /// Cards running in this process, by `root|canvas|node`.
+    pub(crate) runs: Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
+    /// Cards a previous process left running, not yet marked stopped (kept in the runs file until they are).
+    pub(crate) orphans: Mutex<Vec<String>>,
 }
 
 impl Media {
@@ -41,7 +47,57 @@ impl Media {
     #[must_use]
     pub fn with(store: CredentialStore, state_dir: PathBuf, providers: Vec<Arc<dyn MediaProvider>>, env: Env) -> Arc<Self> {
         let (live, tried) = (Mutex::default(), Mutex::default());
-        Arc::new(Self { store, state_dir, http: crate::http::client(), providers, env, live, tried, writing: Mutex::default() })
+        Arc::new(Self {
+            store,
+            state_dir,
+            http: crate::http::client(),
+            providers,
+            env,
+            live,
+            tried,
+            writing: Mutex::default(),
+            studio: Mutex::default(),
+            runs: Mutex::default(),
+            orphans: Mutex::default(),
+        })
+    }
+
+    /// Reach Studio canvases through `studio` (Silo's): card runs and `generate_* {canvas}` place their takes.
+    pub fn set_studio(&self, studio: Arc<dyn otto_tools::studio::Studio>) {
+        *self.studio.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(studio);
+    }
+
+    #[must_use]
+    pub fn studio(&self) -> Option<Arc<dyn otto_tools::studio::Studio>> {
+        self.studio.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// `media.models`: the catalog `list_media_models` reads, as data.
+    ///
+    /// # Errors
+    /// An unknown provider.
+    pub async fn models(
+        &self,
+        kind: Option<MediaKind>,
+        query: Option<&str>,
+        input: Option<MediaKind>,
+        provider: Option<&str>,
+        refresh: bool,
+    ) -> Result<Vec<otto_proto::MediaModelInfo>, MediaError> {
+        crate::tools::list::infos(self, kind, query, input, provider, refresh).await.map_err(media_error)
+    }
+
+    /// `media.model_schema`: a model's (or one mode's) input schemas and media fields.
+    ///
+    /// # Errors
+    /// An unknown model or mode, a schema the provider won't give.
+    pub async fn model_schema(&self, model: &str, mode: Option<&str>) -> Result<otto_proto::MediaModelSchema, MediaError> {
+        crate::tools::model_schema::info(self, model, mode).await.map_err(media_error)
+    }
+
+    /// Where otto keeps its media state (defaults, catalogs, the cards it runs).
+    pub(crate) fn state_dir(&self) -> &std::path::Path {
+        &self.state_dir
     }
 
     /// The media tools: `generate_image`, `generate_video`, `generate_audio`, `list_media_models`,
@@ -205,6 +261,13 @@ impl Media {
         self.refresh(None, force).await;
     }
 
+    /// Fetch `provider`'s live catalog now (a key was just added or changed: Higgsfield's needs it).
+    pub async fn refresh_catalog(&self, provider: &str) {
+        if let Some(p) = self.provider(provider) {
+            self.refresh(Some(p.id()), true).await;
+        }
+    }
+
     /// [`Self::refresh_catalogs`] for `only` one provider, or all.
     pub(crate) async fn refresh(&self, only: Option<&str>, force: bool) {
         let stale = |p: &Arc<dyn MediaProvider>| {
@@ -253,5 +316,12 @@ fn kind_name(kind: MediaKind) -> &'static str {
         MediaKind::Image => "images",
         MediaKind::Video => "videos",
         MediaKind::Audio => "audio",
+    }
+}
+
+fn media_error(e: otto_tools::ToolError) -> MediaError {
+    match e.kind {
+        otto_tools::ToolErrorKind::InvalidInput | otto_tools::ToolErrorKind::NotFound => MediaError::invalid(e.message),
+        _ => MediaError::failed(e.message),
     }
 }

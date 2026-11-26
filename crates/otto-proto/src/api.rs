@@ -65,6 +65,10 @@ fn result_schema(method: &Method) -> Schema {
         M::AttachmentGet { .. } => schema_for!(AttachmentData),
         M::MediaStatus {} | M::MediaSetDefault { .. } => schema_for!(MediaStatus),
         M::MediaSetKey { .. } => schema_for!(MediaProviderInfo),
+        M::MediaModels { .. } => schema_for!(Vec<MediaModelInfo>),
+        M::MediaModelSchema { .. } => schema_for!(MediaModelSchema),
+        M::StudioPreviewCard { .. } => schema_for!(CardPreview),
+        M::StudioMentions { .. } => schema_for!(Vec<StudioMention>),
         M::ModelList { .. } => schema_for!(Vec<otto_llm::ModelInfo>),
         M::AuthStatus {} => schema_for!(Vec<AuthStatus>),
         M::AuthLogin { .. } => schema_for!(LoginResult),
@@ -105,7 +109,9 @@ fn result_schema(method: &Method) -> Schema {
         | M::McpRemove { .. }
         | M::McpLoginCancel { .. }
         | M::McpLogout { .. }
-        | M::ConfigSet { .. } => schema_for!(Empty),
+        | M::ConfigSet { .. }
+        | M::StudioRunCard { .. }
+        | M::StudioStopCard { .. } => schema_for!(Empty),
     }
 }
 
@@ -227,6 +233,17 @@ pub fn examples() -> Vec<Method> {
         M::MediaStatus {},
         M::MediaSetKey { provider: "fal".into(), api_key: Some("fal-example-key".into()) },
         M::MediaSetDefault { kind: MediaKind::Image, provider: Some("openai".into()), model: Some("gpt-image-2.5-flare".into()) },
+        M::MediaModels { kind: Some(MediaKind::Video), query: Some("kling".into()), input: None, provider: None, refresh: false },
+        M::MediaModelSchema { model: "seedance-2.5".into(), mode: Some("reference-to-video".into()) },
+        M::StudioRunCard { cwd: "/work/show".into(), canvas: "ep01-pilot".into(), node: "n_3f2a9c".into() },
+        M::StudioStopCard { cwd: "/work/show".into(), canvas: "ep01-pilot".into(), node: "n_3f2a9c".into() },
+        M::StudioPreviewCard {
+            cwd: "/work/show".into(),
+            canvas: "ep01-pilot".into(),
+            node: "n_3f2a9c".into(),
+            models: vec!["kling-3.0-pro".into(), "seedance-2.5".into()],
+        },
+        M::StudioMentions { cwd: "/work/show".into(), query: "mar".into(), limit: 50 },
     ]
 }
 

@@ -17,8 +17,8 @@ impl GenerateVideo {
     pub(crate) fn new(media: Arc<Media>) -> Self {
         let spec = super::spec(
             "generate_video",
-            "Make a video with the user's video provider (Gemini, xAI, Higgsfield, fal). It takes a minute or several. The video is kept with the session: a [generated att_…] line with its size and length (copy_attachment saves it); you don't see it. first_frame/last_frame: images to start or end on (project paths, att_ ids or https links); references: style or character images, where the model takes them; duration: seconds, each model's nearest allowed length (the result says what it made and what it couldn't do); path: also save into the project (replaces what is there). Picking a model: if the user named a model or provider, use it (list_media_models first when the id isn't obvious); video models differ a lot in price, length and look, so when the user didn't say, list_media_models, then pick and say why in one line, or ask_user with 2–4 options when they differ a lot in price or look; for a quick try leave provider and model out for the default. For anything beyond this (a model's own modes and options, video or audio inputs, video edit/extend, motion transfer): media_model_schema, then generate_media. With no provider connected, the user is asked to connect one. It runs in the background by default: the call returns at once; tell the user it's generating and keep talking, don't wait or poll; the result arrives as a message (background: false holds the turn).",
-            schema(),
+            "Make a video with the user's video provider (Gemini, xAI, Higgsfield, fal). It takes a minute or several. The video is kept with the session: a [generated att_…] line with its size and length (copy_attachment saves it); you don't see it. first_frame/last_frame: images to start or end on (project paths, att_ ids or https links); references: style or character images, where the model takes them; duration: seconds, each model's nearest allowed length (the result says what it made and what it couldn't do); path: also save into the project (replaces what is there). Picking a model: if the user named a model or provider, use it (list_media_models first when the id isn't obvious); video models differ a lot in price, length and look, so when the user didn't say, list_media_models, then pick and say why in one line, or ask_user with 2–4 options when they differ a lot in price or look; for a quick try leave provider and model out for the default. For anything beyond this (a model's own modes and options, video or audio inputs, video edit/extend, motion transfer): media_model_schema, then generate_media. With no provider connected, the user is asked to connect one. It runs in the background by default: the call returns at once; tell the user it's generating and keep talking, don't wait or poll; the result arrives as a message (background: false holds the turn). canvas: {name, frame?, node?, title?, style?} makes it a card on that Studio canvas (in frame, or node's new take): wired from inputs that are canvas nodes or world entity files, sized from the canvas's format, the project's style line and then its motion line added (style: false leaves both out); the result line says where it was placed.",
+            super::with_canvas(schema()),
         );
         Self { media, spec }
     }
@@ -53,6 +53,9 @@ impl Tool for GenerateVideo {
         &self.spec
     }
     async fn call(&self, input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
+        if input.get("canvas").is_some_and(|c| !c.is_null()) {
+            return crate::studio::place(&self.media, "generate_video", input, cx).await;
+        }
         let prompt = text(&input, "prompt").ok_or_else(|| ToolError::invalid("prompt must be a non-empty string"))?.to_owned();
         let aspect_ratio = choice(&input, "aspect_ratio", ASPECTS)?.map(str::to_owned);
         let resolution = choice(&input, "resolution", RESOLUTIONS)?.map(str::to_owned);

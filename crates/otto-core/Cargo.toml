@@ -27,6 +27,8 @@ tempfile.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 base64.workspace = true
 otto-silo-tools.workspace = true
+# tests/studio.rs: the studio agent sees the media tools up front.
+otto-media.workspace = true
 
 # One binary for the files in tests/it.rs (one link instead of one
 # per file); files needing a process of their own stay separate.

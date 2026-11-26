@@ -447,6 +447,56 @@ pub enum Method {
         #[serde(default)]
         model: Option<String>,
     },
+    /// The media catalog `list_media_models` reads: built-in models and live families, connected or not.
+    #[serde(rename = "media.models")]
+    MediaModels {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<MediaKind>,
+        /// Words to match in names, descriptions and modes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        /// Only models taking this media as input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<MediaKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        /// Fetch the live catalogs again.
+        #[serde(default)]
+        refresh: bool,
+    },
+    /// A model's input schema per mode and its media fields (`media_model_schema`'s data).
+    #[serde(rename = "media.model_schema")]
+    MediaModelSchema {
+        /// A handle, `provider/id` or an endpoint id.
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
+    },
+    /// Run a studio card (docs/STUDIO.md §6.2) with no session: returns at once; the card carries the state.
+    #[serde(rename = "studio.run_card")]
+    StudioRunCard { cwd: String, canvas: String, node: String },
+    /// Stop a card this otto is running (a stale `running` card is marked stopped).
+    #[serde(rename = "studio.stop_card")]
+    StudioStopCard { cwd: String, canvas: String, node: String },
+    /// The request a card compiles to now, and whether each of `models` could make it.
+    #[serde(rename = "studio.preview_card")]
+    StudioPreviewCard {
+        cwd: String,
+        canvas: String,
+        node: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        models: Vec<String>,
+    },
+    /// `@` candidates of the studio holding `cwd`: world entities and canvases, best match first; for a
+    /// `canvas#text` query, that canvas's titled nodes (frames, cards, notes, documents) matching `text`.
+    #[serde(rename = "studio.mentions")]
+    StudioMentions {
+        cwd: String,
+        #[serde(default)]
+        query: String,
+        #[serde(default = "file_limit")]
+        limit: u32,
+    },
 }
 
 impl std::fmt::Debug for Method {
@@ -539,6 +589,12 @@ pub const METHODS: &[(&str, &str)] = &[
     ("media.status", "Media providers: kinds, keys, models and each kind's default."),
     ("media.set_key", "Set or remove a media provider's own API key."),
     ("media.set_default", "Choose the provider and model a media kind uses by default."),
+    ("media.models", "List media models of the catalog (built-in and live), with modes, inputs, price and connection."),
+    ("media.model_schema", "A media model's input schema per mode and its media fields."),
+    ("studio.run_card", "Run a studio card without a session; returns at once, the card carries the state."),
+    ("studio.stop_card", "Stop a studio card's run."),
+    ("studio.preview_card", "The request a studio card compiles to, and which models could make it."),
+    ("studio.mentions", "World entities, canvases or a canvas's nodes of a studio for an @ mention."),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

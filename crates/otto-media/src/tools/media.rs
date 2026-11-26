@@ -18,8 +18,8 @@ impl GenerateMedia {
     pub(crate) fn new(media: Arc<Media>) -> Self {
         let spec = super::spec(
             "generate_media",
-            "Run any media model with all its options: video edit and extend, motion transfer, object swap, restyle, multi-reference video (images + videos + audio), keyframes, model-specific settings. Call media_model_schema {model, mode} first and pass input exactly as its schema says. Media fields take project paths, att_ ids (the user's files, earlier results) or https links; local files are uploaded for you. Each result's att_ id can be an input of the next call: chain them (an image → image-to-video → that video into motion transfer). Results come back as [generated att_…] lines like generate_image's; you see images. Videos and music run in the background by default: tell the user and keep talking; the result arrives as a message. With the provider not connected, the user is asked to connect it.",
-            json!({
+            "Run any media model with all its options: video edit and extend, motion transfer, object swap, restyle, multi-reference video (images + videos + audio), keyframes, model-specific settings. Call media_model_schema {model, mode} first and pass input exactly as its schema says. Media fields take project paths, att_ ids (the user's files, earlier results) or https links; local files are uploaded for you. Each result's att_ id can be an input of the next call: chain them (an image → image-to-video → that video into motion transfer). Results come back as [generated att_…] lines like generate_image's; you see images. Videos and music run in the background by default: tell the user and keep talking; the result arrives as a message. With the provider not connected, the user is asked to connect it. canvas: {name, frame?, node?, title?, style?} makes it a card on that Studio canvas (in frame, or node's new take): wired from inputs that are canvas nodes or world entity files, sized from the canvas's format, the project's style line added, and on video its motion line after it (style: false leaves both out); the result line says where it was placed.",
+            super::with_canvas(json!({
                 "type": "object",
                 "properties": {
                     "model": {"type": "string", "description": "A handle from list_media_models (seedance-2.5), provider/id or an endpoint id"},
@@ -30,7 +30,7 @@ impl GenerateMedia {
                 },
                 "required": ["model", "input"],
                 "additionalProperties": false
-            }),
+            })),
         );
         Self { media, spec }
     }
@@ -42,6 +42,9 @@ impl Tool for GenerateMedia {
         &self.spec
     }
     async fn call(&self, input: Value, cx: ToolCx) -> Result<ToolOutput, ToolError> {
+        if input.get("canvas").is_some_and(|c| !c.is_null()) {
+            return crate::studio::place(&self.media, "generate_media", input, cx).await;
+        }
         let name = text(&input, "model").ok_or_else(|| ToolError::invalid("model must be a model handle or id"))?;
         let mut body = input.get("input").filter(|v| v.is_object()).cloned().ok_or_else(|| ToolError::invalid("input must be an object"))?;
         let (mut model, mut named) = pick::model(&self.media, name).await?;
