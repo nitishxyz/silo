@@ -653,9 +653,11 @@ impl BrowserPane {
         self.own(silo_proto::control::OwnMode::Request);
     }
 
-    /// Take the engine state (`Take`), or claim it only if nobody holds it
-    /// (`Request`): a page this app runs serves agents' browser actions even
-    /// before the user focuses it.
+    /// Take the engine state (`Take`: the user clicked or typed in the
+    /// page), or claim it only if nobody holds it (`Request`): a page this
+    /// app runs serves agents' browser actions even before the user uses
+    /// it. Looking at a page, or focusing its pane, takes nothing from
+    /// whoever is using it (docs/PLAN.md §3.6).
     fn own(&self, mode: silo_proto::control::OwnMode) {
         if self.is_owner() {
             return;

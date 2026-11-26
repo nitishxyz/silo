@@ -108,6 +108,40 @@ pub fn lifecycle_label(lifecycle: Lifecycle, exited: Option<i32>) -> Option<Stri
 
 /// Quiet time after the last grid change before the PTY is resized.
 const SIZE_SETTLE: Duration = Duration::from_millis(120);
+/// How long after sending a new size the server's answer is waited for
+/// before a grid that still differs is put down to someone else.
+const SIZE_ANSWER: Duration = Duration::from_millis(300);
+/// The smallest a grid sized for a larger pane is scaled to fit this one;
+/// below it text stops being readable, and the grid is cut off instead.
+const MIN_FIT_SCALE: f32 = 0.6;
+
+/// How a grid sized for another client's larger pane is shown in this one
+/// (docs/PLAN.md §3.6): its text scaled down until it fits, as far as
+/// [`MIN_FIT_SCALE`], then moved so the cursor's cell stays in view.
+#[derive(Clone, Copy, Debug)]
+struct Fit {
+    /// What the grid is painted with (the pane's own grid, the one it asks
+    /// the server for, stays measured at full size).
+    metrics: CellMetrics,
+    /// How far the grid is moved left and up (points).
+    offset: (f32, f32),
+}
+
+/// The text scale at which `columns` by `rows` cells of size `cell` fill
+/// no more than `space` (all in points), from 1 down to [`MIN_FIT_SCALE`].
+fn fit_scale(space: (f32, f32), cell: (f32, f32), columns: u16, rows: u16) -> f32 {
+    let wide = space.0 / (f32::from(columns.max(1)) * cell.0.max(1.0));
+    let tall = space.1 / (f32::from(rows.max(1)) * cell.1.max(1.0));
+    let scale = wide.min(tall);
+    if scale.is_finite() { scale.clamp(MIN_FIT_SCALE, 1.0) } else { 1.0 }
+}
+
+/// How many cells a row or column of `total` cells, `visible` of them in
+/// view, is moved back so that cell `cursor` is in view: none while it is,
+/// then just enough, never past the end.
+fn fit_scroll(total: u16, visible: u16, cursor: u16) -> u16 {
+    if visible >= total { 0 } else { (cursor.saturating_add(1)).saturating_sub(visible).min(total - visible) }
+}
 
 /// Longest command line shown in a failed command's hover.
 const MAX_HOVER_COMMAND: usize = 120;
@@ -181,6 +215,10 @@ pub struct Pane {
     /// Sends `grid` once the layout settles, so held resize keys or a live
     /// window resize signal the PTY once.
     size_task: Option<Task<()>>,
+    /// When `grid` last changed: the server's answer may still be on its way.
+    resized_at: Option<Instant>,
+    /// How the applied grid is painted when it is larger than this pane.
+    fit: Option<Fit>,
     pub focus: FocusHandle,
     composition: Composition,
     input_gate: InputGate,
@@ -265,7 +303,7 @@ impl Pane {
             this.active = true;
             this.send_focus(true);
             cx.emit(PaneEvent::Activated);
-            this.own(OwnMode::Take);
+            this.own(this.own_on_use());
             cx.notify();
         })
         .detach();
@@ -315,6 +353,8 @@ impl Pane {
             content_bounds: None,
             grid: None,
             size_task: None,
+            resized_at: None,
+            fit: None,
             focus,
             composition: Composition::default(),
             input_gate: InputGate::default(),
@@ -440,6 +480,26 @@ impl Pane {
         self.info.as_ref().is_some_and(|i| i.owner.is_some() && i.owner == me)
     }
 
+    /// This client is one of several the block's size is shared between
+    /// (each typed in it lately): the size is the smallest of theirs.
+    fn shares_size(&self) -> bool {
+        let me = self.control.as_ref().map(Control::client_id);
+        self.info.as_ref().is_some_and(|i| i.sizers.iter().any(|s| Some(s.client_id) == me))
+    }
+
+    /// Who the block is sized by or with, for the badge: the others it is
+    /// shared with, else its owner.
+    fn sized_label(&self) -> String {
+        let me = self.control.as_ref().map(Control::client_id);
+        let Some(info) = &self.info else { return String::new() };
+        if self.shares_size() {
+            let others: Vec<&str> =
+                info.sizers.iter().filter(|s| Some(s.client_id) != me).map(|s| s.name.as_str()).filter(|n| !n.is_empty()).collect();
+            return if others.is_empty() { "size shared".into() } else { format!("size shared with {}", others.join(", ")) };
+        }
+        format!("sized by {}", info.owner_name.as_deref().unwrap_or("another client"))
+    }
+
     fn running(&self) -> bool {
         takes_input(self.info.as_ref())
     }
@@ -471,10 +531,27 @@ impl Pane {
         Some(checkpoint)
     }
 
-    /// Ask for size ownership: `Take` on focus and input, `Request` when
+    /// Whether the server sizes a terminal for whoever types in it
+    /// (`size_by_input`, docs/PLAN.md §3.6): this pane then takes the size
+    /// only when asked to ("Take size").
+    fn sized_by_input(&self) -> bool {
+        self.control.as_ref().is_some_and(|c| c.peer_supports(silo_proto::compat::feature::SIZE_BY_INPUT))
+    }
+
+    /// What focusing or typing in this pane asks of the block's size:
+    /// nothing of a server that sizes by input beyond owning a block
+    /// nobody owns (looking at a pane must not resize it under someone
+    /// typing in it); the size itself on an older server.
+    fn own_on_use(&self) -> OwnMode {
+        if self.sized_by_input() { OwnMode::Request } else { OwnMode::Take }
+    }
+
+    /// Ask for size ownership: `Take` for "Take size" (and, on servers
+    /// from before `size_by_input`, on focus and input), `Request` when
     /// merely visible.
     pub fn own(&mut self, mode: OwnMode) {
-        if !self.running() || (mode == OwnMode::Take && self.is_owner()) {
+        // Already this client's alone; one sharing it still has it to take.
+        if !self.running() || (mode == OwnMode::Take && self.is_owner() && !self.shares_size()) {
             return;
         }
         if self.own_requested.is_some_and(|t| t.elapsed() < Duration::from_millis(500)) {
@@ -568,7 +645,7 @@ impl Pane {
         self.send_config();
         self.send_size();
         self.own_requested = None;
-        self.own(if self.active { OwnMode::Take } else { OwnMode::Request });
+        self.own(if self.active { self.own_on_use() } else { OwnMode::Request });
         self.load_commands(cx);
         cx.notify();
         true
@@ -667,7 +744,7 @@ impl Pane {
     fn hover_gutter(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let hovered = match (self.content_bounds, self.metrics) {
             (Some(bounds), Some(metrics)) if position.x < bounds.left() + px(metrics.width) && position.y >= bounds.top() => {
-                let row = f32::from(position.y - bounds.top()) / metrics.height.max(1.0);
+                let row = (f32::from(position.y - bounds.top()) + self.fit.map_or(0.0, |f| f.offset.1)) / metrics.height.max(1.0);
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let row = row as u16;
                 self.failed_rows().into_iter().find(|&(_, y)| y == row)
@@ -686,8 +763,9 @@ impl Pane {
         if !bounds.contains(&position) {
             return None;
         }
-        let column = f32::from(position.x - bounds.left()) / metrics.width.max(1.0);
-        let row = f32::from(position.y - bounds.top()) / metrics.height.max(1.0);
+        let offset = self.fit.map_or((0.0, 0.0), |f| f.offset);
+        let column = (f32::from(position.x - bounds.left()) + offset.0) / metrics.width.max(1.0);
+        let row = (f32::from(position.y - bounds.top()) + offset.1) / metrics.height.max(1.0);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         Some((row as u16, column as u16))
     }
@@ -1084,7 +1162,10 @@ impl Pane {
 
     fn typed(&mut self, cx: &mut Context<Self>) {
         self.blink.reset();
-        self.own(OwnMode::Take);
+        // A server sizing by input does this from the input itself.
+        if !self.sized_by_input() {
+            self.own(OwnMode::Take);
+        }
         // The prediction overlay changed with the input just sent.
         cx.notify();
         let Some(vt) = self.mirror.terminal() else {
@@ -1526,8 +1607,15 @@ impl Pane {
         let grid = vt.size();
         let max_x = (f32::from(grid.columns) * f32::from(grid.cell_width) - 1.0).max(0.0);
         let max_y = (f32::from(grid.rows) * f32::from(grid.cell_height) - 1.0).max(0.0);
-        let mut x = f32::from(position.x - bounds.left()) * scale;
-        let mut y = f32::from(position.y - bounds.top()) * scale;
+        // A grid scaled to fit is painted with smaller cells, perhaps moved:
+        // back to the grid's own pixels (`grid.cell_width` a cell).
+        let (mut x, mut y) = match self.fit {
+            Some(Fit { metrics, offset }) => (
+                (f32::from(position.x - bounds.left()) + offset.0) / metrics.width.max(1.0) * f32::from(grid.cell_width),
+                (f32::from(position.y - bounds.top()) + offset.1) / metrics.height.max(1.0) * f32::from(grid.cell_height),
+            ),
+            None => (f32::from(position.x - bounds.left()) * scale, f32::from(position.y - bounds.top()) * scale),
+        };
         // Selection autoscroll while dragging above or below the grid.
         if self.dragging && matches!(action, MouseAction::Motion) {
             let cell = f32::from(grid.cell_height).max(1.0);
@@ -1646,22 +1734,67 @@ impl Pane {
 
     // ---- layout & paint ----
 
+    /// `metrics`: the pane's own, at full size, whatever it paints with.
     fn layout(&mut self, bounds: Bounds<Pixels>, metrics: CellMetrics, cx: &mut Context<Self>) {
+        // Someone else's grid is fitted to the space: fit it again.
+        if self.content_bounds.map(|b| b.size) != Some(bounds.size) && self.sized_elsewhere() {
+            cx.notify();
+        }
         self.content_bounds = Some(bounds);
         let grid = metrics.grid(f32::from(bounds.size.width), f32::from(bounds.size.height));
         if self.grid != Some(grid) {
             tracing::debug!(block = %self.block_id, columns = grid.columns, rows = grid.rows, "pane grid");
             let first = self.grid.replace(grid).is_none();
             self.mirror.set_cell_size(grid.cell_width, grid.cell_height);
+            self.resized_at = Some(Instant::now());
             if first {
                 self.send_size();
             } else {
                 self.size_task = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(SIZE_SETTLE).await;
                     let _ = this.update(cx, |this, _| this.send_size());
+                    // Still not this pane's size once the answer is in:
+                    // say whose it is.
+                    cx.background_executor().timer(SIZE_ANSWER).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
                 }));
             }
         }
+    }
+
+    /// How the applied grid is painted when another client sized it larger
+    /// than this pane: scaled down to fit, then moved to keep the cursor in
+    /// view. `None` when it fits, or is this client's own (a pane being
+    /// resized is briefly smaller than its grid: that is not refitted).
+    fn fit_for(&self, base: CellMetrics, window: &mut Window) -> Option<Fit> {
+        if !self.sized_elsewhere() || self.shares_size() {
+            return None;
+        }
+        let (bounds, grid) = (self.content_bounds?, self.grid?);
+        let applied = self.mirror.size();
+        if applied.columns <= grid.columns && applied.rows <= grid.rows {
+            return None;
+        }
+        let space = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let inside = |m: CellMetrics| f32::from(applied.columns) * m.width <= space.0 + 0.01 && f32::from(applied.rows) * m.height <= space.1 + 0.01;
+        let mut scale = fit_scale(space, (base.width, base.height), applied.columns, applied.rows);
+        let mut metrics = CellMetrics::for_window_scaled(window, scale);
+        // Cells are whole device pixels: a little smaller until it is in.
+        for _ in 0..8 {
+            if scale <= MIN_FIT_SCALE || inside(metrics) {
+                break;
+            }
+            scale = (scale * 0.97).max(MIN_FIT_SCALE);
+            metrics = CellMetrics::for_window_scaled(window, scale);
+        }
+        let cursor = self.last_frame.as_ref().map(|f| f.cursor).unwrap_or_default();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let visible = ((space.0 / metrics.width.max(1.0)).floor() as u16, (space.1 / metrics.height.max(1.0)).floor() as u16);
+        let offset = (
+            f32::from(fit_scroll(applied.columns, visible.0, cursor.column)) * metrics.width,
+            f32::from(fit_scroll(applied.rows, visible.1, cursor.row)) * metrics.height,
+        );
+        Some(Fit { metrics, offset })
     }
 
     /// Prepare the mirror's current frame off the UI thread unless it is
@@ -1779,14 +1912,22 @@ impl Pane {
         self.info.as_ref().and_then(|i| lifecycle_label(i.lifecycle, i.exited))
     }
 
-    /// The server applies another client's size to this block.
+    /// The block's size is not this pane's because of another client: one
+    /// that owns it, or one this client shares it with whose pane is smaller.
     fn sized_elsewhere(&self) -> bool {
         let applied = self.mirror.size();
-        self.status == Status::Live
-            && self.running()
-            && self.grid.is_some_and(|g| g.columns != applied.columns || g.rows != applied.rows)
-            && self.info.as_ref().is_some_and(|i| i.owner.is_some())
-            && !self.is_owner()
+        let Some(grid) = self.grid else { return false };
+        if self.status != Status::Live || !self.running() || !self.info.as_ref().is_some_and(|i| i.owner.is_some()) {
+            return false;
+        }
+        if self.shares_size() {
+            // Shared: the smallest of the panes typed in. Smaller than this
+            // one, another limits it (unless this pane just grew and the
+            // server has not answered yet).
+            let settling = self.resized_at.is_some_and(|at| at.elapsed() < SIZE_SETTLE + SIZE_ANSWER);
+            return (applied.columns < grid.columns || applied.rows < grid.rows) && !settling;
+        }
+        (grid.columns != applied.columns || grid.rows != applied.rows) && !self.is_owner()
     }
 }
 
@@ -1855,7 +1996,12 @@ fn mouse_button(button: Option<gpui::MouseButton>) -> MouseButton {
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let metrics = CellMetrics::for_window(window);
+        // The pane's own cells, which its grid is counted in; a grid sized
+        // for a larger pane is painted with smaller ones.
+        let base = CellMetrics::for_window(window);
+        self.fit = self.fit_for(base, window);
+        let metrics = self.fit.map_or(base, |fit| fit.metrics);
+        let shift = self.fit.map_or((0.0, 0.0), |fit| fit.offset);
         let card_corner = self.card_corner;
         self.metrics = Some(metrics);
         self.rendered = true;
@@ -1873,8 +2019,22 @@ impl Render for Pane {
             self.control.as_ref().and_then(|c| c.hello().granted.as_ref()).is_none_or(|g| g.rights >= silo_proto::access::Rights::Interact);
         // Another client's smaller grid: rule off and fill what is not ours.
         let applied = self.mirror.size();
-        let edge_x = self.grid.filter(|g| sized_elsewhere && applied.columns < g.columns).map(|_| px(f32::from(applied.columns) * metrics.width));
-        let edge_y = self.grid.filter(|g| sized_elsewhere && applied.rows < g.rows).map(|_| px(f32::from(applied.rows) * metrics.height));
+        // (Scaled to fit, one side may still end short of the pane's.)
+        let (used_x, used_y) = (f32::from(applied.columns) * metrics.width, f32::from(applied.rows) * metrics.height);
+        let spare = |used: f32, cell: f32, space: Option<Pixels>| space.is_some_and(|space| used + cell <= f32::from(space));
+        let space = self.content_bounds.map(|b| b.size);
+        let edge_x = self
+            .grid
+            .filter(|g| {
+                sized_elsewhere && if self.fit.is_some() { spare(used_x, base.width, space.map(|s| s.width)) } else { applied.columns < g.columns }
+            })
+            .map(|_| px(used_x));
+        let edge_y = self
+            .grid
+            .filter(|g| {
+                sized_elsewhere && if self.fit.is_some() { spare(used_y, base.height, space.map(|s| s.height)) } else { applied.rows < g.rows }
+            })
+            .map(|_| px(used_y));
         // Frosted, the card's veil already is that fill.
         let solid = self.translucency.is_none();
         let outside = || div().absolute().when(solid, |el| el.bg(rgb(theme::surface()))).border_color(rgb(theme::border()));
@@ -1998,8 +2158,15 @@ impl Render for Pane {
             div()
                 .relative()
                 .size_full()
+                // A grid moved to keep its cursor in view is cut at the pane.
+                .when(shift != (0.0, 0.0), |el| el.overflow_hidden())
                 .when_some(self.prepared.clone(), |el, prepared| {
-                    el.child(div().absolute().top_0().left_0().size_full().child(terminal_canvas(prepared, metrics, cursor, selection, overlay)))
+                    let canvas = terminal_canvas(prepared, metrics, cursor, selection, overlay);
+                    el.child(match self.fit {
+                        // As large as the grid, so none of it is masked off.
+                        Some(_) => div().absolute().left(px(-shift.0)).top(px(-shift.1)).w(px(used_x)).h(px(used_y)).child(canvas),
+                        None => div().absolute().top_0().left_0().size_full().child(canvas),
+                    })
                 })
                 .when_some(edge_x, |el, x| {
                     el.child(outside().top_0().right_0().left(x).border_l_1().map(|d| match edge_y {
@@ -2019,7 +2186,7 @@ impl Render for Pane {
                         div()
                             .absolute()
                             .left(px(metrics.width))
-                            .top(px(f32::from(row) * metrics.height))
+                            .top(px(f32::from(row) * metrics.height - shift.1))
                             .px(px(6.0))
                             .py(px(2.0))
                             .glass(4.0)
@@ -2031,7 +2198,7 @@ impl Render for Pane {
                 })
                 .when_some(trace, |el, (trace, prepared, predicted)| el.child(crate::latency::paint_probe(trace, prepared, predicted)))
                 .children(find)
-                .child(input_canvas(entity, metrics))
+                .child(input_canvas(entity, base, metrics, shift))
                 .child(
                     div()
                         .absolute()
@@ -2095,7 +2262,7 @@ impl Render for Pane {
                     )
                 })
                 .when(sized_elsewhere, |el| {
-                    let owner = self.info.as_ref().and_then(|i| i.owner_name.clone()).unwrap_or_else(|| "another client".into());
+                    let label = self.sized_label();
                     el.child(
                         div()
                             .absolute()
@@ -2108,7 +2275,7 @@ impl Render for Pane {
                             .glass(4.0)
                             .text_color(rgb(crate::surface::current().muted))
                             .text_size(px(11.0))
-                            .child(format!("sized by {owner}"))
+                            .child(label)
                             .when(can_size, |el| {
                                 el.child("·").child(
                                     div()
@@ -2132,8 +2299,10 @@ impl Render for Pane {
 }
 
 /// Reports the content bounds, hosts IME composition and registers the
-/// platform input handler.
-fn input_canvas(entity: Entity<Pane>, metrics: CellMetrics) -> impl IntoElement {
+/// platform input handler. `base`: the pane's own cells, which its grid is
+/// counted in; `metrics` and `shift`: what the grid is painted with and how
+/// far it is moved left and up (the same, and none, unless it is fitted).
+fn input_canvas(entity: Entity<Pane>, base: CellMetrics, metrics: CellMetrics, shift: (f32, f32)) -> impl IntoElement {
     canvas(
         move |bounds, window, cx| {
             let pane = entity.read(cx);
@@ -2149,13 +2318,13 @@ fn input_canvas(entity: Entity<Pane>, metrics: CellMetrics) -> impl IntoElement 
             };
             let line = window.text_system().shape_line(text.clone().into(), px(metrics.font_size), &[run], None);
             let height = px(metrics.height).min(bounds.size.height);
-            let x = (bounds.left() + px(f32::from(cursor.column) * metrics.width))
+            let x = (bounds.left() + px(f32::from(cursor.column) * metrics.width - shift.0))
                 .min((bounds.right() - line.width().min(bounds.size.width)).max(bounds.left()));
-            let y = (bounds.top() + px(f32::from(cursor.row) * metrics.height)).min((bounds.bottom() - height).max(bounds.top()));
+            let y = (bounds.top() + px(f32::from(cursor.row) * metrics.height - shift.1)).min((bounds.bottom() - height).max(bounds.top()));
             (entity, ImeLayout { text, line, origin: point(x, y), bounds, height })
         },
         move |bounds, (entity, layout), window, cx| {
-            entity.update(cx, |pane, cx| pane.layout(bounds, metrics, cx));
+            entity.update(cx, |pane, cx| pane.layout(bounds, base, cx));
             capture_drag(&entity, bounds, window);
             if !layout.text.is_empty() {
                 window.paint_quad(fill(Bounds::new(layout.origin, size(layout.line.width(), layout.height)), rgb(theme::tab_active())));
@@ -2361,6 +2530,7 @@ mod tests {
             size: TermSize::new(80, 24),
             owner: None,
             owner_name: None,
+            sizers: Vec::new(),
             owner_block: None,
             pid: None,
             browser: None,
@@ -2394,6 +2564,35 @@ mod tests {
         assert!(takes_input(Some(&info(Lifecycle::Running, None))));
         assert!(!takes_input(Some(&info(Lifecycle::Exited, Some(0)))));
         assert!(!takes_input(Some(&info(Lifecycle::Restored, None))));
+    }
+
+    #[test]
+    fn a_larger_grid_is_scaled_to_fit_down_to_a_floor() {
+        use super::{MIN_FIT_SCALE, fit_scale};
+        let cell = (8.0, 16.0);
+        // 100 columns of 8 pt fit 800 pt as they are.
+        assert!((fit_scale((800.0, 480.0), cell, 100, 30) - 1.0).abs() < f32::EPSILON);
+        // 120 columns in 800 pt: five sixths, whichever side is the tighter.
+        assert!((fit_scale((800.0, 480.0), cell, 120, 30) - 800.0 / 960.0).abs() < 1e-5);
+        assert!((fit_scale((800.0, 480.0), cell, 100, 40) - 0.75).abs() < 1e-5);
+        // Far too large: no smaller than the floor (the rest is cut off).
+        assert!((fit_scale((800.0, 480.0), cell, 400, 30) - MIN_FIT_SCALE).abs() < f32::EPSILON);
+        assert!(fit_scale((0.0, 0.0), cell, 0, 0).is_finite());
+    }
+
+    #[test]
+    fn a_grid_cut_off_is_moved_to_keep_the_cursor_in_view() {
+        use super::fit_scroll;
+        // All in view: never moved.
+        assert_eq!(fit_scroll(30, 30, 29), 0);
+        assert_eq!(fit_scroll(30, 40, 29), 0);
+        // 50 rows, 30 in view: nothing while the cursor is in the first 30,
+        // then just enough, and never past the last row.
+        assert_eq!(fit_scroll(50, 30, 0), 0);
+        assert_eq!(fit_scroll(50, 30, 29), 0);
+        assert_eq!(fit_scroll(50, 30, 30), 1);
+        assert_eq!(fit_scroll(50, 30, 49), 20);
+        assert_eq!(fit_scroll(50, 30, u16::MAX), 20);
     }
 
     #[test]

@@ -25,7 +25,7 @@ mod upload;
 
 pub use control::{
     Closed, Control, Events, IncompatibleProtocol, NotSupported, Offline, PING_EVERY, PING_TIMEOUT_IROH, PING_TIMEOUT_LOCAL, TimedOut, Unauthorized,
-    Upgrading, advertise, set_role, set_token,
+    Upgrading, advertise, set_role, set_token, set_view,
 };
 pub use data::{DataSender, DataStream};
 pub use download::download;

@@ -120,6 +120,23 @@ pub mod feature {
     /// (docs/LOGIN_SERVER.md §6). Older servers answer
     /// `method_not_found`; the login server reports them too old.
     pub const LOGIN: &str = "login";
+    /// A terminal's size follows who types in it (docs/PLAN.md §3.6): the
+    /// smallest columns and rows among the clients that sent it input
+    /// lately ([`crate::model::BlockInfo::sizers`]), with no
+    /// `session.own_block` call. Apps then take a terminal only when asked
+    /// to ("Take size"), never on focus. Older servers size a block for its
+    /// owner alone, so apps keep taking on focus and input there.
+    pub const SIZE_BY_INPUT: &str = "size_by_input";
+    /// Each app has its own view of a session: its shown tab, its focused
+    /// block and its zoom ([`crate::control::ClientHello::view`]), so one
+    /// person's clicks do not move another's. `session.changed` and
+    /// `session.view` then carry the receiver's view. Older servers keep
+    /// one view for everybody.
+    pub const VIEWS: &str = "views";
+    /// Studio blocks (`kind: studio`), the `studio.*` methods and
+    /// `studio.changed` (docs/STUDIO.md). Older servers answer
+    /// `method_not_found`; the app hides Studio there.
+    pub const STUDIO: &str = "studio";
 }
 
 /// Everything this build supports beyond protocol 1.
@@ -145,6 +162,9 @@ pub const FEATURES: &[&str] = &[
     feature::INSTANT_BLOCKS,
     feature::CONFIG,
     feature::LOGIN,
+    feature::SIZE_BY_INPUT,
+    feature::VIEWS,
+    feature::STUDIO,
 ];
 
 /// Features this build's server supports that a client advertises only

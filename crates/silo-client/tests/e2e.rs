@@ -978,3 +978,73 @@ async fn instant_blocks_body() {
     assert!(!view.blocks.iter().any(|b| b.id == "b0000cafe"));
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// Two clients with panes of different sizes on one terminal
+/// (docs/PLAN.md §3.6): looking at it and focusing it resize nothing, the
+/// program sees the size of whoever types, and with both typing the size
+/// both panes show whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_is_sized_for_whoever_types() {
+    guarded("a_terminal_is_sized_for_whoever_types", sized_for_whoever_types_body()).await;
+}
+
+async fn sized_for_whoever_types_body() {
+    let home = temp_home("typists");
+    start_server(&home).await;
+    let (a, _a_events) = connect(&home, "Silo 0.1.0 (macOS, pid 1)").await;
+    let (b, _b_events) = connect(&home, "Silo 0.1.0 (macOS, pid 2)").await;
+    let created: Created = call(&a, Method::SessionCreate { name: None, spawn: shell(), kind: BlockKind::Terminal, url: None }).await;
+    let block = created.block_id.clone();
+    let resize = |columns, rows| Method::TerminalResize { block_id: block.clone(), size: TermSize::new(columns, rows) };
+    let own = |mode| Method::OwnBlock { block_ids: vec![block.clone()], mode };
+    let grid = async |control: &Control| {
+        let info: SizeInfo = call(control, Method::TerminalSize { block_id: block.clone() }).await;
+        (info.size.columns, info.size.rows, info.owner, info.sizers)
+    };
+    let (ida, idb) = (a.client_id(), b.client_id());
+
+    // What an app does showing a block: its pane's size, and the block if
+    // nobody has it.
+    let mut ma = Mirror::new();
+    let mut sa = attach(&a, &block, &mut ma).await;
+    call_value(&a, resize(120, 40)).await;
+    call_value(&a, own(OwnMode::Request)).await;
+    assert_eq!(grid(&a).await, (120, 40, Some(ida), vec![]));
+
+    // A second app shows it in a smaller pane and focuses it there: the
+    // first one's terminal does not move.
+    let mut mb = Mirror::new();
+    let mut sb = attach(&b, &block, &mut mb).await;
+    call_value(&b, resize(100, 50)).await;
+    call_value(&b, own(OwnMode::Request)).await;
+    call_value(&b, Method::BlockFocus { block_id: block.clone() }).await;
+    assert_eq!(grid(&a).await, (120, 40, Some(ida), vec![]));
+
+    // The program sees what the typist's pane shows.
+    sa.send(&ClientData::Input(b"PS1='$ '; stty size\n".to_vec()));
+    pump_until(&mut sa, &mut ma, |m| m.screen_text().contains("\n40 120\n")).await;
+    assert_eq!(grid(&a).await, (120, 40, Some(ida), vec![ida]));
+
+    // The other types too: the size both show whole, and it stays there
+    // while they take turns.
+    sb.send(&ClientData::Input(b"stty size\n".to_vec()));
+    pump_until(&mut sb, &mut mb, |m| m.screen_text().contains("\n40 100\n")).await;
+    assert_eq!(grid(&b).await, (100, 40, Some(ida), vec![ida, idb]));
+    sa.send(&ClientData::Input(b"stty size\n".to_vec()));
+    pump_until(&mut sa, &mut ma, |m| m.screen_text().matches("\n40 100\n").count() == 2).await;
+    assert_eq!(grid(&a).await, (100, 40, Some(ida), vec![ida, idb]));
+    let view: SessionView = call(&a, Method::SessionView { session_id: created.session_id.clone() }).await;
+    let info = view.blocks.iter().find(|i| i.id == block).unwrap();
+    assert_eq!(info.sizers.iter().map(|s| (s.client_id, s.name.as_str())).collect::<Vec<_>>(), [(ida, "Silo"), (idb, "Silo")]);
+
+    // "Take size": the first app's own again, alone.
+    call_value(&a, own(OwnMode::Take)).await;
+    assert_eq!(grid(&a).await, (120, 40, Some(ida), vec![ida]));
+    // The second leaves: nothing of its is left behind.
+    drop(sb);
+    drop(b);
+    sa.send(&ClientData::Input(b"stty size\n".to_vec()));
+    pump_until(&mut sa, &mut ma, |m| m.screen_text().contains("\n40 120\n$")).await;
+    assert_eq!(grid(&a).await, (120, 40, Some(ida), vec![ida]));
+    call_value(&a, Method::ServerShutdown { force: false }).await;
+}

@@ -219,6 +219,7 @@ async fn fake_old(
         size: TermSize::new(80, 24),
         owner: None,
         owner_name: None,
+        sizers: Vec::new(),
         owner_block: None,
         pid: None,
         browser: None,
@@ -251,6 +252,7 @@ async fn fake_old(
         revision: 1,
         created_at: 0,
         parked: Vec::new(),
+        views: Default::default(),
     };
     let blocks = vec![handoff::Record { info, pty: Some(record) }];
     let transfer = handoff::Transfer { server_id: "fake".into(), sessions: vec![session], blocks, browsers: Vec::new(), channel };

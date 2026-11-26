@@ -69,6 +69,14 @@ pub struct ClientHello {
     /// human's own: they need no approval.
     #[serde(default)]
     pub role: ClientRole,
+    /// An app's id for its own view of every session: its shown tab, its
+    /// focused block and its zoom ([`crate::compat::feature::VIEWS`]). The
+    /// same id on a later connection comes back to the same view. Letters,
+    /// digits, `-` and `_`, at most 64. Clients without one (the CLI,
+    /// scripts) see and move the view of the user's most recently active
+    /// app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -103,6 +111,7 @@ impl ClientHello {
             device: None,
             grant: None,
             role: ClientRole::Cli,
+            view: None,
         }
     }
 }
@@ -186,7 +195,10 @@ pub struct ServerInfo {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum OwnMode {
-    /// Become the owner, displacing any current owner.
+    /// Become the owner, displacing any current owner and everyone sharing
+    /// the size: an explicit "take the size". Typing needs no call: the
+    /// server sizes a terminal for whoever types in it
+    /// ([`crate::compat::feature::SIZE_BY_INPUT`]).
     #[default]
     Take,
     /// Become the owner only if the block has none.
@@ -1697,6 +1709,11 @@ pub struct SizeInfo {
     pub size: TermSize,
     pub owner: Option<ClientId>,
     pub desired: Vec<DesiredSize>,
+    /// The clients whose sizes `size` is the smallest of: those that typed
+    /// in the block lately, `owner` first. Empty when nobody typed: the
+    /// owner's size applies then.
+    #[serde(default)]
+    pub sizers: Vec<ClientId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

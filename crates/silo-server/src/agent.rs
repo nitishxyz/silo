@@ -39,6 +39,7 @@ impl AgentBlock {
         let state = info.agent.take().ok_or_else(|| anyhow::anyhow!("agent block {} has no state", info.id))?;
         info.owner = None;
         info.owner_name = None;
+        info.sizers.clear();
         Ok(Self::new(info, state))
     }
 

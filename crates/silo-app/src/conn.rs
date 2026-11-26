@@ -113,6 +113,27 @@ pub fn client_name() -> String {
     format!("Silo {} (macOS, pid {})", env!("CARGO_PKG_VERSION"), std::process::id())
 }
 
+/// This install's id for its own view of every session
+/// (`ClientHello::view`): which tab it shows, where its focus is. Made
+/// once and kept in `$SILO_HOME/view-id`, so each Mac comes back to where
+/// it was on every host; a file that cannot be written gives an id for
+/// this run only.
+#[must_use]
+pub fn view_id(home: &Path) -> String {
+    let path = home.join("view-id");
+    let saved = std::fs::read_to_string(&path).ok().map(|id| id.trim().to_owned()).filter(|id| valid_view_id(id));
+    saved.unwrap_or_else(|| {
+        let id = format!("{:016x}", rand::random::<u64>());
+        let _ = std::fs::create_dir_all(home);
+        let _ = std::fs::write(&path, &id);
+        id
+    })
+}
+
+fn valid_view_id(id: &str) -> bool {
+    (8..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn server_exe_path() -> PathBuf {
     if let Some(path) = std::env::var_os("SILO_SERVER_EXE") {
         return path.into();
@@ -709,6 +730,21 @@ fn quit_requested(transport: &Transport, pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_view_id_is_made_once_and_kept() {
+        let home = std::env::temp_dir().join(format!("silo-view-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let id = view_id(&home);
+        assert!(valid_view_id(&id), "{id}");
+        assert_eq!(view_id(&home), id, "the same on the next launch");
+        // A damaged file is replaced, never sent.
+        std::fs::write(home.join("view-id"), "not an id!\n").unwrap();
+        let fresh = view_id(&home);
+        assert!(valid_view_id(&fresh) && fresh != id);
+        assert_eq!(view_id(&home), fresh);
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     fn local(name: &str) -> (PathBuf, Transport) {
         let home = std::env::temp_dir().join(format!("silo-quit-{name}-{}", std::process::id()));

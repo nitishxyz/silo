@@ -35,6 +35,7 @@ pub mod tools;
 pub mod trash;
 pub mod tunnel;
 pub mod upgrade;
+pub mod views;
 
 use std::{
     os::fd::AsFd,

@@ -213,6 +213,8 @@ fn main() {
     // Browsers no window shows run off screen (`browser_host.rs`).
     silo_client::advertise(silo_proto::compat::feature::BROWSER_HOST);
     let home = silo_proto::paths::home();
+    // Its shown tab, focus and zoom are this app's own on every server.
+    silo_client::set_view(Some(conn::view_id(&home)));
     let log = app_log::AppLog::open(&home).map(std::sync::Arc::new);
     {
         use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};

@@ -511,6 +511,14 @@ impl Lifecycle {
     }
 }
 
+/// A client sharing a terminal's size ([`BlockInfo::sizers`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Sizer {
+    pub client_id: ClientId,
+    /// Its short client name, as [`BlockInfo::owner_name`].
+    pub name: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct BlockInfo {
     pub id: BlockId,
@@ -532,6 +540,11 @@ pub struct BlockInfo {
     /// The owner's short client name (`Silo`, `silo cli`), with the
     /// paired device's name appended for remote owners.
     pub owner_name: Option<String>,
+    /// Set while several clients share a terminal's size (each typed in it
+    /// lately): all of them, `owner` first. `size` is then the smallest
+    /// columns and rows among theirs. Empty when one client sizes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sizers: Vec<Sizer>,
     /// The block that started this one with `block.spawn` (e.g. an agent
     /// block running a command), for the block's whole life, shown or
     /// parked: closing that block closes this one, and apps park rather

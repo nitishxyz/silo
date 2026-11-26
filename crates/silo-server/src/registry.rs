@@ -151,10 +151,15 @@ pub struct Session {
     /// Blocks in no layout, oldest first.
     #[serde(default)]
     pub parked: Vec<Parked>,
+    /// Each app's own shown tab, focus and zoom (see [`crate::views`]);
+    /// `active_window` and the windows' `focused`, `history` and `zoomed`
+    /// hold the view of whoever acted last.
+    #[serde(default)]
+    pub views: crate::views::Views,
 }
 
 impl Session {
-    fn info(&self) -> SessionInfo {
+    pub(crate) fn info(&self) -> SessionInfo {
         SessionInfo {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -213,6 +218,9 @@ pub struct ClientEntry {
     /// The user's last input, ownership take or focus through it: forwarded
     /// `app.*` requests go to the most recently active app.
     pub active_at: Option<Instant>,
+    /// The key of its own view of every session (`crate::views::key`), for
+    /// a client whose hello named one.
+    pub view: Option<String>,
 }
 
 impl ClientEntry {
@@ -233,6 +241,7 @@ impl ClientEntry {
             tty: false,
             streams: HashMap::new(),
             active_at: None,
+            view: None,
         }
     }
 
@@ -353,6 +362,9 @@ pub struct Registry {
     pub provided: Vec<crate::tools::Provided>,
     /// Forwarded tool calls waiting for their provider's `tools.reply`.
     pub tool_calls: HashMap<String, crate::tools::Pending>,
+    /// The view the sessions' own fields hold: that of the client that
+    /// acted last (see [`crate::views`]).
+    pub(crate) held_view: Option<String>,
 }
 
 fn new_id(prefix: char) -> String {
@@ -392,6 +404,7 @@ impl Registry {
             agent_closed: None,
             provided: Vec::new(),
             tool_calls: HashMap::new(),
+            held_view: None,
         }
     }
 
@@ -411,6 +424,10 @@ impl Registry {
         for id in done {
             reg.kill_block(&id);
             reg.remove_block(&id);
+        }
+        // Views saved with the tree name only what the restored tree has.
+        for session in &mut reg.sessions {
+            session.reconcile_views();
         }
         reg
     }
@@ -602,19 +619,42 @@ impl Registry {
             // What clients were last told, whichever change sent it.
             self.attention = sessions.iter().map(|s| (s.id.clone(), s.attention)).collect();
         }
+        // A changed session goes to each app as its own view shows it
+        // (`crate::views`); clients without one get the view of the user's
+        // most recently active app.
+        let changed = match &event {
+            Event::SessionChanged { view } => Some(view.clone()),
+            _ => None,
+        };
+        let proxy = changed.as_ref().and_then(|_| self.proxy_view());
+        let mut own_frames: HashMap<String, Frame> = HashMap::new();
         let message = ServerMessage::Event { seq: self.seq, event: Box::new(event) };
         let Ok(frame) = Frame::json(kind::CONTROL, &message) else {
             return;
         };
         for (&id, client) in self.clients.iter_mut().filter(|(id, c)| visibility.admits(**id, c) && c.supports(needs)) {
             let Some(sink) = &client.events else { continue };
-            let frame = match &summaries {
-                Some(sessions) if rights_on(&client.principal, On::Server).is_none() => {
+            let frame = match (&summaries, &changed) {
+                (Some(sessions), _) if rights_on(&client.principal, On::Server).is_none() => {
                     let sessions = sessions.iter().filter(|s| sees_session(&client.principal, &s.id)).cloned().collect();
                     let message = ServerMessage::Event { seq, event: Box::new(Event::SessionsChanged { sessions }) };
                     let Ok(frame) = Frame::json(kind::CONTROL, &message) else { continue };
                     frame
                 }
+                (_, Some(view)) => match client.view.as_ref().or(proxy.as_ref()) {
+                    Some(key) if !own_frames.contains_key(key) => {
+                        let mut view = view.clone();
+                        if let Some(session) = self.sessions.iter().find(|s| s.id == view.session.id) {
+                            view.session = session.info_for(Some(key));
+                        }
+                        let message = ServerMessage::Event { seq, event: Box::new(Event::SessionChanged { view }) };
+                        let Ok(frame) = Frame::json(kind::CONTROL, &message) else { continue };
+                        own_frames.insert(key.clone(), frame.clone());
+                        frame
+                    }
+                    Some(key) => own_frames[key].clone(),
+                    None => frame.clone(),
+                },
                 _ => frame.clone(),
             };
             let overflow = sink.queued.load(std::sync::atomic::Ordering::Acquire) > EVENT_BACKLOG;
@@ -775,6 +815,14 @@ impl Registry {
         Ok(SessionView { session: session.info(), blocks, status, watchers: self.watchers(&session.id) })
     }
 
+    /// [`Self::view`] as `client` sees it: its own shown tab, focus and
+    /// zoom (see [`crate::views`]).
+    pub fn view_for(&self, client: ClientId, id: &str) -> Result<SessionView, RpcError> {
+        let mut view = self.view(id)?;
+        view.session = self.session(id)?.info_for(self.view_key(client).as_deref());
+        Ok(view)
+    }
+
     pub fn block_info(&self, id: &str) -> Option<BlockInfo> {
         self.blocks.get(id).and_then(Block::info)
     }
@@ -865,6 +913,7 @@ impl Registry {
             size,
             owner: None,
             owner_name: None,
+            sizers: Vec::new(),
             owner_block: None,
             pid: None,
             browser: None,
@@ -909,6 +958,7 @@ impl Registry {
     }
 
     fn session_changed(&mut self, si: usize) {
+        self.sync_views(si);
         self.sessions[si].revision += 1;
         self.mark_dirty(None);
         let id = self.sessions[si].id.clone();
@@ -940,6 +990,7 @@ impl Registry {
             revision: 1,
             created_at: now_ms(),
             parked: Vec::new(),
+            views: crate::views::Views::new(),
         });
         self.sessions_changed();
         let si = self.sessions.len() - 1;
@@ -1055,6 +1106,7 @@ impl Registry {
             size: size.filter(|s| s.columns > 0 && s.rows > 0).unwrap_or(PARKED_SIZE),
             owner: None,
             owner_name: None,
+            sizers: Vec::new(),
             owner_block: Some(owner.to_owned()),
             pid: None,
             browser: None,
@@ -1914,6 +1966,7 @@ mod tests {
             revision: 1,
             created_at: 0,
             parked: Vec::new(),
+            views: Default::default(),
         });
         let client = reg.add_client("test".into(), false);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2263,6 +2316,7 @@ mod tests {
             size: TermSize::new(80, 24),
             owner: None,
             owner_name: None,
+            sizers: Vec::new(),
             owner_block: None,
             pid: None,
             browser: None,

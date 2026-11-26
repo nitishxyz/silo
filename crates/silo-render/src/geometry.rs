@@ -98,10 +98,23 @@ pub struct CellMetrics {
 impl CellMetrics {
     /// Derive the grid from the same GPUI font used to paint terminal glyphs.
     pub fn for_window(window: &mut gpui::Window) -> Self {
+        Self::for_window_scaled(window, 1.0)
+    }
+
+    /// [`Self::for_window`] with the font at `text_scale` times its
+    /// configured size: for showing a grid sized for a larger pane whole
+    /// in a smaller one. Never for the grid a pane asks for itself.
+    pub fn for_window_scaled(window: &mut gpui::Window, text_scale: f32) -> Self {
         let scale = window.scale_factor().max(0.5);
         let (font_size, width_scale, width_offset, height_scale, height_offset) = {
             let settings = settings();
-            (settings.size, settings.width_scale, settings.width_offset, settings.height_scale, settings.height_offset)
+            (
+                settings.size * text_scale,
+                settings.width_scale,
+                settings.width_offset * text_scale,
+                settings.height_scale,
+                settings.height_offset * text_scale,
+            )
         };
         let run = gpui::TextRun {
             len: 1,

@@ -163,21 +163,41 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
 - **Different build:** the server rejects the hello. The app shows "Different server build" with **Upgrade Server**,
   which hot-upgrades the running server in place (§5), keeping every session.
 
-### 3.6 Terminal size and multiple clients: decided (block ownership)
+### 3.6 Terminal size and multiple clients: decided (whoever types)
 
-- Each block has an owner client. Every client always reports its desired size and theme; the server stores the
-  latest per client.
-- The applied PTY size and theme are the owner's. If the block is unowned, the latest desired size is applied.
-- Ownership:
-  - **The GPUI app takes ownership** (`own_block mode=take`) of the blocks it displays when the user focuses or
-    types in them. That's the "latest-active wins" behaviour, made explicit.
-  - **Passive clients** (CLI `attach --watch`, a phone viewer, an agent) use `mode=request`: they only get ownership
-    if the block has none.
-  - **When the owner disconnects or disowns**, ownership goes to the most recently active remaining candidate.
-- Non-owners render the owner's grid at their own font size: clipped or letterboxed, with a subtle "sized by
-  <client>" badge and a one-click "take size".
-- Reason: one PTY can only have one size, and tmux's "smallest wins" punishes the big screen. Explicit ownership
-  is predictable and also settles the theme question.
+One PTY has one size. It follows the people typing in the block, never who is looking at it.
+
+- Every client always reports its desired size and theme; the server stores the latest per client.
+- **The size is the smallest columns and the smallest rows among the clients that typed in the block lately**
+  (`block.rs`, `sizers_after`, `SIZER_WINDOW` = 30 s):
+  - One person typing: their own size, on whichever machine they type.
+  - Two people typing in the same terminal: what both panes show whole. Neither reflows under the other.
+  - The set is looked at only when input arrives (or a typing client's pane changes size), never on a timer or on
+    focus. Someone idle leaves it at the other's next keystroke; if everybody goes quiet, nothing changes.
+  - The server does this from the input itself: no call from the client, so no client can get it wrong. Input is
+    what goes to the program over a client's data stream: keys, pastes, clicks, the wheel. Focus reports (mode 1004)
+    and the pointer merely passing over a pane (buttonless motion, mode 1003) are not, and neither is
+    `terminal.send` (scripts and agents never size a block).
+- **Nobody typed yet:** the first client that shows the block gets it (`own_block mode=request`), at its size.
+- **"Take size"** (`own_block mode=take`) is the explicit override: that client alone, whoever typed before. The
+  app sends it only from that button; `silo attach` sends it when it attaches to type.
+- **When a client disconnects or disowns**, the others typing keep the block (it grows back to what they share);
+  with none left, ownership goes to the most recent remaining candidate.
+- `BlockInfo.owner` is who the size is attributed to (the first of those sharing it); `BlockInfo.sizers` names
+  everyone while it is shared. The theme follows the last client that typed (the driver), as before.
+- A pane whose grid is someone else's:
+  - smaller than the pane: ruled off, the rest filled;
+  - larger: the text is scaled down until the grid fits, as far as 60 %, then cut off around the cursor
+    (`pane.rs`, `Fit`);
+  - with a badge, "sized by <client>" or "size shared with <client>", and a one-click "Take size".
+- **Browser blocks** have an owner too (whose engine's state is the block's, PHASE6): the app takes one when the
+  user clicks or types in the page, and only claims an unowned one on focus.
+- History: until `size_by_input` the app took a block (`mode=take`) whenever a pane gained focus. Focus was shared
+  (§3.8), so one person's click made the other's app take, and resize, the terminal. Apps still do that against
+  servers without the feature.
+- Why smallest, not last typist: with two people in one terminal, "last typist wins" reflows it at every
+  handover. tmux's objection ("smallest punishes the big screen") does not apply here: only people typing in
+  that block count, not everyone attached to the session.
 
 ### 3.7 Persistence
 
@@ -189,6 +209,27 @@ No version numbers and no fallbacks. Every hello carries `BUILD`, a compile-time
   - The same files serve hot upgrades.
 - **Client:** a disk cache per server (session tree plus last snapshot per block), for instant UI on launch and
   offline display.
+
+### 3.8 Views: each app's own tab, focus and zoom
+
+The tree is shared: tabs, splits, ratios, floats, parked blocks. Where each person is looking is not.
+
+- A **view** is one app's shown tab, the focused block of each tab (with its focus history) and each tab's zoom.
+  An app names its view in the hello (`ClientHello.view`, feature `views`): an id made once per install
+  (`$SILO_HOME/view-id`), so a Mac comes back to where it was, on every server. All windows of one app share it.
+- `session.changed` and `session.view` carry the receiver's own view; the wire shape is unchanged
+  (`SessionInfo.active_window`, `WindowInfo.focused`, `.zoomed`). An app keeps following "the server's focus": it
+  is only ever told its own.
+- **Clients without a view** (the CLI, scripts, Lua, agents, apps from before) see and move the view of the
+  user's most recently active app, the rule `app.*` requests already use. `silo split` typed in a pane focuses
+  the new block in the app it was typed in, and nowhere else.
+- Server side (`views.rs`): a session's own fields hold the view of whoever acted last; `Registry::enter` loads
+  the caller's before a layout call, and every other view is brought back in line with the tree after each
+  change (a closed block: that view's own previous block; a closed tab: where the closer is).
+- Views are saved with the tree. A session keeps those of connected apps plus the 8 most recently used others.
+- A guest's view (a share link, a paired device with a grant) is keyed under its grant: it cannot name the
+  owner's.
+- Not built: "Follow <name>", which would show another view's tab and focus on purpose.
 
 ---
 

@@ -25,6 +25,7 @@ fn info(id: &str, size: TermSize) -> BlockInfo {
         size,
         owner: None,
         owner_name: None,
+        sizers: Vec::new(),
         owner_block: None,
         pid: None,
         browser: None,
@@ -627,5 +628,104 @@ async fn focus_reports_do_not_take_the_terminal() {
         })
         .collect();
     assert_eq!(typed, [0x0011_1111], "typing does take it");
+    block.send(BlockMsg::Shutdown);
+}
+
+/// A block's size follows who types in it (docs/PLAN.md §3.6): one typist
+/// gets its own size, two share the smallest columns and rows, and looking
+/// (attaching, asking, resizing a pane nobody types in) changes nothing.
+#[tokio::test]
+async fn a_block_is_sized_for_whoever_types_in_it() {
+    use silo_proto::control::{OwnMode, SizeInfo};
+    let (block, _notes) = spawn("b-sizers", TermSize::new(80, 24), "cat");
+    let attach = |sub_id, client_id| {
+        let (tx, rx) = unbounded_channel();
+        let sink = Sink::new(tx);
+        block.send(BlockMsg::Attach(Box::new(Attach { sub_id, client_id, resume: None, sink: sink.clone(), remote: false })));
+        Client { sink, rx }
+    };
+    let _a = attach(1, 3);
+    let _b = attach(2, 4);
+    let desired = |client_id: u64, columns, rows| BlockMsg::Desired {
+        client_id,
+        client_name: format!("client {client_id}"),
+        label: format!("c{client_id}"),
+        size: TermSize::new(columns, rows),
+    };
+    let size = async || -> SizeInfo {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        block.send(BlockMsg::SizeInfo { reply });
+        rx.await.unwrap()
+    };
+    let grid = |info: &SizeInfo| (info.size.columns, info.size.rows);
+    let key = |sub_id| BlockMsg::StreamInput { sub_id, bytes: b"x".to_vec() };
+
+    // Unowned: the first pane to ask is the owner, at its size.
+    block.send(desired(3, 120, 40));
+    block.send(BlockMsg::Own { client_id: 3, mode: OwnMode::Request });
+    let info = size().await;
+    assert_eq!((grid(&info), info.owner, info.sizers.clone()), ((120, 40), Some(3), vec![]));
+
+    // Another pane showing it, focused or not, changes nothing.
+    block.send(desired(4, 100, 50));
+    block.send(BlockMsg::Own { client_id: 4, mode: OwnMode::Request });
+    block.send(BlockMsg::StreamInput { sub_id: 2, bytes: b"\x1b[I".to_vec() });
+    // Nor does its pointer passing over the pane (any-motion mouse tracking).
+    block.send(BlockMsg::StreamInput { sub_id: 2, bytes: b"\x1b[<35;10;5M".to_vec() });
+    let info = size().await;
+    assert_eq!((grid(&info), info.owner), ((120, 40), Some(3)));
+
+    // It types: the block is its size now, the first pane's no longer counts.
+    block.send(key(2));
+    let info = size().await;
+    assert_eq!((grid(&info), info.owner, info.sizers.clone()), ((100, 50), Some(4), vec![4]));
+
+    // Both typing: what both show whole, attributed to the one there first.
+    block.send(key(1));
+    let info = size().await;
+    assert_eq!((grid(&info), info.owner, info.sizers.clone()), ((100, 40), Some(4), vec![4, 3]));
+    assert_eq!(block.info.lock().unwrap().sizers.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["c4", "c3"]);
+
+    // Either pane resized: the shared size follows.
+    block.send(desired(3, 90, 45));
+    assert_eq!(grid(&size().await), (90, 45));
+    block.send(desired(4, 95, 30));
+    assert_eq!(grid(&size().await), (90, 30));
+
+    // "Take size": that client alone, whoever typed before.
+    block.send(BlockMsg::Own { client_id: 4, mode: OwnMode::Take });
+    let info = size().await;
+    assert_eq!((grid(&info), info.owner, info.sizers.clone()), ((95, 30), Some(4), vec![4]));
+    assert!(block.info.lock().unwrap().sizers.is_empty(), "one sizer is just the owner");
+    // The other's pane no longer counts until it types again.
+    block.send(desired(3, 60, 20));
+    assert_eq!(grid(&size().await), (95, 30));
+    block.send(key(1));
+    assert_eq!(grid(&size().await), (60, 20));
+
+    // One of two leaves: the block grows back to the other's size.
+    block.send(BlockMsg::ClientGone { client_id: 3 });
+    let info = size().await;
+    assert_eq!((grid(&info), info.owner, info.sizers.clone()), ((95, 30), Some(4), vec![4]));
+    // The last one leaves: unowned, at the size it had.
+    block.send(BlockMsg::ClientGone { client_id: 4 });
+    let info = size().await;
+    assert_eq!((grid(&info), info.owner, info.sizers.clone()), ((95, 30), None, vec![]));
+    block.send(BlockMsg::Shutdown);
+}
+
+/// A client that types without ever saying how big its pane is (a script
+/// on a data stream) sizes nothing.
+#[tokio::test]
+async fn input_without_a_size_resizes_nothing() {
+    use silo_proto::control::SizeInfo;
+    let (block, _notes) = spawn("b-nosize", TermSize::new(80, 24), "cat");
+    let (tx, _rx) = unbounded_channel();
+    block.send(BlockMsg::Attach(Box::new(Attach { sub_id: 1, client_id: 9, resume: None, sink: Sink::new(tx), remote: false })));
+    block.send(BlockMsg::StreamInput { sub_id: 1, bytes: b"x".to_vec() });
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    block.send(BlockMsg::SizeInfo { reply });
+    let info: SizeInfo = rx.await.unwrap();
+    assert_eq!((info.size.columns, info.size.rows, info.owner, info.sizers), (80, 24, None, vec![]));
     block.send(BlockMsg::Shutdown);
 }

@@ -33,25 +33,27 @@ pub fn restart_requested() -> bool {
     RESTART.load(Ordering::SeqCst)
 }
 
-pub async fn handle(server: &Server, _client_id: u64, method: Method) -> Result<Value, RpcError> {
+pub async fn handle(server: &Server, client_id: u64, method: Method) -> Result<Value, RpcError> {
+    // The registry acting as this client: its own shown tab and focus (`crate::views`).
+    let layout = || {
+        let mut reg = server.registry.lock().unwrap();
+        reg.enter(client_id);
+        reg
+    };
     match method {
-        Method::WindowStep { session_id, delta } => window_step(&mut server.registry.lock().unwrap(), &session_id, delta)?,
-        Method::BlockFocusStep { block_id, delta } => focus_step(&mut server.registry.lock().unwrap(), &block_id, delta)?,
-        Method::BlockFocusDir { block_id, direction } => focus_dir(&mut server.registry.lock().unwrap(), &block_id, direction)?,
+        Method::WindowStep { session_id, delta } => window_step(&mut layout(), &session_id, delta)?,
+        Method::BlockFocusStep { block_id, delta } => focus_step(&mut layout(), &block_id, delta)?,
+        Method::BlockFocusDir { block_id, direction } => focus_dir(&mut layout(), &block_id, direction)?,
         Method::LayoutGrow { block_id, delta } => {
             if !delta.is_finite() || delta.abs() >= 1.0 {
                 return Err(RpcError::bad_request("delta must be between -1 and 1"));
             }
-            resize(&mut server.registry.lock().unwrap(), &block_id, |layout| {
-                layout_ops::resize_share(layout, &block_id, delta).into_iter().collect()
-            })?;
+            resize(&mut layout(), &block_id, |layout| layout_ops::resize_share(layout, &block_id, delta).into_iter().collect())?;
         }
         Method::LayoutEdge { block_id, direction } => {
-            resize(&mut server.registry.lock().unwrap(), &block_id, |layout| {
-                layout_ops::move_edge(layout, &block_id, direction).into_iter().collect()
-            })?;
+            resize(&mut layout(), &block_id, |layout| layout_ops::move_edge(layout, &block_id, direction).into_iter().collect())?;
         }
-        Method::LayoutEqualize { window_id } => equalize(&mut server.registry.lock().unwrap(), &window_id)?,
+        Method::LayoutEqualize { window_id } => equalize(&mut layout(), &window_id)?,
         // The control loop stops the server once this is answered.
         Method::ServerRestart { .. } => {
             tracing::info!("restart requested");
@@ -201,6 +203,7 @@ mod tests {
             revision: 1,
             created_at: 0,
             parked: Vec::new(),
+            views: Default::default(),
         });
         reg
     }

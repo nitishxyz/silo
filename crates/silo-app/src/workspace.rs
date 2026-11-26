@@ -2219,6 +2219,7 @@ fn placeholder_info(id: &str, session_id: &str, cwd: Option<String>) -> BlockInf
         size: TermSize::default(),
         owner: None,
         owner_name: None,
+        sizers: Vec::new(),
         owner_block: None,
         pid: None,
         browser: None,

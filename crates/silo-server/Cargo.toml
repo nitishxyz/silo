@@ -55,6 +55,10 @@ name = "sigterm"
 path = "tests/sigterm.rs"
 
 [[test]]
+name = "views"
+path = "tests/views.rs"
+
+[[test]]
 name = "agent_api"
 path = "tests/agent_api.rs"
 

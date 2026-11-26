@@ -34,9 +34,12 @@ struct HelloAs {
     token: Option<String>,
     /// Opt-in features (`silo_proto::compat::OPT_IN`) this process handles.
     features: Vec<String>,
+    /// The id of this process's own view of every session.
+    view: Option<String>,
 }
 
-static HELLO_AS: std::sync::RwLock<HelloAs> = std::sync::RwLock::new(HelloAs { role: ClientRole::Cli, token: None, features: Vec::new() });
+static HELLO_AS: std::sync::RwLock<HelloAs> =
+    std::sync::RwLock::new(HelloAs { role: ClientRole::Cli, token: None, features: Vec::new(), view: None });
 
 /// Every later control hello of this process says it is a `role` client
 /// (the Silo app says [`ClientRole::App`]).
@@ -48,6 +51,15 @@ pub fn set_role(role: ClientRole) {
 /// connection gets that grant's access only.
 pub fn set_token(token: Option<String>) {
     HELLO_AS.write().unwrap_or_else(std::sync::PoisonError::into_inner).token = token;
+}
+
+/// Every later control hello of this process names `view` as its own view
+/// of every session ([`ClientHello::view`]): its shown tab, focus and zoom
+/// are then its own, kept by the server under that id across connections.
+/// The Silo app sets one per install; without one (the CLI) a client sees
+/// and moves the view of the user's most recently active app.
+pub fn set_view(view: Option<String>) {
+    HELLO_AS.write().unwrap_or_else(std::sync::PoisonError::into_inner).view = view;
 }
 
 /// Every later control hello of this process also advertises `feature`,
@@ -260,9 +272,9 @@ impl Control {
         credential: Credential,
     ) -> anyhow::Result<(Self, Events)> {
         let mut stream = conn.open_stream().await?;
-        let (role, token, extra) = {
+        let (role, token, extra, view) = {
             let extras = HELLO_AS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-            (extras.role, extras.token.clone().filter(|_| matches!(conn, Conn::Unix(_))), extras.features.clone())
+            (extras.role, extras.token.clone().filter(|_| matches!(conn, Conn::Unix(_))), extras.features.clone(), extras.view.clone())
         };
         let (invite, device, grant) = match credential {
             Credential::None => (None, None, token),
@@ -270,7 +282,7 @@ impl Control {
             Credential::Device(proof) => (None, Some(proof), None),
             Credential::Grant(secret) => (None, None, Some(secret)),
         };
-        let mut hello = ClientHello { build: build.to_owned(), device, role, grant, ..ClientHello::ours(client_name, passive, invite) };
+        let mut hello = ClientHello { build: build.to_owned(), device, role, grant, view, ..ClientHello::ours(client_name, passive, invite) };
         hello.features.extend(extra);
         write_frame(&mut stream, &Frame::json(kind::CONTROL_HELLO, &hello)?).await?;
         stream.flush().await?;

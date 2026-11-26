@@ -21,7 +21,7 @@ use silo_proto::{
     },
     kind,
     model::{
-        BlockId, BlockInfo, BlockStatus, Busy, ClientId, CommandRecord, CursorShape, Lifecycle, Progress, StatusKind, StatusState, TermSize,
+        BlockId, BlockInfo, BlockStatus, Busy, ClientId, CommandRecord, CursorShape, Lifecycle, Progress, Sizer, StatusKind, StatusState, TermSize,
         TerminalConfig,
     },
     offer::{Offer, OfferScanner},
@@ -86,6 +86,10 @@ const HOLD_LIMIT: Duration = Duration::from_secs(2);
 /// Least time between clipboard writes a block sends; writes in between
 /// coalesce, the last one wins.
 const CLIP_WRITE_INTERVAL: Duration = Duration::from_millis(250);
+/// How long after its last input a client keeps sharing a block's size
+/// (docs/PLAN.md §3.6). Checked only when someone types, never on a timer:
+/// a size changes because a person did something.
+pub const SIZER_WINDOW: Duration = Duration::from_secs(30);
 
 /// Back-pressure from the actor to the PTY reader thread.
 #[derive(Default)]
@@ -689,7 +693,13 @@ struct Actor {
     subscribers: HashMap<u64, Subscriber>,
     size: TermSize,
     desired: HashMap<ClientId, Desired>,
+    /// Who the size is attributed to: the first of `sizers`, else the client
+    /// that asked for an unowned block or the candidate it fell back to.
     owner: Option<ClientId>,
+    /// The clients sharing the size, in the order they joined, with their
+    /// last input: `size` is the smallest columns and rows among theirs
+    /// (see [`sizers_after`]). Empty until someone types or takes the block.
+    sizers: Vec<(ClientId, Instant)>,
     /// The client that last typed into the block or took it (focus): its
     /// configuration drives the server terminal (see `wanted_config`).
     driver: Option<ClientId>,
@@ -971,6 +981,7 @@ pub fn spawn_resumed(info: BlockInfo, checkpoint: Checkpoint, config: &SpawnConf
     info.size = checkpoint.size;
     info.owner = None;
     info.owner_name = None;
+    info.sizers.clear();
     info.exited = None;
     launch(info, vt, terminal, Carried { offset: checkpoint.offset, osc_title: checkpoint.osc_title, status }, config, notes)
 }
@@ -1058,6 +1069,7 @@ pub fn spawn_restored(info: BlockInfo, checkpoint: Checkpoint, notes: UnboundedS
     info.pid = None;
     info.owner = None;
     info.owner_name = None;
+    info.sizers.clear();
     info.lifecycle = lifecycle;
     info.exited = exit_code;
     restore_osc(&mut info, &checkpoint);
@@ -1098,6 +1110,7 @@ pub fn spawn_adopted(info: BlockInfo, checkpoint: Checkpoint, pty: silo_pty::Det
     info.pid = Some(pty.pid());
     info.owner = None;
     info.owner_name = None;
+    info.sizers.clear();
     info.lifecycle = Lifecycle::Running;
     info.exited = None;
     restore_osc(&mut info, &checkpoint);
@@ -1225,6 +1238,7 @@ impl Actor {
             size: info.size,
             desired: HashMap::new(),
             owner: None,
+            sizers: Vec::new(),
             driver: None,
             held_since: None,
             unheld: None,
@@ -1421,9 +1435,15 @@ impl Actor {
                 // A focus report (mode 1004) is sent on focus changes, not
                 // typed: losing focus must not make that client the driver.
                 let typed = !is_focus_report(&bytes);
+                // Nor is the pointer passing over the pane: looking at a
+                // block never sizes it.
+                let hover = is_hover_report(&bytes);
                 self.send_input(bytes);
                 if let Some(client) = client.filter(|_| typed) {
                     self.drive(client);
+                    if !hover {
+                        self.typed(client);
+                    }
                 }
             }
             BlockMsg::Attach(attach) => self.attach(*attach),
@@ -1444,10 +1464,13 @@ impl Actor {
             }
             BlockMsg::Desired { client_id, client_name, label, size } => {
                 let fresh = self.desired.insert(client_id, Desired { name: client_name, label, size, updated_at: now_ms() }).is_none();
-                if self.owner.is_none() || self.owner == Some(client_id) {
+                if self.sizers.iter().any(|(c, _)| *c == client_id) {
+                    self.share_size();
+                } else if self.sizers.is_empty() && (self.owner.is_none() || self.owner == Some(client_id)) {
                     self.apply_size(size);
                 }
-                if fresh && self.owner == Some(client_id) {
+                // Its name is known only now.
+                if fresh && (self.owner == Some(client_id) || self.sizers.iter().any(|(c, _)| *c == client_id)) {
                     self.publish();
                 }
             }
@@ -1476,7 +1499,8 @@ impl Actor {
                     .map(|(id, d)| DesiredSize { client_id: *id, client_name: d.name.clone(), size: d.size, updated_at: d.updated_at })
                     .collect();
                 desired.sort_by_key(|d| d.client_id);
-                let _ = reply.send(SizeInfo { size: self.size, owner: self.owner, desired });
+                let sizers = self.sizers.iter().map(|(c, _)| *c).collect();
+                let _ = reply.send(SizeInfo { size: self.size, owner: self.owner, desired, sizers });
             }
             BlockMsg::ClipboardWrite { text, reply } => {
                 let _ = reply.send(self.clipboard_write(text));
@@ -2335,23 +2359,66 @@ impl Actor {
         if mode == OwnMode::Take || self.owner.is_none() {
             // The new owner and its size go out together: publishing the
             // owner first would show it, for a moment, at the old size.
-            let changed = self.owner != Some(client);
             self.owner = Some(client);
             let before = self.size;
             if let Some(size) = self.desired.get(&client).map(|d| d.size) {
                 self.apply_size(size);
             }
             // `apply_size` publishes when the size changed.
-            if changed && self.size == before {
+            if self.size == before {
                 self.publish();
             }
         }
         self.reconfigure();
     }
 
+    /// `client` typed into the block: it shares the size from now on, with
+    /// the clients that typed within [`SIZER_WINDOW`] of this input. One
+    /// that never said how big its pane is (it sends input only) sizes
+    /// nothing.
+    fn typed(&mut self, client: ClientId) {
+        if !self.desired.contains_key(&client) {
+            return;
+        }
+        if sizers_after(&mut self.sizers, client, Instant::now(), SIZER_WINDOW) {
+            self.candidates.retain(|c| *c != client);
+            self.candidates.push(client);
+            self.share_size();
+        }
+    }
+
+    /// Apply the size `sizers` share and name the first of them as the
+    /// owner. The owner, the sizers and the size go out in one publish.
+    fn share_size(&mut self) {
+        let Some(owner) = self.sizers.first().map(|(c, _)| *c) else { return };
+        self.owner = Some(owner);
+        // Cell pixels are those of whoever typed last: its screen is the
+        // one a program measuring pixels is being looked at on.
+        let latest = self.sizers.iter().max_by_key(|(_, at)| *at).and_then(|(c, _)| self.desired.get(c)).map(|d| d.size);
+        let size = shared_size(self.sizers.iter().filter_map(|(c, _)| self.desired.get(c)).map(|d| d.size)).map(|(columns, rows)| TermSize {
+            columns,
+            rows,
+            ..latest.unwrap_or(self.size)
+        });
+        let before = self.size;
+        if let Some(size) = size {
+            self.apply_size(size);
+        }
+        // `apply_size` publishes when the size changed.
+        if self.size == before {
+            self.publish();
+        }
+    }
+
     fn disown(&mut self, client: ClientId) {
         self.candidates.retain(|c| *c != client);
-        if self.owner == Some(client) {
+        let sized = self.sizers.len();
+        self.sizers.retain(|(c, _)| *c != client);
+        if self.sizers.len() != sized && !self.sizers.is_empty() {
+            // The others keep the block: it grows back to what they share.
+            self.share_size();
+            self.reconfigure();
+        } else if self.owner == Some(client) {
             self.owner = self.candidates.last().copied();
             let size = match self.owner {
                 Some(owner) => self.desired.get(&owner).map(|d| d.size),
@@ -2458,10 +2525,24 @@ impl Actor {
 
     fn publish(&mut self) {
         let owner_name = self.owner.and_then(|o| self.desired.get(&o)).map(|d| d.label.clone());
+        // Named only while the size is a compromise between several.
+        let sizers: Vec<Sizer> = match self.sizers.len() {
+            0 | 1 => Vec::new(),
+            _ => self
+                .sizers
+                .iter()
+                .map(|(c, _)| Sizer { client_id: *c, name: self.desired.get(c).map(|d| d.label.clone()).unwrap_or_default() })
+                .collect(),
+        };
         if let Ok(mut info) = self.info.lock() {
+            // Typing and taking again change nothing: nothing to tell.
+            if info.size == self.size && info.owner == self.owner && info.owner_name == owner_name && info.sizers == sizers {
+                return;
+            }
             info.size = self.size;
             info.owner = self.owner;
             info.owner_name = owner_name;
+            info.sizers = sizers;
         }
         let _ = self.notes.send(Note::Changed(self.id.clone()));
     }
@@ -2514,6 +2595,71 @@ fn install_config(vt: &mut TerminalCore, config: &TerminalConfig) -> Vec<u8> {
 /// `ESC [ I` / `ESC [ O`: a focus report (mode 1004), not typing.
 fn is_focus_report(bytes: &[u8]) -> bool {
     matches!(bytes, b"\x1b[I" | b"\x1b[O")
+}
+
+/// A report of the pointer moving with no button held (any-motion mouse
+/// tracking, mode 1003), in the SGR (`ESC [ < Cb ; x ; y M`) or X10
+/// (`ESC [ M Cb x y`) encoding: sent while the pointer is merely over a
+/// pane, so it is no more typing than a focus report is. Clicks, drags
+/// and the wheel are input.
+fn is_hover_report(mut bytes: &[u8]) -> bool {
+    /// `Cb` of a buttonless motion: the motion bit, and "no button" (3).
+    fn hover(cb: u32) -> bool {
+        cb & 32 != 0 && cb & 0b1100_0011 == 3
+    }
+    if bytes.is_empty() {
+        return false;
+    }
+    // One input may carry several reports: all of them must be hovers.
+    while !bytes.is_empty() {
+        if let Some(rest) = bytes.strip_prefix(b"\x1b[<") {
+            let Some(end) = rest.iter().position(|b| matches!(b, b'M' | b'm')) else { return false };
+            let mut fields = rest[..end].split(|b| *b == b';');
+            let cb = fields.next().and_then(|f| std::str::from_utf8(f).ok()).and_then(|f| f.parse::<u32>().ok());
+            if fields.count() != 2 || !cb.is_some_and(hover) {
+                return false;
+            }
+            bytes = &rest[end + 1..];
+        } else if let Some(rest) = bytes.strip_prefix(b"\x1b[M") {
+            if rest.len() < 3 || !hover(u32::from(rest[0]).wrapping_sub(32)) {
+                return false;
+            }
+            bytes = &rest[3..];
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// `client` typed at `now`: it joins `sizers` (the clients sharing a block's
+/// size, in the order they joined), and those whose last input is `window`
+/// or more before this one leave. Whether the set changed (a client that
+/// only typed again changes nothing).
+///
+/// Nobody leaves for being idle alone: two people who typed into a block
+/// and then both went quiet keep the size they shared until one of them
+/// types again, so nothing reflows while nobody is touching it.
+fn sizers_after(sizers: &mut Vec<(ClientId, Instant)>, client: ClientId, now: Instant, window: Duration) -> bool {
+    let before = sizers.len();
+    sizers.retain(|(c, at)| *c == client || now.saturating_duration_since(*at) < window);
+    let left = sizers.len() != before;
+    match sizers.iter_mut().find(|(c, _)| *c == client) {
+        Some(entry) => {
+            entry.1 = now;
+            left
+        }
+        None => {
+            sizers.push((client, now));
+            true
+        }
+    }
+}
+
+/// The grid several panes all show whole: the smallest columns and the
+/// smallest rows among `sizes`.
+fn shared_size(sizes: impl Iterator<Item = TermSize>) -> Option<(u16, u16)> {
+    sizes.map(|s| (s.columns, s.rows)).reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
 }
 
 /// See `Actor::wanted_config`.
@@ -2585,6 +2731,64 @@ mod tests {
         assert_eq!(super::wanted_config(&configs, Some(9), Some(10)), Some(c(3)));
         assert_eq!(super::wanted_config(&configs, None, None), Some(c(3)));
         assert_eq!(super::wanted_config(&HashMap::new(), Some(1), Some(1)), None);
+    }
+
+    #[test]
+    fn a_block_is_sized_for_those_who_typed_lately() {
+        use std::time::{Duration, Instant};
+
+        use super::sizers_after;
+        let window = Duration::from_secs(30);
+        let t0 = Instant::now();
+        let at = |secs| t0 + Duration::from_secs(secs);
+        let ids = |sizers: &[(u64, Instant)]| sizers.iter().map(|(c, _)| *c).collect::<Vec<_>>();
+        let mut sizers = Vec::new();
+        // The first to type sizes the block; typing again changes nothing.
+        assert!(sizers_after(&mut sizers, 1, at(0), window));
+        assert!(!sizers_after(&mut sizers, 1, at(5), window));
+        // Another typing within the window shares it, in the order they joined.
+        assert!(sizers_after(&mut sizers, 2, at(20), window));
+        assert_eq!(ids(&sizers), [1, 2]);
+        // Both quiet for minutes: nothing changes until someone types, and
+        // then the other, long idle, leaves.
+        assert!(sizers_after(&mut sizers, 2, at(600), window));
+        assert_eq!(ids(&sizers), [2]);
+        // The window counts from each client's last input, not its first.
+        assert!(sizers_after(&mut sizers, 1, at(610), window));
+        assert!(!sizers_after(&mut sizers, 2, at(625), window));
+        assert!(!sizers_after(&mut sizers, 1, at(650), window));
+        assert_eq!(ids(&sizers), [2, 1]);
+        assert!(sizers_after(&mut sizers, 1, at(656), window));
+        assert_eq!(ids(&sizers), [1]);
+    }
+
+    #[test]
+    fn a_shared_size_is_the_smallest_columns_and_rows() {
+        use silo_proto::model::TermSize;
+
+        use super::shared_size;
+        assert_eq!(shared_size(std::iter::empty()), None);
+        assert_eq!(shared_size([TermSize::new(120, 40)].into_iter()), Some((120, 40)));
+        // Neither pane's own size: what both show whole.
+        assert_eq!(shared_size([TermSize::new(120, 40), TermSize::new(100, 50)].into_iter()), Some((100, 40)));
+    }
+
+    #[test]
+    fn the_pointer_passing_over_a_pane_is_not_typing() {
+        use super::is_hover_report;
+        // SGR: 35 = motion + no button; with shift (4), alt (8), ctrl (16).
+        assert!(is_hover_report(b"\x1b[<35;10;5M"));
+        assert!(is_hover_report(b"\x1b[<39;10;5M") && is_hover_report(b"\x1b[<63;1;1M"));
+        assert!(is_hover_report(b"\x1b[<35;10;5M\x1b[<35;11;5M"), "several in one input");
+        // X10: the same code plus 32.
+        assert!(is_hover_report(b"\x1b[M\x43\x2a\x25"));
+        // A press, a release, a drag (motion with the left button), the wheel.
+        for input in [&b"\x1b[<0;10;5M"[..], b"\x1b[<0;10;5m", b"\x1b[<32;10;5M", b"\x1b[<64;10;5M", b"\x1b[<65;10;5M", b"\x1b[M\x20\x2a\x25"] {
+            assert!(!is_hover_report(input), "{input:?}");
+        }
+        // A hover and then a click; keys; nothing.
+        assert!(!is_hover_report(b"\x1b[<35;10;5M\x1b[<0;10;5M"));
+        assert!(!is_hover_report(b"x") && !is_hover_report(b"\x1b[A") && !is_hover_report(b"") && !is_hover_report(b"\x1b[<35;10M"));
     }
 
     #[test]

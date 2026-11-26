@@ -240,6 +240,10 @@ where
             entry.pane = pane;
             entry.tty = tty;
         }
+        // An app with a view of its own (never the server's stand-in).
+        if let Some(key) = hello.view.as_deref().filter(|_| stand_in.is_none()).and_then(|id| crate::views::key(&principal, id)) {
+            reg.adopt_view(id, key);
+        }
         id
     };
     let granted = match &principal {
@@ -796,6 +800,13 @@ fn with_ticket(
 
 async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, RpcError> {
     let client_id = ctx.id;
+    // For calls that read or move the shown tab, focus or zoom: the
+    // registry acting as this client (`crate::views`).
+    let layout = || {
+        let mut reg = server.registry.lock().unwrap();
+        reg.enter(client_id);
+        reg
+    };
     match method {
         Method::ServerInfo {} => to_value(server.info_now().await),
         Method::ServerShutdown { .. } => Ok(json!({})),
@@ -812,55 +823,55 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         Method::SessionList {} => to_value(server.registry.lock().unwrap().summaries_for(&ctx.principal)),
         Method::SessionCreate { name, spawn, kind, url } => {
             let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: None, ids: None };
-            to_value(server.registry.lock().unwrap().create_session(name, &new)?)
+            to_value(layout().create_session(name, &new)?)
         }
-        Method::SessionView { session_id } => to_value(server.registry.lock().unwrap().view(&session_id)?),
+        Method::SessionView { session_id } => to_value(server.registry.lock().unwrap().view_for(client_id, &session_id)?),
         Method::SessionRename { session_id, name } => {
-            server.registry.lock().unwrap().rename_session(&session_id, name)?;
+            layout().rename_session(&session_id, name)?;
             Ok(json!({}))
         }
         Method::SessionClose { session_id, force: _ } => {
-            server.registry.lock().unwrap().close_session(&session_id)?;
+            layout().close_session(&session_id)?;
             Ok(json!({}))
         }
         Method::WindowCreate { session_id, spawn, kind, url, background, ids } => {
             let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: None, ids: ids.as_ref() };
-            let mut reg = server.registry.lock().unwrap();
+            let mut reg = layout();
             let created = reg.create_window(&session_id, &new, background)?;
             to_value(with_ticket(&mut reg, ctx, client_id, created, ids.is_some() && kind == BlockKind::Terminal))
         }
         Method::WindowSelect { session_id, window_id } => {
-            server.registry.lock().unwrap().select_window(&session_id, &window_id)?;
+            layout().select_window(&session_id, &window_id)?;
             Ok(json!({}))
         }
         Method::WindowClose { window_id, force: _ } => {
-            server.registry.lock().unwrap().close_window(&window_id)?;
+            layout().close_window(&window_id)?;
             Ok(json!({}))
         }
         Method::WindowRename { window_id, name } => {
-            server.registry.lock().unwrap().rename_window(&window_id, name)?;
+            layout().rename_window(&window_id, name)?;
             Ok(json!({}))
         }
         Method::WindowMove { window_id, index } => {
-            server.registry.lock().unwrap().move_window(&window_id, index)?;
+            layout().move_window(&window_id, index)?;
             Ok(json!({}))
         }
         Method::WindowMerge { window_id, source, axis, at } => {
-            server.registry.lock().unwrap().merge_window(&window_id, &source, axis, at)?;
+            layout().merge_window(&window_id, &source, axis, at)?;
             Ok(json!({}))
         }
         Method::BlockToWindow { block_id, window_id, index, axis } => {
-            server.registry.lock().unwrap().block_to_window(&block_id, window_id.as_deref(), index, axis)?;
+            layout().block_to_window(&block_id, window_id.as_deref(), index, axis)?;
             Ok(json!({}))
         }
         Method::BlockSplit { block_id, axis, spawn, kind, url, agent, ids } => {
             let new = New { spawn: &spawn, kind, url: url.as_deref(), agent: agent.as_ref(), ids: ids.as_ref() };
-            let mut reg = server.registry.lock().unwrap();
+            let mut reg = layout();
             let created = reg.split(&block_id, axis, &new)?;
             to_value(with_ticket(&mut reg, ctx, client_id, created, ids.is_some() && kind == BlockKind::Terminal))
         }
         Method::BlockSpawn { block_id, command, cwd, env, size, kind, url } => {
-            let mut reg = server.registry.lock().unwrap();
+            let mut reg = layout();
             match kind {
                 BlockKind::Terminal => to_value(reg.spawn_parked(&block_id, &command, cwd, env, size)?),
                 BlockKind::Browser => to_value(reg.spawn_parked_browser(&block_id, url.as_deref())?),
@@ -868,47 +879,47 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
             }
         }
         Method::BlockPark { block_id } => {
-            server.registry.lock().unwrap().park(&block_id)?;
+            layout().park(&block_id)?;
             Ok(json!({}))
         }
         Method::BlockReveal { block_id, reveal } => {
-            let mut reg = server.registry.lock().unwrap();
+            let mut reg = layout();
             reg.reveal(&block_id, reveal)?;
             crate::app_bridge::active(&mut reg, client_id);
             Ok(json!({}))
         }
         Method::BlockClose { block_id, force: _ } => {
-            server.registry.lock().unwrap().close_block(&block_id)?;
+            layout().close_block(&block_id)?;
             Ok(json!({}))
         }
         Method::BlockFocus { block_id } => {
-            let mut reg = server.registry.lock().unwrap();
+            let mut reg = layout();
             reg.focus(&block_id)?;
             crate::app_bridge::active(&mut reg, client_id);
             Ok(json!({}))
         }
         Method::BlockZoom { block_id, zoomed } => {
-            server.registry.lock().unwrap().zoom(&block_id, zoomed)?;
+            layout().zoom(&block_id, zoomed)?;
             Ok(json!({}))
         }
         Method::BlockSwap { block_id, other_block_id } => {
-            server.registry.lock().unwrap().swap(&block_id, &other_block_id)?;
+            layout().swap(&block_id, &other_block_id)?;
             Ok(json!({}))
         }
         Method::BlockFloat { block_id, rect } => {
-            server.registry.lock().unwrap().float(&block_id, rect)?;
+            layout().float(&block_id, rect)?;
             Ok(json!({}))
         }
         Method::BlockMove { block_id, rect, dock } => {
-            server.registry.lock().unwrap().move_block(&block_id, rect, dock)?;
+            layout().move_block(&block_id, rect, dock)?;
             Ok(json!({}))
         }
         Method::LayoutRatio { window_id, path, ratio, float } => {
-            server.registry.lock().unwrap().set_ratio(&window_id, float.as_deref(), &path, ratio)?;
+            layout().set_ratio(&window_id, float.as_deref(), &path, ratio)?;
             Ok(json!({}))
         }
         Method::BlockMinimize { block_id, minimized } => {
-            server.registry.lock().unwrap().minimize(&block_id, minimized)?;
+            layout().minimize(&block_id, minimized)?;
             Ok(json!({}))
         }
         Method::TerminalSend { block_id, text } => {
