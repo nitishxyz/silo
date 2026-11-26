@@ -62,7 +62,7 @@ pub struct ChangesSetParams {
 }
 
 /// `Option<Option<T>>`: absent is `None`, `null` is `Some(None)`.
-mod double_option {
+pub(crate) mod double_option {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     #[allow(clippy::ref_option, clippy::option_option)]

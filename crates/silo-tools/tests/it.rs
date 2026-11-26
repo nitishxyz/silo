@@ -6,4 +6,5 @@ mod descriptors;
 mod fetch;
 mod files;
 mod provided;
+mod studio;
 mod terminal;

@@ -228,6 +228,22 @@
           "size": {
             "$ref": "#/$defs/TermSize"
           },
+          "sizers": {
+            "items": {
+              "$ref": "#/$defs/Sizer"
+            },
+            "type": "array"
+          },
+          "studio": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/StudioState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "title": {
             "type": "string"
           }
@@ -260,6 +276,10 @@
           },
           {
             "const": "changes",
+            "type": "string"
+          },
+          {
+            "const": "studio",
             "type": "string"
           },
           {
@@ -1484,6 +1504,23 @@
         ],
         "type": "string"
       },
+      "Sizer": {
+        "properties": {
+          "client_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id",
+          "name"
+        ],
+        "type": "object"
+      },
       "StatusKind": {
         "enum": [
           "permission",
@@ -1503,6 +1540,100 @@
           "unknown"
         ],
         "type": "string"
+      },
+      "StudioChange": {
+        "oneOf": [
+          {
+            "enum": [
+              "unknown"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "project",
+            "type": "string"
+          },
+          {
+            "const": "world",
+            "type": "string"
+          },
+          {
+            "const": "canvas",
+            "type": "string"
+          }
+        ]
+      },
+      "StudioState": {
+        "properties": {
+          "active": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "open": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "root": {
+            "type": "string"
+          },
+          "view": {
+            "$ref": "#/$defs/StudioView",
+            "default": "canvas"
+          },
+          "world_entity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "world_section": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "root"
+        ],
+        "type": "object"
+      },
+      "StudioView": {
+        "oneOf": [
+          {
+            "enum": [
+              "world",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "canvas",
+            "type": "string"
+          },
+          {
+            "const": "setup",
+            "type": "string"
+          },
+          {
+            "const": "production",
+            "type": "string"
+          }
+        ]
       },
       "SyncOp": {
         "enum": [
@@ -2289,6 +2420,48 @@
       {
         "properties": {
           "data": {
+            "properties": {
+              "block_id": {
+                "type": "string"
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "rev": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "what": {
+                "$ref": "#/$defs/StudioChange"
+              }
+            },
+            "required": [
+              "block_id",
+              "what"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "const": "studio.changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
             "type": "object"
           },
           "event": {
@@ -2493,6 +2666,12 @@
         "version": {
           "default": "",
           "type": "string"
+        },
+        "view": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "vt": {
           "default": "",
@@ -2795,6 +2974,15 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "udp_port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "version": {
               "type": "string"
@@ -4471,6 +4659,36 @@
         "type": "object"
       }
     },
+    "app.voice": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "client_id": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "on": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "title": "AppResult",
+        "type": "object"
+      }
+    },
     "app.window_close": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5133,6 +5351,10 @@
                 "type": "string"
               },
               {
+                "const": "studio",
+                "type": "string"
+              },
+              {
                 "const": "unknown",
                 "type": "string"
               }
@@ -5324,6 +5546,10 @@
               },
               {
                 "const": "changes",
+                "type": "string"
+              },
+              {
+                "const": "studio",
                 "type": "string"
               },
               {
@@ -5776,6 +6002,22 @@
               "size": {
                 "$ref": "#/$defs/TermSize"
               },
+              "sizers": {
+                "items": {
+                  "$ref": "#/$defs/Sizer"
+                },
+                "type": "array"
+              },
+              "studio": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StudioState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "title": {
                 "type": "string"
               }
@@ -5808,6 +6050,10 @@
               },
               {
                 "const": "changes",
+                "type": "string"
+              },
+              {
+                "const": "studio",
                 "type": "string"
               },
               {
@@ -6382,6 +6628,23 @@
             ],
             "type": "string"
           },
+          "Sizer": {
+            "properties": {
+              "client_id": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "client_id",
+              "name"
+            ],
+            "type": "object"
+          },
           "StatusKind": {
             "enum": [
               "permission",
@@ -6401,6 +6664,78 @@
               "unknown"
             ],
             "type": "string"
+          },
+          "StudioState": {
+            "properties": {
+              "active": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "agent": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AgentLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "open": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "root": {
+                "type": "string"
+              },
+              "view": {
+                "$ref": "#/$defs/StudioView",
+                "default": "canvas"
+              },
+              "world_entity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "world_section": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "root"
+            ],
+            "type": "object"
+          },
+          "StudioView": {
+            "oneOf": [
+              {
+                "enum": [
+                  "world",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "setup",
+                "type": "string"
+              },
+              {
+                "const": "production",
+                "type": "string"
+              }
+            ]
           },
           "TermSize": {
             "properties": {
@@ -15069,6 +15404,15 @@
             "minimum": 0,
             "type": "integer"
           },
+          "udp_port": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "version": {
             "type": "string"
           }
@@ -15221,6 +15565,10 @@
               },
               {
                 "const": "changes",
+                "type": "string"
+              },
+              {
+                "const": "studio",
                 "type": "string"
               },
               {
@@ -15714,6 +16062,22 @@
               "size": {
                 "$ref": "#/$defs/TermSize"
               },
+              "sizers": {
+                "items": {
+                  "$ref": "#/$defs/Sizer"
+                },
+                "type": "array"
+              },
+              "studio": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StudioState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "title": {
                 "type": "string"
               }
@@ -15746,6 +16110,10 @@
               },
               {
                 "const": "changes",
+                "type": "string"
+              },
+              {
+                "const": "studio",
                 "type": "string"
               },
               {
@@ -16519,6 +16887,23 @@
             ],
             "type": "string"
           },
+          "Sizer": {
+            "properties": {
+              "client_id": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "client_id",
+              "name"
+            ],
+            "type": "object"
+          },
           "StatusKind": {
             "enum": [
               "permission",
@@ -16538,6 +16923,78 @@
               "unknown"
             ],
             "type": "string"
+          },
+          "StudioState": {
+            "properties": {
+              "active": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "agent": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AgentLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "open": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "root": {
+                "type": "string"
+              },
+              "view": {
+                "$ref": "#/$defs/StudioView",
+                "default": "canvas"
+              },
+              "world_entity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "world_section": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "root"
+            ],
+            "type": "object"
+          },
+          "StudioView": {
+            "oneOf": [
+              {
+                "enum": [
+                  "world",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "setup",
+                "type": "string"
+              },
+              {
+                "const": "production",
+                "type": "string"
+              }
+            ]
           },
           "TermSize": {
             "properties": {
@@ -16685,6 +17142,5195 @@
           "blocks"
         ],
         "title": "SessionView",
+        "type": "object"
+      }
+    },
+    "studio.asset": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "length": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "path"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "data_base64": {
+            "type": "string"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "offset": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "size": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mime",
+          "size",
+          "offset",
+          "data_base64"
+        ],
+        "title": "StudioAsset",
+        "type": "object"
+      }
+    },
+    "studio.canvas": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Edge": {
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "type": "boolean"
+              },
+              "role": {
+                "$ref": "#/$defs/EdgeRole"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "from",
+              "to",
+              "role"
+            ],
+            "type": "object"
+          },
+          "EdgeRole": {
+            "oneOf": [
+              {
+                "enum": [
+                  "middle_frame",
+                  "last_frame",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "first_frame",
+                "type": "string"
+              },
+              {
+                "const": "reference",
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              },
+              {
+                "const": "next",
+                "type": "string"
+              }
+            ]
+          },
+          "FrameRole": {
+            "enum": [
+              "group",
+              "scene",
+              "shot",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "GenKind": {
+            "enum": [
+              "image",
+              "video",
+              "speech",
+              "sound",
+              "music",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "GenStatus": {
+            "oneOf": [
+              {
+                "enum": [
+                  "queued",
+                  "running",
+                  "done",
+                  "failed",
+                  "stopped",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "draft",
+                "type": "string"
+              }
+            ]
+          },
+          "Node": {
+            "properties": {
+              "body": {
+                "$ref": "#/$defs/NodeBody"
+              },
+              "h": {
+                "format": "double",
+                "type": "number"
+              },
+              "id": {
+                "type": "string"
+              },
+              "parent": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "w": {
+                "format": "double",
+                "type": "number"
+              },
+              "x": {
+                "format": "double",
+                "type": "number"
+              },
+              "y": {
+                "format": "double",
+                "type": "number"
+              },
+              "z": {
+                "format": "int32",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "x",
+              "y",
+              "w",
+              "h",
+              "body"
+            ],
+            "type": "object"
+          },
+          "NodeBody": {
+            "oneOf": [
+              {
+                "properties": {
+                  "height": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "asset",
+                    "type": "string"
+                  },
+                  "media": {
+                    "$ref": "#/$defs/StudioMedia",
+                    "default": "unknown"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "seconds": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "width": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "note",
+                    "type": "string"
+                  },
+                  "text": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "entity",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "error_code": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "input": true,
+                  "inputs_used": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "job": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "gen",
+                    "type": "string"
+                  },
+                  "makes": {
+                    "$ref": "#/$defs/GenKind",
+                    "default": "image"
+                  },
+                  "mode": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "options": {},
+                  "pick": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "progress": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "$ref": "#/$defs/GenStatus",
+                    "default": "draft"
+                  },
+                  "takes": {
+                    "items": {
+                      "$ref": "#/$defs/Take"
+                    },
+                    "type": "array"
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "tool": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "format": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "frame",
+                    "type": "string"
+                  },
+                  "order": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "role": {
+                    "$ref": "#/$defs/FrameRole",
+                    "default": "group"
+                  },
+                  "title": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          },
+          "Take": {
+            "properties": {
+              "at": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "height": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "prompt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "seconds": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "width": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "media"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "edges": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/Edge"
+            },
+            "type": "array"
+          },
+          "episode": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "nodes": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/Node"
+            },
+            "type": "array"
+          },
+          "out_of_date": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "out_of_date_why": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          },
+          "rev": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "title"
+        ],
+        "title": "Canvas",
+        "type": "object"
+      }
+    },
+    "studio.canvas_create": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "episode": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "episode": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "nodes": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rev": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "title"
+        ],
+        "title": "CanvasInfo",
+        "type": "object"
+      }
+    },
+    "studio.canvas_delete": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "studio.canvas_edit": {
+      "params": {
+        "$defs": {
+          "Arrange": {
+            "enum": [
+              "row",
+              "column",
+              "grid",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "EdgeRole": {
+            "oneOf": [
+              {
+                "enum": [
+                  "middle_frame",
+                  "last_frame",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "first_frame",
+                "type": "string"
+              },
+              {
+                "const": "reference",
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              },
+              {
+                "const": "next",
+                "type": "string"
+              }
+            ]
+          },
+          "FrameRole": {
+            "enum": [
+              "group",
+              "scene",
+              "shot",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "GenKind": {
+            "enum": [
+              "image",
+              "video",
+              "speech",
+              "sound",
+              "music",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "GenStatus": {
+            "oneOf": [
+              {
+                "enum": [
+                  "queued",
+                  "running",
+                  "done",
+                  "failed",
+                  "stopped",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "draft",
+                "type": "string"
+              }
+            ]
+          },
+          "NewEdge": {
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "$ref": "#/$defs/EdgeRole"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "role"
+            ],
+            "type": "object"
+          },
+          "NewNode": {
+            "properties": {
+              "body": {
+                "$ref": "#/$defs/NodeBody"
+              },
+              "h": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "parent": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "w": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "x": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "y": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "z": {
+                "format": "int32",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "body"
+            ],
+            "type": "object"
+          },
+          "NodeBody": {
+            "oneOf": [
+              {
+                "properties": {
+                  "height": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "asset",
+                    "type": "string"
+                  },
+                  "media": {
+                    "$ref": "#/$defs/StudioMedia",
+                    "default": "unknown"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "seconds": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "width": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "note",
+                    "type": "string"
+                  },
+                  "text": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "entity",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "error_code": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "input": true,
+                  "inputs_used": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "job": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "gen",
+                    "type": "string"
+                  },
+                  "makes": {
+                    "$ref": "#/$defs/GenKind",
+                    "default": "image"
+                  },
+                  "mode": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "options": {},
+                  "pick": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "progress": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "$ref": "#/$defs/GenStatus",
+                    "default": "draft"
+                  },
+                  "takes": {
+                    "items": {
+                      "$ref": "#/$defs/Take2"
+                    },
+                    "type": "array"
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "tool": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "format": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "const": "frame",
+                    "type": "string"
+                  },
+                  "order": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "role": {
+                    "$ref": "#/$defs/FrameRole",
+                    "default": "group"
+                  },
+                  "title": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Op": {
+            "oneOf": [
+              {
+                "properties": {
+                  "node": {
+                    "$ref": "#/$defs/NewNode"
+                  },
+                  "op": {
+                    "const": "add_node",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "node"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "body": {},
+                  "h": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "op": {
+                    "const": "update_node",
+                    "type": "string"
+                  },
+                  "parent": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "w": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "x": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "y": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "z": {
+                    "format": "int32",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "op",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "op": {
+                    "const": "remove_node",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "edge": {
+                    "$ref": "#/$defs/NewEdge"
+                  },
+                  "op": {
+                    "const": "add_edge",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "edge"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "op": {
+                    "const": "remove_edge",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "as": {
+                    "$ref": "#/$defs/Arrange",
+                    "default": "row"
+                  },
+                  "gap": {
+                    "format": "double",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "ids": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "in": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "op": {
+                    "const": "layout",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "ids"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "frame": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "op": {
+                    "const": "tidy",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "op": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          },
+          "Take2": {
+            "properties": {
+              "at": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "height": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "prompt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "seconds": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "width": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "media"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "base_rev": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "block_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ops": {
+            "items": {
+              "$ref": "#/$defs/Op"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "block_id",
+          "name",
+          "ops"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Edge": {
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "type": "boolean"
+              },
+              "role": {
+                "$ref": "#/$defs/EdgeRole"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "from",
+              "to",
+              "role"
+            ],
+            "type": "object"
+          },
+          "EdgeRole": {
+            "oneOf": [
+              {
+                "enum": [
+                  "middle_frame",
+                  "last_frame",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "first_frame",
+                "type": "string"
+              },
+              {
+                "const": "reference",
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              },
+              {
+                "const": "next",
+                "type": "string"
+              }
+            ]
+          },
+          "MentionDid": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "wired",
+                "type": "string"
+              },
+              {
+                "const": "unwired",
+                "type": "string"
+              },
+              {
+                "const": "not_wired",
+                "type": "string"
+              }
+            ]
+          },
+          "MentionSynced": {
+            "properties": {
+              "card": {
+                "type": "string"
+              },
+              "did": {
+                "$ref": "#/$defs/MentionDid"
+              },
+              "edge": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Edge"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "node": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "token": {
+                "type": "string"
+              },
+              "why": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "card",
+              "token",
+              "did"
+            ],
+            "type": "object"
+          },
+          "OpFailed": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "op": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "op",
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "failed": {
+            "items": {
+              "$ref": "#/$defs/OpFailed"
+            },
+            "type": "array"
+          },
+          "ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mentions": {
+            "items": {
+              "$ref": "#/$defs/MentionSynced"
+            },
+            "type": "array"
+          },
+          "moved": {
+            "default": false,
+            "type": "boolean"
+          },
+          "rev": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rev"
+        ],
+        "title": "CanvasEdited",
+        "type": "object"
+      }
+    },
+    "studio.canvas_update": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "episode": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "block_id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "episode": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "nodes": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rev": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "title"
+        ],
+        "title": "CanvasInfo",
+        "type": "object"
+      }
+    },
+    "studio.entity": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "EntityInfo": {
+            "properties": {
+              "approval": {
+                "$ref": "#/$defs/Approval"
+              },
+              "file": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "links": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "looks": {
+                "items": {
+                  "$ref": "#/$defs/RefInfo"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sheet": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "voice": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "file"
+            ],
+            "type": "object"
+          },
+          "EntityUse": {
+            "properties": {
+              "canvas": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "canvas",
+              "node"
+            ],
+            "type": "object"
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "body": {
+            "default": "",
+            "type": "string"
+          },
+          "fields": {
+            "additionalProperties": true,
+            "default": {},
+            "type": "object"
+          },
+          "info": {
+            "$ref": "#/$defs/EntityInfo"
+          },
+          "used_in": {
+            "items": {
+              "$ref": "#/$defs/EntityUse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "info"
+        ],
+        "title": "Entity",
+        "type": "object"
+      }
+    },
+    "studio.entity_approve": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "approved": {
+            "type": "boolean"
+          },
+          "block_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "id",
+          "approved"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "approval": {
+            "$ref": "#/$defs/Approval"
+          },
+          "file": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "links": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "looks": {
+            "items": {
+              "$ref": "#/$defs/RefInfo"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sheet": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "voice": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "file"
+        ],
+        "title": "EntityInfo",
+        "type": "object"
+      }
+    },
+    "studio.entity_create": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fields": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "section": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "section",
+          "name"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "approval": {
+            "$ref": "#/$defs/Approval"
+          },
+          "file": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "links": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "looks": {
+            "items": {
+              "$ref": "#/$defs/RefInfo"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sheet": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "voice": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "file"
+        ],
+        "title": "EntityInfo",
+        "type": "object"
+      }
+    },
+    "studio.entity_link": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "linked": {
+            "type": "boolean"
+          },
+          "other": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "id",
+          "other",
+          "linked"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "approval": {
+            "$ref": "#/$defs/Approval"
+          },
+          "file": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "links": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "looks": {
+            "items": {
+              "$ref": "#/$defs/RefInfo"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sheet": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "voice": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "file"
+        ],
+        "title": "EntityInfo",
+        "type": "object"
+      }
+    },
+    "studio.entity_ref": {
+      "params": {
+        "$defs": {
+          "RefChange": {
+            "oneOf": [
+              {
+                "properties": {
+                  "at": {
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "defines": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "op": {
+                    "const": "add",
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "name": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "op": {
+                    "const": "rename",
+                    "type": "string"
+                  },
+                  "ref": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "ref"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "defines": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "op": {
+                    "const": "describe",
+                    "type": "string"
+                  },
+                  "ref": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "ref"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "op": {
+                    "const": "move",
+                    "type": "string"
+                  },
+                  "ref": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "op",
+                  "ref",
+                  "to"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "op": {
+                    "const": "remove",
+                    "type": "string"
+                  },
+                  "ref": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "ref"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "change": {
+            "$ref": "#/$defs/RefChange"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "id",
+          "change"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "EntityInfo": {
+            "properties": {
+              "approval": {
+                "$ref": "#/$defs/Approval"
+              },
+              "file": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "links": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "looks": {
+                "items": {
+                  "$ref": "#/$defs/RefInfo"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sheet": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "voice": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "file"
+            ],
+            "type": "object"
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "info": {
+            "$ref": "#/$defs/EntityInfo"
+          },
+          "ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "info"
+        ],
+        "title": "EntityRefEdited",
+        "type": "object"
+      }
+    },
+    "studio.entity_update": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fields": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "approval": {
+            "$ref": "#/$defs/Approval"
+          },
+          "file": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "links": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "looks": {
+            "items": {
+              "$ref": "#/$defs/RefInfo"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sheet": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "voice": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "file"
+        ],
+        "title": "EntityInfo",
+        "type": "object"
+      }
+    },
+    "studio.import": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "canvas": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "canvas",
+          "from"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "StudioImported",
+        "type": "object"
+      }
+    },
+    "studio.init": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "CanvasInfo": {
+            "properties": {
+              "episode": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "format": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "nodes": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rev": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "title": {
+                "type": "string"
+              },
+              "updated": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "name",
+              "title"
+            ],
+            "type": "object"
+          },
+          "EntityInfo": {
+            "properties": {
+              "approval": {
+                "$ref": "#/$defs/Approval"
+              },
+              "file": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "links": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "looks": {
+                "items": {
+                  "$ref": "#/$defs/RefInfo"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sheet": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "voice": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "file"
+            ],
+            "type": "object"
+          },
+          "Format": {
+            "properties": {
+              "aspect": {
+                "type": "string"
+              },
+              "fps": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "resolution": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "aspect"
+            ],
+            "type": "object"
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "Section": {
+            "properties": {
+              "entities": {
+                "items": {
+                  "$ref": "#/$defs/EntityInfo"
+                },
+                "type": "array"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/SectionKind"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "SectionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "overview",
+                "type": "string"
+              },
+              {
+                "const": "style",
+                "type": "string"
+              },
+              {
+                "const": "entities",
+                "type": "string"
+              }
+            ]
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "canvases": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/CanvasInfo"
+            },
+            "type": "array"
+          },
+          "format": {
+            "type": "string"
+          },
+          "formats": {
+            "additionalProperties": {
+              "$ref": "#/$defs/Format"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "models": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sections": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/Section"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "format"
+        ],
+        "title": "Project",
+        "type": "object"
+      }
+    },
+    "studio.production": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "AssetState": {
+            "properties": {
+              "approval": {
+                "$ref": "#/$defs/Approval",
+                "default": "none"
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "section": {
+                "type": "string"
+              },
+              "sheet": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "used": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "video_sheet": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "voice": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "section"
+            ],
+            "type": "object"
+          },
+          "Cut": {
+            "properties": {
+              "at": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "older": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "path": {
+                "type": "string"
+              },
+              "stale": {
+                "type": "boolean"
+              },
+              "version": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "path",
+              "version"
+            ],
+            "type": "object"
+          },
+          "EpisodeState": {
+            "properties": {
+              "canvas": {
+                "type": "string"
+              },
+              "cut": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cut"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "episode": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "failed": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "keyframes": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "out_of_date": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "running": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "script": {
+                "default": false,
+                "type": "boolean"
+              },
+              "shots": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sound": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "title": {
+                "type": "string"
+              },
+              "videos": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "canvas",
+              "title"
+            ],
+            "type": "object"
+          },
+          "Step": {
+            "properties": {
+              "ask": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "canvas": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "entity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "$ref": "#/$defs/StepKind"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          "StepKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "script",
+                  "shots",
+                  "keyframes",
+                  "video",
+                  "out_of_date",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "onboarding",
+                "type": "string"
+              },
+              {
+                "const": "sheet",
+                "type": "string"
+              },
+              {
+                "const": "approve",
+                "type": "string"
+              },
+              {
+                "const": "voice",
+                "type": "string"
+              },
+              {
+                "const": "episode",
+                "type": "string"
+              },
+              {
+                "const": "cut",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "assets": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/AssetState"
+            },
+            "type": "array"
+          },
+          "episodes": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/EpisodeState"
+            },
+            "type": "array"
+          },
+          "models": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "next": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/Step"
+            },
+            "type": "array"
+          }
+        },
+        "title": "Production",
+        "type": "object"
+      }
+    },
+    "studio.project": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "CanvasInfo": {
+            "properties": {
+              "episode": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "format": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "nodes": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rev": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "title": {
+                "type": "string"
+              },
+              "updated": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "name",
+              "title"
+            ],
+            "type": "object"
+          },
+          "EntityInfo": {
+            "properties": {
+              "approval": {
+                "$ref": "#/$defs/Approval"
+              },
+              "file": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "links": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "looks": {
+                "items": {
+                  "$ref": "#/$defs/RefInfo"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sheet": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "voice": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "file"
+            ],
+            "type": "object"
+          },
+          "Format": {
+            "properties": {
+              "aspect": {
+                "type": "string"
+              },
+              "fps": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "resolution": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "aspect"
+            ],
+            "type": "object"
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "Section": {
+            "properties": {
+              "entities": {
+                "items": {
+                  "$ref": "#/$defs/EntityInfo"
+                },
+                "type": "array"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/SectionKind"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "SectionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "overview",
+                "type": "string"
+              },
+              {
+                "const": "style",
+                "type": "string"
+              },
+              {
+                "const": "entities",
+                "type": "string"
+              }
+            ]
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "canvases": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/CanvasInfo"
+            },
+            "type": "array"
+          },
+          "format": {
+            "type": "string"
+          },
+          "formats": {
+            "additionalProperties": {
+              "$ref": "#/$defs/Format"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "models": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sections": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/Section"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "format"
+        ],
+        "title": "Project",
+        "type": "object"
+      }
+    },
+    "studio.set": {
+      "params": {
+        "$defs": {
+          "AgentLink": {
+            "properties": {
+              "block_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "otto_session": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "otto_session"
+            ],
+            "type": "object"
+          },
+          "StudioView": {
+            "oneOf": [
+              {
+                "enum": [
+                  "world",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "setup",
+                "type": "string"
+              },
+              {
+                "const": "production",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "active": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "block_id": {
+            "type": "string"
+          },
+          "open": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "view": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/StudioView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "world_entity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "world_section": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "AgentLink": {
+            "properties": {
+              "block_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "otto_session": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "otto_session"
+            ],
+            "type": "object"
+          },
+          "StudioView": {
+            "oneOf": [
+              {
+                "enum": [
+                  "world",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "canvas",
+                "type": "string"
+              },
+              {
+                "const": "setup",
+                "type": "string"
+              },
+              {
+                "const": "production",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "active": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "open": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "root": {
+            "type": "string"
+          },
+          "view": {
+            "$ref": "#/$defs/StudioView",
+            "default": "canvas"
+          },
+          "world_entity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "world_section": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "root"
+        ],
+        "title": "StudioState",
+        "type": "object"
+      }
+    },
+    "studio.set_format": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "canvas": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "format": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "CanvasInfo": {
+            "properties": {
+              "episode": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "format": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "nodes": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rev": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "title": {
+                "type": "string"
+              },
+              "updated": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "name",
+              "title"
+            ],
+            "type": "object"
+          },
+          "EntityInfo": {
+            "properties": {
+              "approval": {
+                "$ref": "#/$defs/Approval"
+              },
+              "file": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "links": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "looks": {
+                "items": {
+                  "$ref": "#/$defs/RefInfo"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sheet": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "voice": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "file"
+            ],
+            "type": "object"
+          },
+          "Format": {
+            "properties": {
+              "aspect": {
+                "type": "string"
+              },
+              "fps": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "resolution": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "aspect"
+            ],
+            "type": "object"
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "Section": {
+            "properties": {
+              "entities": {
+                "items": {
+                  "$ref": "#/$defs/EntityInfo"
+                },
+                "type": "array"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/SectionKind"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "SectionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "overview",
+                "type": "string"
+              },
+              {
+                "const": "style",
+                "type": "string"
+              },
+              {
+                "const": "entities",
+                "type": "string"
+              }
+            ]
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "canvases": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/CanvasInfo"
+            },
+            "type": "array"
+          },
+          "format": {
+            "type": "string"
+          },
+          "formats": {
+            "additionalProperties": {
+              "$ref": "#/$defs/Format"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "models": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sections": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/Section"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "format"
+        ],
+        "title": "Project",
+        "type": "object"
+      }
+    },
+    "studio.set_formats": {
+      "params": {
+        "$defs": {
+          "Format": {
+            "properties": {
+              "aspect": {
+                "type": "string"
+              },
+              "fps": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "resolution": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "aspect"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "formats": {
+            "additionalProperties": {
+              "$ref": "#/$defs/Format"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "block_id",
+          "formats"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "CanvasInfo": {
+            "properties": {
+              "episode": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "format": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "nodes": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rev": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "title": {
+                "type": "string"
+              },
+              "updated": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "name",
+              "title"
+            ],
+            "type": "object"
+          },
+          "EntityInfo": {
+            "properties": {
+              "approval": {
+                "$ref": "#/$defs/Approval"
+              },
+              "file": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "links": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "looks": {
+                "items": {
+                  "$ref": "#/$defs/RefInfo"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sheet": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "voice": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "file"
+            ],
+            "type": "object"
+          },
+          "Format": {
+            "properties": {
+              "aspect": {
+                "type": "string"
+              },
+              "fps": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "resolution": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "aspect"
+            ],
+            "type": "object"
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "Section": {
+            "properties": {
+              "entities": {
+                "items": {
+                  "$ref": "#/$defs/EntityInfo"
+                },
+                "type": "array"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/SectionKind"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "SectionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "overview",
+                "type": "string"
+              },
+              {
+                "const": "style",
+                "type": "string"
+              },
+              {
+                "const": "entities",
+                "type": "string"
+              }
+            ]
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "canvases": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/CanvasInfo"
+            },
+            "type": "array"
+          },
+          "format": {
+            "type": "string"
+          },
+          "formats": {
+            "additionalProperties": {
+              "$ref": "#/$defs/Format"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "models": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sections": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/Section"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "format"
+        ],
+        "title": "Project",
+        "type": "object"
+      }
+    },
+    "studio.set_models": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "models": {
+            "additionalProperties": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "block_id",
+          "models"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "CanvasInfo": {
+            "properties": {
+              "episode": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "format": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "nodes": {
+                "default": 0,
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rev": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "title": {
+                "type": "string"
+              },
+              "updated": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "name",
+              "title"
+            ],
+            "type": "object"
+          },
+          "EntityInfo": {
+            "properties": {
+              "approval": {
+                "$ref": "#/$defs/Approval"
+              },
+              "file": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "links": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "looks": {
+                "items": {
+                  "$ref": "#/$defs/RefInfo"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sheet": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "voice": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "file"
+            ],
+            "type": "object"
+          },
+          "Format": {
+            "properties": {
+              "aspect": {
+                "type": "string"
+              },
+              "fps": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "resolution": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "aspect"
+            ],
+            "type": "object"
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "Section": {
+            "properties": {
+              "entities": {
+                "items": {
+                  "$ref": "#/$defs/EntityInfo"
+                },
+                "type": "array"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/SectionKind"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "SectionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "overview",
+                "type": "string"
+              },
+              {
+                "const": "style",
+                "type": "string"
+              },
+              {
+                "const": "entities",
+                "type": "string"
+              }
+            ]
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "canvases": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/CanvasInfo"
+            },
+            "type": "array"
+          },
+          "format": {
+            "type": "string"
+          },
+          "formats": {
+            "additionalProperties": {
+              "$ref": "#/$defs/Format"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "models": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sections": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/Section"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "format"
+        ],
+        "title": "Project",
+        "type": "object"
+      }
+    },
+    "studio.world": {
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Approval": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "type": "string"
+              },
+              {
+                "const": "changed",
+                "type": "string"
+              }
+            ]
+          },
+          "EntityInfo": {
+            "properties": {
+              "approval": {
+                "$ref": "#/$defs/Approval"
+              },
+              "file": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "links": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "looks": {
+                "items": {
+                  "$ref": "#/$defs/RefInfo"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "sheet": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "voice": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "file"
+            ],
+            "type": "object"
+          },
+          "RefInfo": {
+            "properties": {
+              "defines": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "$ref": "#/$defs/StudioMedia",
+                "default": "unknown"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
+          "Section": {
+            "properties": {
+              "entities": {
+                "items": {
+                  "$ref": "#/$defs/EntityInfo"
+                },
+                "type": "array"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/SectionKind"
+              },
+              "refs": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "SectionKind": {
+            "oneOf": [
+              {
+                "enum": [
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "overview",
+                "type": "string"
+              },
+              {
+                "const": "style",
+                "type": "string"
+              },
+              {
+                "const": "entities",
+                "type": "string"
+              }
+            ]
+          },
+          "StudioMedia": {
+            "oneOf": [
+              {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "sections": {
+            "items": {
+              "$ref": "#/$defs/Section"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sections"
+        ],
+        "title": "StudioWorld",
         "type": "object"
       }
     },
@@ -17105,6 +22751,15 @@
           },
           "size": {
             "$ref": "#/$defs/TermSize"
+          },
+          "sizers": {
+            "default": [],
+            "items": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -17250,6 +22905,10 @@
               },
               {
                 "const": "changes",
+                "type": "string"
+              },
+              {
+                "const": "studio",
                 "type": "string"
               },
               {
@@ -17507,6 +23166,10 @@
               },
               {
                 "const": "changes",
+                "type": "string"
+              },
+              {
+                "const": "studio",
                 "type": "string"
               },
               {

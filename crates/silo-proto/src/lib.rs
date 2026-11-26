@@ -30,6 +30,7 @@ pub mod paths;
 pub mod permissions;
 pub mod release;
 pub mod search;
+pub mod studio;
 pub mod text;
 pub mod tools;
 pub mod upgrade;

@@ -211,10 +211,12 @@ pub fn changed(root: &std::path::Path, paths: Vec<PathBuf>) -> (Vec<String>, boo
     (rel, truncated)
 }
 
-/// The root of files block `block_id`.
+/// The root of files block `block_id`; a studio block's too (its pane
+/// reads and saves world text, makes sections, with these rules).
 pub fn root_of(server: &Server, block_id: &str) -> Result<PathBuf, RpcError> {
     match server.registry.lock().unwrap().blocks.get(block_id) {
         Some(Block::Files(files)) => Ok(files.root()),
+        Some(Block::Studio(studio)) => Ok(studio.root()),
         Some(_) => Err(RpcError::bad_request(format!("block {block_id} is not a files block"))),
         None => Err(RpcError::not_found(format!("block {block_id}"))),
     }

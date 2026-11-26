@@ -18,5 +18,6 @@ mod share;
 mod status_api;
 mod status_block;
 mod stream;
+mod studio;
 mod tunnel;
 mod upgrade;

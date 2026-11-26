@@ -226,6 +226,7 @@ async fn fake_old(
         agent: None,
         files: None,
         changes: None,
+        studio: None,
     };
     let spec = counter();
     let config = silo_pty::SpawnConfig { command: spec.command.iter().map(Into::into).collect(), ..Default::default() };

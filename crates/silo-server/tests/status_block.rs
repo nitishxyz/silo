@@ -42,6 +42,7 @@ fn info(id: &str, columns: u16) -> BlockInfo {
         agent: None,
         files: None,
         changes: None,
+        studio: None,
     }
 }
 

@@ -13,6 +13,11 @@ pub use crate::files::*;
 pub use crate::login::{LoginAdmitParams, LoginAdmitted, LoginRevokeParams};
 pub use crate::permissions::{PermissionId, PermissionInfo, PermissionStatus, Permissions};
 pub use crate::search::*;
+use crate::studio::{
+    StudioAssetParams, StudioCanvasCreateParams, StudioCanvasEditParams, StudioCanvasParams, StudioCanvasUpdateParams, StudioEntityApproveParams,
+    StudioEntityCreateParams, StudioEntityLinkParams, StudioEntityParams, StudioEntityRefParams, StudioEntityUpdateParams, StudioImportParams,
+    StudioInitParams, StudioProjectParams, StudioSetFormatParams, StudioSetFormatsParams, StudioSetModelsParams, StudioSetParams,
+};
 pub use crate::tools::{ToolList, ToolRequest, ToolsCallParams, ToolsProvideParams, ToolsReplyParams};
 
 use crate::{
@@ -334,6 +339,48 @@ pub enum Method {
     ChangesContinue(ChangesStatusParams),
     #[serde(rename = "changes.abort")]
     ChangesAbort(ChangesStatusParams),
+    #[serde(rename = "studio.project")]
+    StudioProject(StudioProjectParams),
+    #[serde(rename = "studio.init")]
+    StudioInit(StudioInitParams),
+    #[serde(rename = "studio.set_format")]
+    StudioSetFormat(StudioSetFormatParams),
+    #[serde(rename = "studio.set_formats")]
+    StudioSetFormats(StudioSetFormatsParams),
+    #[serde(rename = "studio.canvas")]
+    StudioCanvas(StudioCanvasParams),
+    #[serde(rename = "studio.canvas_create")]
+    StudioCanvasCreate(StudioCanvasCreateParams),
+    #[serde(rename = "studio.canvas_update")]
+    StudioCanvasUpdate(StudioCanvasUpdateParams),
+    #[serde(rename = "studio.canvas_delete")]
+    StudioCanvasDelete(StudioCanvasParams),
+    #[serde(rename = "studio.canvas_edit")]
+    StudioCanvasEdit(StudioCanvasEditParams),
+    #[serde(rename = "studio.world")]
+    StudioWorld(StudioProjectParams),
+    #[serde(rename = "studio.entity")]
+    StudioEntity(StudioEntityParams),
+    #[serde(rename = "studio.entity_create")]
+    StudioEntityCreate(StudioEntityCreateParams),
+    #[serde(rename = "studio.entity_update")]
+    StudioEntityUpdate(StudioEntityUpdateParams),
+    #[serde(rename = "studio.entity_approve")]
+    StudioEntityApprove(StudioEntityApproveParams),
+    #[serde(rename = "studio.entity_ref")]
+    StudioEntityRef(StudioEntityRefParams),
+    #[serde(rename = "studio.entity_link")]
+    StudioEntityLink(StudioEntityLinkParams),
+    #[serde(rename = "studio.production")]
+    StudioProduction(StudioProjectParams),
+    #[serde(rename = "studio.set_models")]
+    StudioSetModels(StudioSetModelsParams),
+    #[serde(rename = "studio.asset")]
+    StudioAsset(StudioAssetParams),
+    #[serde(rename = "studio.import")]
+    StudioImport(StudioImportParams),
+    #[serde(rename = "studio.set")]
+    StudioSet(StudioSetParams),
     #[serde(rename = "search.files")]
     SearchFiles(SearchFilesParams),
     #[serde(rename = "search.grep")]
@@ -1085,6 +1132,27 @@ pub const METHODS: &[(&str, &str)] = &[
     ("changes.resolve", "Take a side of some conflict regions or a whole file, or mark a conflicted file resolved."),
     ("changes.continue", "Continue the merge, rebase, cherry-pick or revert stopped in a changes block's repo."),
     ("changes.abort", "Abort the merge, rebase, cherry-pick or revert stopped in a changes block's repo."),
+    ("studio.project", "A studio block's project: name, formats, canvases and world sections (not_found before studio.init)."),
+    ("studio.init", "Make a studio project in a studio block's folder: studio.toml and world/, never overwriting."),
+    ("studio.set_format", "Set a studio canvas's format override (null clears it), or the project's default format."),
+    ("studio.set_formats", "Add or replace format presets of a studio project."),
+    ("studio.canvas", "A studio canvas: its nodes and edges."),
+    ("studio.canvas_create", "Make a canvas (an episode with a number) in a studio project."),
+    ("studio.canvas_update", "Change a studio canvas's title, episode number or format."),
+    ("studio.canvas_delete", "Move a studio canvas's folder to the Trash."),
+    ("studio.canvas_edit", "Add, update, remove and lay out nodes and edges of a studio canvas; each op applies on its own."),
+    ("studio.world", "The sections of a studio's world, with their entities."),
+    ("studio.entity", "A world entity of a studio: its frontmatter, description and where canvases use it."),
+    ("studio.entity_create", "Make a world entity (a folder and its markdown file) in a studio section."),
+    ("studio.entity_update", "Merge frontmatter fields into a studio world entity, or replace its description."),
+    ("studio.entity_approve", "Approve a studio world entity's sheet (stamps approved in its frontmatter), or withdraw the approval."),
+    ("studio.entity_ref", "Add, name, describe, reorder or remove one of a studio world entity's named references (its frontmatter refs)."),
+    ("studio.entity_link", "Link two studio world entities (a prop to its owner), or unlink them."),
+    ("studio.production", "Where a studio's production stands: assets, episodes by stage, model picks and the next steps, derived from its files."),
+    ("studio.set_models", "Set or clear a studio project's model picks by kind (studio.toml [models])."),
+    ("studio.asset", "Read a chunk (up to 4 MiB) of a media file under a studio block's root, base64."),
+    ("studio.import", "Copy a file into a studio canvas's assets folder."),
+    ("studio.set", "Change a studio block's view, canvas tabs, world section or entity, or agent."),
     ("search.files", "Fuzzy-find files under a folder (fff query syntax: globs, !excludes, git:modified), frecency-ranked."),
     ("search.grep", "Search the text of the files under a folder (plain, regex or fuzzy), within a time budget."),
     ("search.opened", "Record that a file under a folder was opened, so it ranks higher in later searches."),
@@ -1391,6 +1459,7 @@ pub const EVENTS: &[&str] = &[
     "files.changed",
     "changes.changed",
     "changes.progress",
+    "studio.changed",
     "tools.changed",
     "tools.request",
     "config.changed",
@@ -1398,6 +1467,7 @@ pub const EVENTS: &[&str] = &[
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "event", content = "data")]
+#[allow(clippy::large_enum_variant, reason = "an event is sent boxed (`ServerMessage::Event`) and handled one at a time")]
 pub enum Event {
     #[serde(rename = "sessions.changed")]
     SessionsChanged { sessions: Vec<SessionSummary> },
@@ -1480,6 +1550,19 @@ pub enum Event {
     /// progress, a line at a time, throttled).
     #[serde(rename = "changes.progress")]
     ChangesProgress { block_id: BlockId, op: SyncOp, text: String },
+    /// A studio block's project, world or a canvas changed (the server's
+    /// writes and files edited by anyone), debounced: re-read it.
+    #[serde(rename = "studio.changed")]
+    StudioChanged {
+        block_id: BlockId,
+        what: crate::studio::StudioChange,
+        /// [`crate::studio::StudioChange::Canvas`]: the canvas.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// The canvas's rev after the change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<u64>,
+    },
     /// The provided tools changed: list them again (`tools.list`).
     #[serde(rename = "tools.changed")]
     ToolsChanged {},

@@ -482,6 +482,9 @@ pub enum BlockKind {
     /// A review of code changes in a git repo on the server (feature
     /// `changes`, docs/CHANGES_BLOCK.md); no process.
     Changes,
+    /// A project of media made with an agent: a world and canvases in a
+    /// folder on the server (feature `studio`, docs/STUDIO.md); no process.
+    Studio,
     /// A block kind of a newer server: shown as unsupported.
     #[serde(other)]
     Unknown,
@@ -567,6 +570,10 @@ pub struct BlockInfo {
     /// (boxed: most blocks have none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes: Option<Box<ChangesState>>,
+    /// View state; `Some` exactly when `kind` is [`BlockKind::Studio`]
+    /// (boxed: most blocks have none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub studio: Option<Box<crate::studio::StudioState>>,
 }
 
 /// Server-held state of a changes block (docs/CHANGES_BLOCK.md §1). Paths

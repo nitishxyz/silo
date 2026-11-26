@@ -1,7 +1,29 @@
 #[test]
 fn descriptors_need_no_connection_or_runtime() {
     let descriptors = silo_tools::descriptors();
-    assert_eq!(descriptors.len(), 29);
+    assert_eq!(descriptors.len(), 34);
+    // The Studio tools (docs/STUDIO.md §6.1): deferred, reads marked as reads.
+    for (name, read, required) in [
+        ("studio_open", false, serde_json::json!([])),
+        ("studio_read", true, serde_json::json!([])),
+        ("canvas_read", true, serde_json::json!(["canvas"])),
+        ("canvas_create", false, serde_json::json!(["title"])),
+        ("canvas_edit", false, serde_json::json!(["canvas", "ops"])),
+    ] {
+        let tool = descriptors.iter().find(|tool| tool.name == name).unwrap_or_else(|| panic!("{name}"));
+        assert!(tool.deferred && tool.effects.read == read && !tool.effects.process, "{name}");
+        assert_eq!(tool.input_schema["required"], required, "{name}");
+        assert!(tool.input_schema["properties"]["path"].is_object(), "{name} takes path");
+    }
+    let edit = descriptors.iter().find(|tool| tool.name == "canvas_edit").unwrap();
+    assert_eq!(edit.input_schema["properties"]["ops"]["type"], "array");
+    assert!(edit.input_schema["$defs"].get("Op").is_some(), "the ops' schema travels with it");
+    assert!(
+        edit.description.contains("Don't pass x, y, w or h for cards") && edit.description.contains("use layout"),
+        "cards are placed by the server"
+    );
+    assert!(edit.description.contains("After adding many frames and nodes, finish with {op: \"tidy\"}"), "tidy is offered");
+    assert!(serde_json::to_string(&edit.input_schema).unwrap().contains("\"tidy\""), "and in the ops' schema");
     assert!(descriptors.iter().any(|tool| tool.name == "terminal_run"));
     assert!(descriptors.iter().any(|tool| tool.name == "browser_snapshot" && tool.deferred));
     let show = descriptors.iter().find(|tool| tool.name == "files_show").expect("files_show");

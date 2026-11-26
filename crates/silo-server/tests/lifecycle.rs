@@ -32,6 +32,7 @@ fn info(id: &str) -> BlockInfo {
         agent: None,
         files: None,
         changes: None,
+        studio: None,
     }
 }
 

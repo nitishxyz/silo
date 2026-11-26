@@ -30,6 +30,7 @@ pub mod scripting;
 pub mod search;
 pub mod shell;
 pub mod status;
+pub mod studio;
 pub mod sysclip;
 pub mod tools;
 pub mod trash;

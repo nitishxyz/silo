@@ -121,7 +121,7 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
     let mut blocks = HashMap::new();
     for record in manifest.blocks {
         let id = record.info.id.clone();
-        if matches!(record.info.kind, BlockKind::Browser | BlockKind::Agent | BlockKind::Files | BlockKind::Changes) {
+        if matches!(record.info.kind, BlockKind::Browser | BlockKind::Agent | BlockKind::Files | BlockKind::Changes | BlockKind::Studio) {
             blocks.insert(id, Block::restore(record.info)?);
             continue;
         }

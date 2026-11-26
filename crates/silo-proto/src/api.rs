@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 use crate::access::{Rights, Scope};
 use crate::agent::*;
 use crate::changes::*;
+// `studio::Take` too: the conflict side is the one used here.
+use crate::changes::Take;
 use crate::control::{
     ApiMethod, AppResult, BlockView, BusyBlocks, Capture, CommandOutput, CommandRecords, Created, DataTicket, Density, Direction, Dock, Empty,
     GrantCreated, GrantKind, Grants, InvitePurpose, LogText, METHODS, Method, MethodDescription, OwnMode, PairInvite, PairedDevices, Pasted, Reveal,
@@ -19,6 +21,7 @@ use crate::model::{
 };
 use crate::permissions::{PermissionId, PermissionInfo, Permissions};
 use crate::search::*;
+use crate::studio::*;
 
 /// The description of method `name`; `None` for an unknown method.
 #[must_use]
@@ -145,6 +148,23 @@ fn result_schema(method: &Method) -> Schema {
         M::ChangesDiff(_) => schema_for!(FileDiff),
         M::ChangesSet(_) | M::ChangesRoot(_) => schema_for!(ChangesState),
         M::ChangesCommit(_) => schema_for!(ChangesCommitted),
+        M::StudioProject(_) | M::StudioInit(_) | M::StudioSetFormat(_) | M::StudioSetFormats(_) | M::StudioSetModels(_) => {
+            schema_for!(crate::studio::Project)
+        }
+        M::StudioCanvas(_) => schema_for!(crate::studio::Canvas),
+        M::StudioCanvasCreate(_) | M::StudioCanvasUpdate(_) => schema_for!(crate::studio::CanvasInfo),
+        M::StudioCanvasDelete(_) => schema_for!(Empty),
+        M::StudioCanvasEdit(_) => schema_for!(crate::studio::CanvasEdited),
+        M::StudioWorld(_) => schema_for!(crate::studio::StudioWorld),
+        M::StudioEntity(_) => schema_for!(crate::studio::Entity),
+        M::StudioEntityCreate(_) | M::StudioEntityUpdate(_) | M::StudioEntityApprove(_) | M::StudioEntityLink(_) => {
+            schema_for!(crate::studio::EntityInfo)
+        }
+        M::StudioEntityRef(_) => schema_for!(crate::studio::EntityRefEdited),
+        M::StudioProduction(_) => schema_for!(crate::studio::Production),
+        M::StudioAsset(_) => schema_for!(crate::studio::StudioAsset),
+        M::StudioImport(_) => schema_for!(crate::studio::StudioImported),
+        M::StudioSet(_) => schema_for!(crate::studio::StudioState),
         M::SearchFiles(_) => schema_for!(SearchFiles),
         M::SearchGrep(_) => schema_for!(SearchGrep),
         M::SearchOpened(_) => schema_for!(Empty),
@@ -401,6 +421,79 @@ pub fn examples() -> Vec<Method> {
         }),
         M::ChangesContinue(ChangesStatusParams { block_id: b() }),
         M::ChangesAbort(ChangesStatusParams { block_id: b() }),
+        M::StudioProject(StudioProjectParams { block_id: b() }),
+        M::StudioInit(StudioInitParams { block_id: b(), name: "Harbor Lights".into(), format: Some("vertical".into()) }),
+        M::StudioSetFormat(StudioSetFormatParams { block_id: b(), canvas: Some("ep01-pilot".into()), format: Some("vertical".into()) }),
+        M::StudioSetFormats(StudioSetFormatsParams {
+            block_id: b(),
+            formats: [("cinema".to_owned(), Format { aspect: "2.39:1".into(), resolution: Some("1080p".into()), fps: Some(24) })].into(),
+        }),
+        M::StudioCanvas(StudioCanvasParams { block_id: b(), name: "ep01-pilot".into() }),
+        M::StudioCanvasCreate(StudioCanvasCreateParams { block_id: b(), title: "Pilot".into(), episode: Some(1), format: None, name: None }),
+        M::StudioCanvasUpdate(StudioCanvasUpdateParams {
+            block_id: b(),
+            name: "ep01-pilot".into(),
+            title: Some("The Pilot".into()),
+            episode: None,
+            format: Some(None),
+        }),
+        M::StudioCanvasDelete(StudioCanvasParams { block_id: b(), name: "moodboard".into() }),
+        M::StudioCanvasEdit(StudioCanvasEditParams {
+            block_id: b(),
+            name: "ep01-pilot".into(),
+            ops: vec![
+                Op::AddNode {
+                    node: NewNode {
+                        id: None,
+                        x: None,
+                        y: None,
+                        w: None,
+                        h: None,
+                        z: None,
+                        parent: Some("n_5c1e0a".into()),
+                        body: NodeBody::Note { text: "Mara hears the bell.".into() },
+                    },
+                },
+                Op::AddEdge { edge: NewEdge { id: None, from: "n_9b2d4f".into(), to: "n_3f2a9c".into(), role: EdgeRole::FirstFrame, label: None } },
+                Op::RemoveNode { id: "n_7a0c11".into() },
+            ],
+            base_rev: Some(41),
+        }),
+        M::StudioWorld(StudioProjectParams { block_id: b() }),
+        M::StudioEntity(StudioEntityParams { block_id: b(), id: "characters/mara".into() }),
+        M::StudioEntityCreate(StudioEntityCreateParams {
+            block_id: b(),
+            section: "characters".into(),
+            name: "Mara Venn".into(),
+            fields: Some([("summary".to_owned(), json!("Salvage diver, 30s."))].into()),
+            body: None,
+        }),
+        M::StudioEntityUpdate(StudioEntityUpdateParams {
+            block_id: b(),
+            id: "characters/mara".into(),
+            fields: Some([("sheet".to_owned(), json!("sheet.png"))].into()),
+            body: None,
+        }),
+        M::StudioEntityApprove(StudioEntityApproveParams { block_id: b(), id: "characters/mara".into(), approved: true }),
+        M::StudioEntityRef(StudioEntityRefParams {
+            block_id: b(),
+            id: "characters/dhritarashtra".into(),
+            change: RefChange::Describe { ref_id: "crown-off".into(), defines: Some("his bare head and hair, without the crown".into()) },
+        }),
+        M::StudioEntityLink(StudioEntityLinkParams { block_id: b(), id: "characters/bhima".into(), other: "props/bhima-mace".into(), linked: true }),
+        M::StudioProduction(StudioProjectParams { block_id: b() }),
+        M::StudioSetModels(StudioSetModelsParams {
+            block_id: b(),
+            models: [("video".to_owned(), Some("kling-3.0-pro".to_owned())), ("image".to_owned(), None)].into(),
+        }),
+        M::StudioAsset(StudioAssetParams { block_id: b(), path: "canvases/ep01-pilot/assets/harbor.png".into(), offset: None, length: None }),
+        M::StudioImport(StudioImportParams { block_id: b(), canvas: "moodboard".into(), from: "~/Downloads/ref.jpg".into() }),
+        M::StudioSet(StudioSetParams {
+            block_id: b(),
+            view: Some(StudioView::World),
+            world_section: Some(Some("characters".into())),
+            ..StudioSetParams::default()
+        }),
         M::SearchFiles(SearchFilesParams { root: "~/src/silo".into(), query: "main.rs !test".into(), limit: Some(20) }),
         M::SearchGrep(SearchGrepParams { root: "~/src/silo".into(), query: "fn main".into(), mode: Some(SearchGrepMode::Plain), limit: None }),
         M::SearchOpened(SearchOpenedParams { root: "~/src/silo".into(), path: "src/main.rs".into() }),

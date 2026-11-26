@@ -460,6 +460,12 @@ fn parallel(method: &Method) -> Option<std::time::Duration> {
         | M::ChangesStatus(_)
         | M::ChangesDiff(_)
         | M::ChangesRoot(_)
+        | M::StudioProject(_)
+        | M::StudioCanvas(_)
+        | M::StudioWorld(_)
+        | M::StudioEntity(_)
+        | M::StudioAsset(_)
+        | M::StudioProduction(_)
         | M::BlockCommands { .. }
         | M::TerminalCommandOutput { .. } => Some(READ_LIMIT),
         M::FilesFind(_) | M::FilesSearch(_) | M::SearchFiles(_) | M::SearchGrep(_) | M::SearchOpened(_) => Some(SEARCH_LIMIT),
@@ -508,7 +514,7 @@ mod lane_tests {
 
 /// Requests that may take seconds (disk, git, a search, a probe, or
 /// waiting on the app): the connection's slow lane runs them, in order,
-/// beside everything else. Not `files.set`/`changes.set` (block state,
+/// beside everything else. Not `files.set`/`changes.set`/`studio.set` (block state,
 /// ordered with layout) nor `app.reply` (what forwarded requests wait on).
 fn slow(method: &Method) -> bool {
     use Method as M;
@@ -603,6 +609,20 @@ fn slow(method: &Method) -> bool {
             | M::SearchFiles(_)
             | M::SearchGrep(_)
             | M::SearchOpened(_)
+            | M::StudioCanvasCreate(_)
+            | M::StudioCanvasDelete(_)
+            | M::StudioCanvasEdit(_)
+            | M::StudioCanvasUpdate(_)
+            | M::StudioEntityCreate(_)
+            | M::StudioEntityUpdate(_)
+            | M::StudioEntityApprove(_)
+            | M::StudioEntityLink(_)
+            | M::StudioEntityRef(_)
+            | M::StudioImport(_)
+            | M::StudioInit(_)
+            | M::StudioSetFormat(_)
+            | M::StudioSetFormats(_)
+            | M::StudioSetModels(_)
             | M::TerminalCommandOutput { .. }
     )
 }
@@ -1138,6 +1158,27 @@ async fn handle(server: &Server, ctx: &Ctx, method: Method) -> Result<Value, Rpc
         | Method::ChangesResolve(_)
         | Method::ChangesContinue(_)
         | Method::ChangesAbort(_) => crate::changes::handle(server, method).await,
+        Method::StudioProject(_)
+        | Method::StudioInit(_)
+        | Method::StudioSetFormat(_)
+        | Method::StudioSetFormats(_)
+        | Method::StudioCanvas(_)
+        | Method::StudioCanvasCreate(_)
+        | Method::StudioCanvasUpdate(_)
+        | Method::StudioCanvasDelete(_)
+        | Method::StudioCanvasEdit(_)
+        | Method::StudioWorld(_)
+        | Method::StudioEntity(_)
+        | Method::StudioEntityCreate(_)
+        | Method::StudioEntityUpdate(_)
+        | Method::StudioEntityApprove(_)
+        | Method::StudioEntityRef(_)
+        | Method::StudioEntityLink(_)
+        | Method::StudioProduction(_)
+        | Method::StudioSetModels(_)
+        | Method::StudioAsset(_)
+        | Method::StudioImport(_)
+        | Method::StudioSet(_) => crate::studio::handle(server, &ctx.principal, method).await,
         Method::SearchFiles(_) | Method::SearchGrep(_) | Method::SearchOpened(_) => crate::search::handle(server, &ctx.principal, method).await,
         Method::ServerRestart { .. }
         | Method::ServerLog { .. }

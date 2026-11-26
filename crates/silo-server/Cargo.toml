@@ -35,6 +35,10 @@ notify = "8"
 # Search (docs/FINDER.md §2): fff's file picker, frecency (LMDB) and grep.
 # Its plain Rust build: `ripgrep` globs, not `zlob` (which needs Zig).
 fff-search = { version = "0.11", default-features = false, features = ["ripgrep"] }
+# Studio blocks: `studio.toml` edited keeping comments and unknown keys;
+# image sizes from their headers.
+toml_edit = "0.25"
+imagesize = "0.14"
 # The type of fff's git statuses (the same libgit2 build fff uses).
 git2 = { version = "0.21", default-features = false }
 

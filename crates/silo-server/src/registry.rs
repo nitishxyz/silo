@@ -34,6 +34,7 @@ use crate::{
     browser::{Block, BrowserBlock, Report},
     changes::ChangesBlock,
     files::FilesBlock,
+    studio::StudioBlock,
 };
 
 /// A control connection whose unsent event backlog exceeds this is closed;
@@ -277,6 +278,7 @@ fn needed_feature(event: &Event) -> Option<&'static str> {
         Event::FilesChanged { .. } => Some(feature::FILES),
         Event::ChangesChanged { .. } => Some(feature::CHANGES),
         Event::ChangesProgress { .. } => Some(feature::CHANGES_SYNC),
+        Event::StudioChanged { .. } => Some(feature::STUDIO),
         Event::ToolsChanged {} | Event::ToolRequest(_) => Some(feature::TOOLS),
         Event::ConfigChanged { .. } => Some(feature::CONFIG),
         Event::SessionsChanged { .. }
@@ -417,6 +419,7 @@ impl Registry {
             match block {
                 Block::Files(files) => files.watch(notes.clone()),
                 Block::Changes(changes) => changes.watch(notes.clone()),
+                Block::Studio(studio) => studio.watch(notes.clone()),
                 _ => {}
             }
         }
@@ -530,7 +533,7 @@ impl Registry {
                         disowned.push(block_id.clone());
                     }
                 }
-                Block::Agent(_) | Block::Files(_) | Block::Changes(_) => {}
+                Block::Agent(_) | Block::Files(_) | Block::Changes(_) | Block::Studio(_) => {}
             }
         }
         for block_id in disowned {
@@ -578,7 +581,8 @@ impl Registry {
             | Event::BrowserCommand { block_id, .. }
             | Event::FilesChanged { block_id, .. }
             | Event::ChangesChanged { block_id }
-            | Event::ChangesProgress { block_id, .. } => block(block_id),
+            | Event::ChangesProgress { block_id, .. }
+            | Event::StudioChanged { block_id, .. } => block(block_id),
             Event::BlockStatus { status } => block(&status.block_id),
             Event::HostOffered { .. } | Event::GrantsChanged { .. } => Visibility::Owner,
             Event::ToolsChanged {} => Visibility::Sessions,
@@ -835,6 +839,7 @@ impl Registry {
             Some(Block::Agent(_)) => Err(RpcError::bad_request(format!("block {id} is an agent"))),
             Some(Block::Files(_)) => Err(RpcError::bad_request(format!("block {id} is a files block"))),
             Some(Block::Changes(_)) => Err(RpcError::bad_request(format!("block {id} is a changes block"))),
+            Some(Block::Studio(_)) => Err(RpcError::bad_request(format!("block {id} is a studio block"))),
             None => Err(RpcError::not_found(format!("block {id}"))),
         }
     }
@@ -920,6 +925,7 @@ impl Registry {
             agent: None,
             files: None,
             changes: None,
+            studio: None,
         };
         if new.kind == BlockKind::Files {
             let root = crate::files::paths::new_root(None, spawn.cwd.as_deref().unwrap_or("~"))?;
@@ -934,6 +940,14 @@ impl Registry {
             let mut changes = ChangesBlock::new(info, ChangesState::new(root.to_string_lossy().into_owned()));
             changes.watch(self.notes.clone());
             self.blocks.insert(id.clone(), Block::Changes(Box::new(changes)));
+            return Ok(id);
+        }
+        // The root is the folder itself (no git lookup).
+        if new.kind == BlockKind::Studio {
+            let root = crate::files::paths::new_root(None, spawn.cwd.as_deref().unwrap_or("~"))?;
+            let mut studio = StudioBlock::new(info, crate::studio::initial(&root));
+            studio.watch(self.notes.clone());
+            self.blocks.insert(id.clone(), Block::Studio(Box::new(studio)));
             return Ok(id);
         }
         if new.kind == BlockKind::Agent {
@@ -1003,9 +1017,9 @@ impl Registry {
         let session = self.session(session_id)?;
         let sid = session.id.clone();
         let fallback = session.windows.iter().find(|w| w.id == session.active_window).map(|w| self.window_size(w)).unwrap_or(TermSize::new(80, 24));
-        // A files or changes block opens in the folder of the block in focus.
+        // A files, changes or studio block opens in the folder of the block in focus.
         let mut spawn = new.spawn.clone();
-        if matches!(new.kind, BlockKind::Files | BlockKind::Changes) && spawn.cwd.is_none() {
+        if matches!(new.kind, BlockKind::Files | BlockKind::Changes | BlockKind::Studio) && spawn.cwd.is_none() {
             let focused = session.windows.iter().find(|w| w.id == session.active_window).map(|w| w.focused.clone());
             spawn.cwd = focused.and_then(|b| self.block_info(&b)).and_then(|i| i.cwd);
         }
@@ -1061,8 +1075,13 @@ impl Registry {
             Some(Block::Agent(agent)) => agent.info().agent.and_then(|a| a.session_id),
             _ => None,
         };
-        if let (Some(otto_session), Some(Block::Changes(changes))) = (agent, self.blocks.get_mut(&new)) {
-            changes.link(AgentLink { otto_session, block_id: Some(block_id.to_owned()) });
+        if let Some(otto_session) = agent {
+            let link = AgentLink { otto_session, block_id: Some(block_id.to_owned()) };
+            match self.blocks.get_mut(&new) {
+                Some(Block::Changes(changes)) => changes.link(link),
+                Some(Block::Studio(studio)) => studio.link(link),
+                _ => {}
+            }
         }
         let window = &mut self.sessions[si].windows[wi];
         match window.floating(block_id) {
@@ -1113,6 +1132,7 @@ impl Registry {
             agent: None,
             files: None,
             changes: None,
+            studio: None,
         };
         let mut config = spawn_config(&id, &session_id, command, cwd.as_deref());
         config.env.extend(env.into_iter().map(|(k, v)| (k.into(), v.into())));
@@ -1741,6 +1761,17 @@ impl Registry {
                     self.emit(Event::ChangesChanged { block_id });
                 }
             }
+            Note::StudioChanged { block_id, root, changes, toml } => {
+                if !matches!(self.blocks.get(&block_id), Some(Block::Studio(s)) if s.root() == root) {
+                    return;
+                }
+                if let Some((exists, first)) = toml {
+                    self.studio_settle(&block_id, exists, first);
+                }
+                for c in changes {
+                    self.emit(Event::StudioChanged { block_id: block_id.clone(), what: c.what, name: c.name, rev: c.rev });
+                }
+            }
             Note::Exited(id) if self.keep_ended(&id) => {
                 // Nobody sees a parked block: it closes when its program
                 // ends, after its exit went out.
@@ -1784,7 +1815,7 @@ impl Registry {
                 }
                 (Some(Block::Browser(browser)), Some(mode)) => browser.own(client_id, label.clone(), mode),
                 (Some(Block::Browser(browser)), None) => browser.disown(client_id),
-                (Some(Block::Agent(_) | Block::Files(_) | Block::Changes(_)), _) => false,
+                (Some(Block::Agent(_) | Block::Files(_) | Block::Changes(_) | Block::Studio(_)), _) => false,
                 (None, _) => return Err(RpcError::not_found(format!("block {id}"))),
             };
             if changed {
@@ -1895,6 +1926,42 @@ impl Registry {
             self.session_changed(si);
         }
         Ok(state)
+    }
+
+    /// A studio block; `bad_request` for another kind.
+    fn studio(&mut self, id: &str) -> Result<&mut StudioBlock, RpcError> {
+        match self.blocks.get_mut(id) {
+            Some(Block::Studio(studio)) => Ok(studio),
+            Some(_) => Err(RpcError::bad_request(format!("block {id} is not a studio block"))),
+            None => Err(RpcError::not_found(format!("block {id}"))),
+        }
+    }
+
+    /// `studio.set`: the block's new view state.
+    pub fn studio_set(&mut self, params: silo_proto::studio::StudioSetParams) -> Result<silo_proto::studio::StudioState, RpcError> {
+        let block_id = params.block_id.clone();
+        let studio = self.studio(&block_id)?;
+        let changed = studio.set(params)?;
+        let state = studio.state().clone();
+        if changed {
+            self.block_changed(&block_id);
+        }
+        Ok(state)
+    }
+
+    /// `studio.toml` of studio block `block_id` appeared (`exists`) or
+    /// went: out of Setup (onto canvas `first`, else the World) or into it.
+    pub fn studio_settle(&mut self, block_id: &str, exists: bool, first: Option<String>) {
+        if self.studio(block_id).is_ok_and(|s| s.settle(exists, first)) {
+            self.block_changed(block_id);
+        }
+    }
+
+    /// Canvas `name` of studio block `block_id` was deleted: close its tab.
+    pub fn studio_forget(&mut self, block_id: &str, name: &str) {
+        if self.studio(block_id).is_ok_and(|s| s.forget(name)) {
+            self.block_changed(block_id);
+        }
     }
 
     /// `files.root`: show canonical directory `root`, afresh.
@@ -2323,6 +2390,7 @@ mod tests {
             agent: None,
             files: None,
             changes: None,
+            studio: None,
         };
         let config = spawn_config("b", "s", &["/bin/sh".into(), "-c".into(), script.into()], None);
         let mut handle = block::spawn(info, &config, notes.clone()).unwrap();

@@ -263,6 +263,24 @@ pub fn need(method: &Method) -> Need {
         | M::FilesTrash(_) => rights(Block(BLOCK), Interact),
         M::ChangesStatus(_) | M::ChangesDiff(_) | M::ChangesPr(_) | M::ChangesConflict(_) => rights(Block(BLOCK), View),
         M::SearchFiles(_) | M::SearchGrep(_) | M::SearchOpened(_) => rights(Folder("root"), View),
+        M::StudioProject(_) | M::StudioCanvas(_) | M::StudioWorld(_) | M::StudioEntity(_) | M::StudioAsset(_) | M::StudioProduction(_) => {
+            rights(Block(BLOCK), View)
+        }
+        M::StudioInit(_)
+        | M::StudioSetFormat(_)
+        | M::StudioSetFormats(_)
+        | M::StudioCanvasCreate(_)
+        | M::StudioCanvasUpdate(_)
+        | M::StudioCanvasDelete(_)
+        | M::StudioCanvasEdit(_)
+        | M::StudioEntityCreate(_)
+        | M::StudioEntityUpdate(_)
+        | M::StudioEntityApprove(_)
+        | M::StudioEntityRef(_)
+        | M::StudioEntityLink(_)
+        | M::StudioSetModels(_)
+        | M::StudioImport(_)
+        | M::StudioSet(_) => rights(Block(BLOCK), Interact),
         M::ChangesSet(_)
         | M::ChangesStage(_)
         | M::ChangesUnstage(_)

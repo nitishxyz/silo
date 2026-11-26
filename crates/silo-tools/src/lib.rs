@@ -4,6 +4,7 @@ pub mod changes;
 mod descriptors;
 pub mod files;
 pub mod provider;
+pub mod studio;
 
 use std::{
     collections::BTreeMap,
@@ -51,6 +52,8 @@ pub fn block_kind(name: &str) -> Option<BlockKind> {
         Some(BlockKind::Files)
     } else if prefix("changes_") {
         Some(BlockKind::Changes)
+    } else if prefix("studio_") || prefix("canvas_") {
+        Some(BlockKind::Studio)
     } else {
         None
     }
@@ -292,6 +295,7 @@ impl Tools {
             "block_list" | "terminal_list" => self.list().await?,
             "files_show" => self.show(&input, anchor).await?,
             "changes_show" => self.changes_show(&input, anchor).await?,
+            "studio_open" | "studio_read" | "canvas_read" | "canvas_create" | "canvas_edit" => return self.studio_tool(name, &input, anchor).await,
             "terminal_close" => {
                 let block_id = self.block(&input, anchor)?;
                 // What it was (terminal, browser, files…), for the agent and

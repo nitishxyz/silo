@@ -269,5 +269,95 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
         let mut input_schema = json!({"type":"object", "properties": properties, "required": required.split_whitespace().collect::<Vec<_>>(), "additionalProperties": false});
         if let Some(defs) = schema.get("$defs") { input_schema["$defs"] = defs.clone(); }
         ToolDescriptor { name: name.into(), description: description.into(), input_schema, effects: Effects { read, write: !read, process: !read }, deferred: name.starts_with("browser_") || name == "files_show" || name == "changes_show" }
-    }).collect()
+    }).chain(studio())
+    .collect()
+}
+
+const STUDIO_PATH: &str = "The studio's folder (or any path in it): absolute, ~/…, or relative to your working directory. Default: your working directory. The studio is the nearest folder up with a studio.toml.";
+
+/// The Studio tools (docs/STUDIO.md §6.1), deferred like `changes_show`.
+fn studio() -> Vec<ToolDescriptor> {
+    let string = |description: &str| json!({"type": "string", "description": description});
+    let object = |properties: serde_json::Value, required: &[&str]| json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false});
+    let mut ops = serde_json::to_value(schema_for!(Vec<silo_proto::studio::Op>)).expect("schema serializes");
+    let defs = ops.as_object_mut().and_then(|o| o.remove("$defs"));
+    if let Some(o) = ops.as_object_mut() {
+        o.remove("$schema");
+        o.remove("title");
+        o.insert("description".into(), json!("Edits applied in order, each on its own (a failing one is reported, the rest apply)."));
+    }
+    let mut edit = object(
+        json!({
+            "path": string(STUDIO_PATH),
+            "canvas": string("The canvas's name (its folder under canvases/, as studio_read lists it)."),
+            "ops": ops,
+            "base_rev": {"type": "integer", "minimum": 0, "description": "The rev you read (canvas_read); if the canvas changed since, the ops still apply by id and the result says moved."},
+        }),
+        &["canvas", "ops"],
+    );
+    if let Some(defs) = defs {
+        edit["$defs"] = defs;
+    }
+    let tool = |name: &str, description: &str, input_schema: serde_json::Value, read: bool| ToolDescriptor {
+        name: name.into(),
+        description: description.into(),
+        input_schema,
+        effects: Effects { read, write: !read, process: false },
+        deferred: true,
+    };
+    vec![
+        tool(
+            "studio_open",
+            "Open or focus your own Studio block (beside your block, linked to you) on a studio: a folder with studio.toml holding world/ (the bible: characters, places, props, style) and canvases/ (boards of cards; an episode is a canvas). canvas shows that canvas's tab; world shows the World view on a section (characters, places, props, overview, style, or any folder under world/) or an entity (characters/mara); production: true shows the Production view (where the whole production stands and what is next). Without studio.toml the block shows Setup.",
+            object(
+                json!({
+                    "path": string(STUDIO_PATH),
+                    "canvas": string("A canvas to show (its name)."),
+                    "world": string("A world section (characters) or entity id (characters/mara) to show."),
+                    "production": {"type": "boolean", "description": "Show the Production view (when neither canvas nor world is given)."},
+                }),
+                &[],
+            ),
+            false,
+        ),
+        tool(
+            "studio_read",
+            "Read a studio as compact text: its name, format presets and the default (16:9, 9:16, …), first a Production block (where the production stands, derived from the files: each asset's sheet, approval, voice and video sheet; each episode's script, shots, keyframes, video, sound, cut and out-of-date, failed or running cards; the model picks; the next steps), then the canvases (name, title, episode, format, node count) and the world: each section's entities with name, summary and the paths of their markdown file, sheet and reference images; each canvas lists its documents (canvases/<name>/*.md, .txt: the script). Read it first when working in a studio. The world is plain files you edit with your file tools (read, write, edit): world/overview.md, world/style.md, and an entity per folder (world/characters/mara/mara.md with frontmatter name, sheet, refs, voice, tags, summary, then the description). Make a sheet with generate_image {path: \"world/characters/mara/sheet.png\"} and name it in the frontmatter's sheet. Generations meant for a canvas take canvas: {name, frame?} on the generation tools (it adds the card); build graphs of cards with canvas_edit. The Studio block follows file changes by itself.",
+            object(json!({"path": string(STUDIO_PATH)}), &[]),
+            true,
+        ),
+        tool(
+            "canvas_read",
+            "Read a canvas as an outline: first its documents (canvases/<name>/*.md, .txt, such as script.md, each marked whether it is pinned on the canvas), then frames (scenes, shots) in order with the nodes in them, then nodes outside frames, then the wires. Each node has its id; cards (kind gen) show what they make, title, model, status, prompt, options, takes (* the picked one) and OUT OF DATE when a wired input changed since its take; assets show their file and size (a document card: `document <path>`); notes their text; entities their id. A card's line ends with its prompt's mentions, each with what it names and whether it is wired (`mentions @characters/mara = \"Mara Venn\" (wired reference from n_ab)`), so you can read a prompt the user wrote. Wires read `n_a → n_b first_frame` (source → card, port). No pixels: look at an image file with read when you need to see it. frame limits it to one frame.",
+            object(
+                json!({
+                    "path": string(STUDIO_PATH),
+                    "canvas": string("The canvas's name."),
+                    "frame": string("Only this frame (its node id) and what is in it."),
+                }),
+                &["canvas"],
+            ),
+            true,
+        ),
+        tool(
+            "canvas_create",
+            "Make a canvas (a board; with episode it is that episode of the series, named ep01-<title>) and open its tab in your Studio block. format overrides the project's default for it (a preset name from studio_read: landscape, vertical, square, portrait, or one the project adds). Starts the studio (studio.toml and world/) when the folder has none. Returns its name, folder and assets folder.",
+            object(
+                json!({
+                    "path": string(STUDIO_PATH),
+                    "title": string("Its title (Pilot, Moodboard)."),
+                    "episode": {"type": "integer", "minimum": 1, "description": "The episode number, for an episode."},
+                    "format": string("A format preset name overriding the project's default."),
+                }),
+                &["title"],
+            ),
+            false,
+        ),
+        tool(
+            "canvas_edit",
+            "Edit a canvas: add, update and remove nodes and edges, and lay nodes out. The canvas is a graph you generate from: a card (body kind gen) makes an image, video, speech, sound or music (makes) from its prompt and from what is wired into its input ports. A new card needs only {kind: gen, makes, prompt} (model?, title?, options? such as aspect, length, voice; model unset: automatic); it is a draft until it runs. Wires are edges from a source to a card whose role is the port: image cards have reference and text; video cards first_frame, middle_frame, last_frame (one wire each; a new one replaces it), reference, video, audio, text; speech, sound and music cards text. Frame and reference ports take images, video a video, audio audio, text text. Sources: an asset (its file; a document's text goes to a text port), an entity node {kind: entity, id: characters/mara} (its sheet), another card (its picked take), a note (its text). Wires never loop; a wire that doesn't fit fails with the reason. A mention in a card's prompt is a wire: @characters/mara (a world entity, @<section>/<id>) or @#n_3f2a9c (a node of this canvas) wires that source into the card when the prompt is written (an entity gets its Entity node, added beside the card when the canvas has none; an image goes to reference, a note or document to text; a video or audio source you wire by hand into the port it is for), and the result's mentions says what was wired, unwired or why not. Deleting the token deletes the wire it made, never one drawn by hand. When the card runs each mention becomes its name with where it went: \"Mara Venn (image 2)\" (its number among the references as sent), \"(the first frame)\", \"(video 1)\", \"(audio 1)\", the bare name for a text or an unwired source. So write @characters/mara in a card's prompt rather than wiring her and numbering \"image 1 is Mara\" by hand; tokens in notes or titles do nothing, an e-mail or an unknown id is plain text. Role next (not a wire) orders shots when frames don't. Build a shot as a keyframe image card (references: the characters' and place's entity nodes) wired into a video card's first_frame, with a frame {kind: frame, role: shot} around them inside a scene frame. Don't pass x, y, w or h for cards: the server sizes cards as the Studio draws them and spaces them so their input ports (left) and output (right) stay clear of their neighbours. A node without x/y goes right of the last node in its frame (a top-level frame goes below the content), sized for its media at the canvas's format; to arrange many, use layout {ids, as: row|column|grid, in?} (no gap: cards get room for their ports). A frame grows to hold what is placed in it and pushes the frames after it (right, below) along. After adding many frames and nodes, finish with {op: \"tidy\"} (frame?: only inside that frame): scenes in a column and shots in a row in order, each frame fitted to its contents, nothing overlapping; canvas_read says when frames overlap. update_node's body merges (pick: a take's index to show another take). Ids of added nodes and edges come back in op order; use them in later ops of the next call. Cards are run with canvas_run {canvas, nodes} (an otto tool), never by this tool. For a quick one-off, the generation tools (generate_image, generate_video, generate_audio, generate_media) take canvas: {name, frame?} and put the result on the canvas as a card with its take, wired from its inputs. To put an existing file (any file under the studio) on the canvas add an asset node {kind: asset, path} (media is inferred from the extension). A document you wrote for the canvas (canvases/<name>/script.md, references.md) is pinned the same way, {kind: asset, path: \"canvases/<name>/script.md\"}: the user reads it on the board as a document card (place it top-left, outside frames), so don't restate it in a note; wire it into a card's text port only when its text should be context for that generation (the first 8,000 characters are used).",
+            edit,
+            false,
+        ),
+    ]
 }

@@ -434,6 +434,15 @@ pub enum Note {
         block_id: BlockId,
         root: std::path::PathBuf,
     },
+    /// A studio block's files changed, seen by its watcher on canonical
+    /// `root`; with `toml` when `studio.toml` was among them: whether it
+    /// exists now, and the first canvas in tab order.
+    StudioChanged {
+        block_id: BlockId,
+        root: std::path::PathBuf,
+        changes: Vec<crate::studio::Changed>,
+        toml: Option<(bool, Option<String>)>,
+    },
 }
 
 pub struct BlockHandle {
@@ -2350,13 +2359,17 @@ impl Actor {
         }
     }
 
+    /// `Take`: `client` alone sizes the block from now on, whoever typed
+    /// before ("Take size", `silo attach`). `Request`: it becomes the owner
+    /// of a block that has none, and a candidate otherwise.
     fn own(&mut self, client: ClientId, mode: OwnMode) {
         self.candidates.retain(|c| *c != client);
         self.candidates.push(client);
         if mode == OwnMode::Take {
             self.driver = Some(client);
-        }
-        if mode == OwnMode::Take || self.owner.is_none() {
+            self.sizers = vec![(client, Instant::now())];
+            self.share_size();
+        } else if self.owner.is_none() {
             // The new owner and its size go out together: publishing the
             // owner first would show it, for a moment, at the old size.
             self.owner = Some(client);
