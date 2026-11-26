@@ -1157,19 +1157,76 @@ fn cap(text: &str) -> (String, bool) {
     (format!("{}\n[output truncated: {} bytes omitted]\n{}", &text[..head], end - head, &text[end..]), true)
 }
 
+/// The bytes a key sends. Names are case-insensitive; a chord takes the
+/// spellings models reach for: `ctrl-c`, `Control+C`, `C-c`, `^C`,
+/// `alt-x`, `M-x`, `shift-tab`.
 fn key_text(key: &str) -> anyhow::Result<String> {
-    Ok(match key.to_ascii_lowercase().as_str() {
-        "enter" => "\r".into(),
-        "tab" => "\t".into(),
-        "esc" | "escape" => "\x1b".into(),
-        "backspace" => "\x7f".into(),
-        "up" => "\x1b[A".into(),
-        "down" => "\x1b[B".into(),
-        "right" => "\x1b[C".into(),
-        "left" => "\x1b[D".into(),
-        k if k.starts_with("ctrl-") && k.len() == 6 && k.as_bytes()[5].is_ascii_lowercase() => char::from(k.as_bytes()[5] - b'a' + 1).to_string(),
-        _ => bail!("unsupported key: {key}"),
-    })
+    let unsupported = || {
+        anyhow::anyhow!(
+            "unsupported key: {key} (keys: enter, tab, esc, backspace, delete, space, up, down, left, right, home, end, pageup, pagedown, ctrl-<letter>, alt-<key>, shift-tab)"
+        )
+    };
+    let lower = key.trim().to_ascii_lowercase();
+    if let Some(c) = lower.strip_prefix('^').filter(|c| c.len() == 1) {
+        return ctrl(c.as_bytes()[0]).ok_or_else(unsupported);
+    }
+    // `ctrl-c`, `ctrl+c`, `control c`, `c-c`; the last part is the key.
+    let parts: Vec<&str> = lower.split(['-', '+', ' ']).filter(|p| !p.is_empty()).collect();
+    let (base, mods) = match parts.split_last() {
+        Some((base, mods)) if !mods.is_empty() => (*base, mods),
+        // A bare `-` or `+` is the key itself.
+        _ => (lower.as_str(), &[][..]),
+    };
+    let (mut is_ctrl, mut is_alt, mut is_shift) = (false, false, false);
+    for m in mods {
+        match *m {
+            "ctrl" | "control" | "c" | "ctl" => is_ctrl = true,
+            "alt" | "option" | "opt" | "meta" | "m" => is_alt = true,
+            "shift" | "s" => is_shift = true,
+            _ => return Err(unsupported()),
+        }
+    }
+    let mut text = match (base, is_shift) {
+        ("tab", true) => "\x1b[Z".to_owned(),
+        (_, true) => return Err(unsupported()),
+        (b, false) if is_ctrl => ctrl(*b.as_bytes().first().filter(|_| b.len() == 1).ok_or_else(unsupported)?).ok_or_else(unsupported)?,
+        ("enter" | "return" | "cr", _) => "\r".into(),
+        ("tab", _) => "\t".into(),
+        ("esc" | "escape", _) => "\x1b".into(),
+        ("backspace" | "bs", _) => "\x7f".into(),
+        ("delete" | "del", _) => "\x1b[3~".into(),
+        ("space", _) => " ".into(),
+        ("up", _) => "\x1b[A".into(),
+        ("down", _) => "\x1b[B".into(),
+        ("right", _) => "\x1b[C".into(),
+        ("left", _) => "\x1b[D".into(),
+        ("home", _) => "\x1b[H".into(),
+        ("end", _) => "\x1b[F".into(),
+        ("pageup" | "pgup", _) => "\x1b[5~".into(),
+        ("pagedown" | "pgdn", _) => "\x1b[6~".into(),
+        (b, _) if is_alt && b.chars().count() == 1 => b.to_owned(),
+        _ => return Err(unsupported()),
+    };
+    if is_alt {
+        text.insert(0, '\x1b');
+    }
+    Ok(text)
+}
+
+/// Ctrl plus a letter or one of `@[\]^_ ?`.
+fn ctrl(c: u8) -> Option<String> {
+    let byte = match c {
+        b'a'..=b'z' => c - b'a' + 1,
+        b'@' | b' ' => 0,
+        b'[' => 0x1b,
+        b'\\' => 0x1c,
+        b']' => 0x1d,
+        b'^' => 0x1e,
+        b'_' => 0x1f,
+        b'?' => 0x7f,
+        _ => return None,
+    };
+    Some(char::from(byte).to_string())
 }
 
 #[cfg(test)]
@@ -1181,6 +1238,17 @@ mod tests {
         assert_eq!(key_text("up").unwrap(), "\x1b[A");
         assert_eq!(key_text("Enter").unwrap(), "\r");
         assert!(key_text("ctrl-!").is_err());
+        for spelling in ["Control+C", "C-c", "^C", "ctrl+c", "CTRL-C", "control c"] {
+            assert_eq!(key_text(spelling).unwrap(), "\x03", "{spelling}");
+        }
+        assert_eq!(key_text("ctrl-d").unwrap(), "\x04");
+        assert_eq!(key_text("alt-x").unwrap(), "\x1bx");
+        assert_eq!(key_text("M-b").unwrap(), "\x1bb");
+        assert_eq!(key_text("shift-tab").unwrap(), "\x1b[Z");
+        assert_eq!(key_text("PageDown").unwrap(), "\x1b[6~");
+        assert_eq!(key_text("space").unwrap(), " ");
+        assert!(key_text("hyper-x").is_err());
+        assert!(key_text("f13").unwrap_err().to_string().contains("ctrl-<letter>"));
     }
     #[test]
     fn capping() {

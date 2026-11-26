@@ -129,7 +129,7 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
         ),
         (
             "terminal_send",
-            "Type text then keys. submit:true sends Enter separately after 150 ms so TUIs do not treat it as pasted text. After sending a harness prompt, terminal_wait then terminal_read.",
+            "Type text then keys. keys are names: enter, tab, esc, backspace, delete, space, up, down, left, right, home, end, pageup, pagedown, ctrl-c (any letter), alt-x, shift-tab. submit:true sends Enter separately after 150 ms so TUIs do not treat it as pasted text. After sending a harness prompt, terminal_wait then terminal_read.",
             "block_id text keys submit",
             "",
             false,
