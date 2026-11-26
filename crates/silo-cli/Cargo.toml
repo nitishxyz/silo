@@ -19,6 +19,7 @@ serde.workspace = true
 qrcode = { version = "0.14", default-features = false }
 silo-proto.workspace = true
 silo-server.workspace = true
+silo-pty.workspace = true
 silo-client.workspace = true
 silo-lua.workspace = true
 silo-tools.workspace = true

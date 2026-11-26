@@ -625,6 +625,10 @@ async fn run(input: Value, cx: ToolCx, job: Option<Arc<Mutex<JobState>>>, opts: 
     }
     let cwd = crate::policy::resolve_path(&cx.cwd, &cx.project_root, input.get("cwd").and_then(Value::as_str).unwrap_or("."))?.path;
     cmd.current_dir(cwd).envs(ENV).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    // A terminal's program resume token (OSC 7577) that otto inherited is
+    // not for the commands an agent runs: they could register a command the
+    // terminal later runs as the user.
+    cmd.env_remove("OSC7577_TOKEN");
     cmd.process_group(0);
     let mut child = cmd.spawn().map_err(io)?;
     let group = Group(child.id().ok_or_else(|| ToolError::failed("Missing process id"))?);

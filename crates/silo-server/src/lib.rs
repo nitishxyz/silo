@@ -23,6 +23,7 @@ mod names;
 pub mod notify;
 pub mod permissions;
 pub mod persist;
+pub mod program_resume;
 pub mod prompts;
 pub mod registry;
 pub mod remote;

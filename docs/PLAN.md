@@ -202,7 +202,8 @@ One PTY has one size. It follows the people typing in the block, never who is lo
 ### 3.7 Persistence
 
 - **Session tree:** saved on the server (sqlite or JSON). On server restart, sessions and layouts come back, but
-  processes can't.
+  processes can't, except programs that reported how to resume them (OSC 7577, [`RESUME.md`](RESUME.md)): the
+  fresh shell runs that command at its first prompt.
 - **Terminal contents:** a periodic `ghostty_snapshot_encode` of each terminal to disk, encrypted at rest with a
   per-host key.
   - After a crash or reboot, a block reopens showing its old screen and scrollback ("restored, process exited").
@@ -509,7 +510,8 @@ until all text, the terminal foreground included, reads at 4.5:1 over the theme 
   `silo-login`).
 - Smaller gaps: a page for share links, `silo share`, flaky tests, Linux CI for otto and clippy, browser find,
   file chooser and permission prompts, the app's relay setting, MCP elicitation.
-- Deferred: deb and rpm packages; offering to rerun the last command after a crash restore; screen-reader support;
+- Deferred: deb and rpm packages; offering to rerun the last command after a crash restore (programs that report
+  how to resume them come back: [`RESUME.md`](RESUME.md)); screen-reader support;
   PAM sessions; block plugins; a home-server setting for iPad and phone clients.
 
 ---

@@ -12,6 +12,7 @@ mod lifecycle;
 mod line_mode;
 mod parked;
 mod persist;
+mod program_resume;
 mod remote;
 mod search;
 mod share;

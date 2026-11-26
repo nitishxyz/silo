@@ -320,7 +320,7 @@ async fn a_hot_upgrade_keeps_working_records_and_a_crash_restore_only_done_and_e
 
     let (notes, _rx) = unbounded_channel();
     let config = SpawnConfig { command: vec!["/bin/sh".into(), "-c".into(), "read l".into()], cwd: None, env: Vec::new() };
-    let resumed = block::spawn_resumed(info("b-handoff", 120), checkpoint, &config, notes).expect("resume");
+    let resumed = block::spawn_resumed(info("b-handoff", 120), checkpoint, &config, None, notes).expect("resume");
     assert_eq!(states(&resumed.status.lock().unwrap()), kept, "a fresh shell after a crash: the exit rule ran");
     resumed.send(BlockMsg::Shutdown);
 }

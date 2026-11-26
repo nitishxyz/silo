@@ -10,6 +10,12 @@
 //! with `cmdline_url`, D end with the exit code), chained onto the user's
 //! hooks. They are left out when something already emits them: fish 4+
 //! itself, or a user integration whose functions or prompt contain `133;`.
+//!
+//! A shell started with `SILO_RESUME` (a block restored after a restart
+//! whose program reported how to resume it, OSC 7577) reads that file at
+//! its first prompt, removes it and runs its arguments as a foreground job:
+//! one per line after a `=`, the program looked up on `PATH` past
+//! functions, aliases and builtins, and never parsed as shell source.
 
 use std::{
     ffi::OsString,
@@ -89,6 +95,26 @@ const ZSH_MARKS: &str = r#"  if [[ -o interactive && ${(v)functions}$PS1 != *'13
   fi
 "#;
 
+/// zsh: run the resume file at the first prompt.
+const ZSH_RESUME: &str = r#"  if [[ -o interactive && -n ${SILO_RESUME-} ]]; then
+    typeset -g __silo_rf=$SILO_RESUME
+    unset SILO_RESUME
+    __silo_resume() {
+      precmd_functions=(${precmd_functions:#__silo_resume})
+      local f=$__silo_rf
+      local -a a
+      unset __silo_rf
+      [[ -r $f ]] || return 0
+      a=("${(@f)$(<$f)}")
+      command rm -f -- $f
+      a=("${(@)a#=}")
+      [[ -n $a[1] ]] && command "${(@)a}"
+      return 0
+    }
+    precmd_functions+=(__silo_resume)
+  fi
+"#;
+
 fn zsh_file(home: &Path, lead: &[PathBuf], file: &str) -> String {
     let ours = quote(&zsh_dir(home));
     let lead = quoted_list(lead);
@@ -98,7 +124,7 @@ fn zsh_file(home: &Path, lead: &[PathBuf], file: &str) -> String {
         ".zlogin" => "true",
         _ => "false",
     };
-    let marks = if matches!(file, ".zshrc" | ".zlogin") { ZSH_MARKS } else { "" };
+    let marks = if matches!(file, ".zshrc" | ".zlogin") { format!("{ZSH_MARKS}{ZSH_RESUME}") } else { String::new() };
     format!(
         "ZDOTDIR=${{SILO_ZDOTDIR:-$HOME}}\n\
          [[ -r $ZDOTDIR/{file} ]] && builtin source -- $ZDOTDIR/{file}\n\
@@ -154,6 +180,35 @@ const BASH_MARKS: &str = r#"if [[ $- == *i* && $(builtin declare -f)${PS0-}${PS1
 fi
 "#;
 
+/// bash: run the resume file at the first prompt (bash 3.2 too). `exec -a`
+/// keeps the program's own name; `type -P` skips functions and builtins.
+const BASH_RESUME: &str = r#"if [[ $- == *i* && -n ${SILO_RESUME-} ]]; then
+  __silo_rf=$SILO_RESUME
+  unset SILO_RESUME
+  __silo_resume() {
+    local ret=$? f=$__silo_rf l= p=
+    local -a a=()
+    PROMPT_COMMAND=${PROMPT_COMMAND%__silo_resume}
+    PROMPT_COMMAND=${PROMPT_COMMAND%$'\n'}
+    unset __silo_rf
+    if [[ -r $f ]]; then
+      while IFS= read -r l || [[ -n $l ]]; do a+=("${l#=}"); done < "$f"
+      command rm -f -- "$f"
+    fi
+    if [[ -n ${a[0]-} ]]; then
+      if [[ ${a[0]} == */* ]]; then p=${a[0]}; else p=$(builtin type -P -- "${a[0]}"); fi
+      if [[ -n $p ]]; then
+        ( exec -a "${a[0]}" "$p" "${a[@]:1}" )
+      else
+        builtin printf 'silo: %s: command not found\n' "${a[0]}" >&2
+      fi
+    fi
+    return $ret
+  }
+  PROMPT_COMMAND=${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}__silo_resume
+fi
+"#;
+
 fn bash_rc_script(lead: &[PathBuf]) -> String {
     let joined = quote(Path::new(&lead.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().join(":")));
     let lead = quoted_list(lead);
@@ -170,7 +225,7 @@ fn bash_rc_script(lead: &[PathBuf]) -> String {
          _silo_path=${{_silo_path#:}}; _silo_path=${{_silo_path%:}}\n\
          PATH={joined}${{_silo_path:+:$_silo_path}}\n\
          unset _silo_path _silo_dir\n\
-         {BASH_MARKS}"
+         {BASH_MARKS}{BASH_RESUME}"
     )
 }
 
@@ -206,6 +261,24 @@ const FISH_MARKS: &str = r#"if status is-interactive
 end
 "#;
 
+/// fish: run the resume file at the first prompt (`command` skips
+/// functions and builtins).
+const FISH_RESUME: &str = r#"if status is-interactive; and set -q SILO_RESUME
+    set -g __silo_rf $SILO_RESUME
+    set -e SILO_RESUME
+    function __silo_resume --on-event fish_prompt
+        functions -e __silo_resume
+        set -l f $__silo_rf
+        set -e __silo_rf
+        test -r "$f"; or return 0
+        set -l a (string replace -r '^=' '' < $f)
+        command rm -f -- $f
+        test -n "$a[1]"; and command $a
+        return 0
+    end
+end
+"#;
+
 fn fish_snippet(home: &Path, lead: &[PathBuf]) -> String {
     let data = quote(&fish_data(home));
     let lead = quoted_list(lead);
@@ -216,7 +289,7 @@ fn fish_snippet(home: &Path, lead: &[PathBuf]) -> String {
          \x20   functions -e __silo_path\n\
          \x20   fish_add_path --global --move --path {lead}\n\
          end\n\
-         {FISH_MARKS}"
+         {FISH_MARKS}{FISH_RESUME}"
     )
 }
 
@@ -336,7 +409,13 @@ mod tests {
     /// Type `lines` into an interactive `program` on a PTY, one per
     /// `ready> ` prompt, and return everything it wrote.
     fn session(program: &Path, flags: &[&str], home: &Path, user: &Path, lines: &[&str]) -> String {
-        let (args, env) = sandbox(program, home, user);
+        session_with(program, flags, home, user, lines, Vec::new())
+    }
+
+    /// [`session`] with more environment.
+    fn session_with(program: &Path, flags: &[&str], home: &Path, user: &Path, lines: &[&str], extra: Vec<(OsString, OsString)>) -> String {
+        let (args, mut env) = sandbox(program, home, user);
+        env.extend(extra);
         let mut command = vec![program.as_os_str().to_owned()];
         command.extend(args);
         command.extend(flags.iter().map(OsString::from));
@@ -507,6 +586,44 @@ mod tests {
             eprintln!("marks: {} (native: {native}) ok", fish.display());
         }
         assert!(is_hooked_login(&[OsString::from("/bin/bash"), "--rcfile".into(), bash_rc(&home).into_os_string()]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_resume_file_runs_once_at_the_first_prompt() {
+        let root = std::env::temp_dir().join(format!("silo-resume-shell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("silo home");
+        let user = root.join("user");
+        std::fs::create_dir_all(user.join(".config/fish")).unwrap();
+        // A function with the program's name must not run in its place.
+        for (file, text) in [
+            (".zshrc", "PS1='ready> '\nsh() { print -rn -- FUNC; }\n"),
+            (".bash_profile", "PS1='ready> '\nsh() { printf FUNC; }\n"),
+            (".config/fish/config.fish", "function fish_prompt; printf 'ready> '; end\nfunction sh; printf FUNC; end\n"),
+        ] {
+            std::fs::write(user.join(file), text).unwrap();
+        }
+        install(&home, &[home.join("bin")]).unwrap();
+        let script = r#"printf '<%s|%s|%s|%s>' "$0" "$1" "$2" "$(ps -o stat= -p $$)""#;
+        let argv = ["sh", "-c", script, "n0", "", "a b;$(x)"];
+        let mut shells: Vec<(PathBuf, &[&str])> = Vec::new();
+        shells.extend(programs("zsh").into_iter().map(|p| (p, &["-l"][..])));
+        shells.extend(programs("bash").into_iter().map(|p| (p, &["-i"][..])));
+        shells.extend(programs("fish").into_iter().map(|p| (p, &[][..])));
+        for (n, (shell, flags)) in shells.into_iter().enumerate() {
+            let file = root.join(format!("resume-{n}"));
+            std::fs::write(&file, argv.iter().map(|a| format!("={a}\n")).collect::<String>()).unwrap();
+            let extra = vec![(OsString::from("SILO_RESUME"), file.clone().into_os_string())];
+            let out = session_with(&shell, flags, &home, &user, &["echo next", "exit"], extra);
+            let ran = out.split("<n0||a b;$(x)|").count() - 1;
+            assert_eq!(ran, 1, "{}: ran once: {out:?}", shell.display());
+            let stat = out.split("<n0||a b;$(x)|").nth(1).and_then(|s| s.split('>').next()).unwrap_or_default();
+            assert!(stat.contains('+'), "{}: a foreground job: {stat:?}", shell.display());
+            assert!(!out.contains("FUNC"), "{}: not the function: {out:?}", shell.display());
+            assert!(!file.exists(), "{}: the file is removed", shell.display());
+            eprintln!("resume: {} ok", shell.display());
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

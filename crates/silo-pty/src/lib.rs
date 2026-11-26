@@ -584,6 +584,58 @@ pub fn process_name(pid: i32) -> Option<String> {
     }
 }
 
+/// What the kernel says about a live process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessInfo {
+    pub ppid: i32,
+    pub uid: u32,
+    /// When it started, in a unit of the platform (microseconds since the
+    /// epoch on macOS, clock ticks since boot on Linux): only for telling
+    /// a process from a later one given the same pid.
+    pub start: u64,
+}
+
+/// Parent, owner and start time of `pid`; `None` once it is gone.
+#[must_use]
+pub fn process_info(pid: i32) -> Option<ProcessInfo> {
+    if pid <= 0 {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: proc_pidinfo fills at most `size` bytes of the zeroed struct.
+        unsafe {
+            let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+            let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+            let n = libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size);
+            if n != size {
+                return None;
+            }
+            // A zombie has exited: only its exit status is left.
+            if info.pbi_status == libc::SZOMB {
+                return None;
+            }
+            Some(ProcessInfo {
+                ppid: i32::try_from(info.pbi_ppid).ok()?,
+                uid: info.pbi_uid,
+                start: info.pbi_start_tvsec.saturating_mul(1_000_000).saturating_add(info.pbi_start_tvusec),
+            })
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata(format!("/proc/{pid}")).ok()?.uid();
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // `pid (comm) state ppid ... starttime(22)`; comm may hold anything.
+        let rest: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+        if rest.first() == Some(&"Z") {
+            return None;
+        }
+        Some(ProcessInfo { ppid: rest.get(1)?.parse().ok()?, uid, start: rest.get(19)?.parse().ok()? })
+    }
+}
+
 /// The processes in process group `pgid` (its leader included).
 #[must_use]
 pub fn process_group(pgid: i32) -> Vec<i32> {

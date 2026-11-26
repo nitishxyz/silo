@@ -8278,6 +8278,7 @@ dependencies = [
  "silo-login",
  "silo-lua",
  "silo-proto",
+ "silo-pty",
  "silo-server",
  "silo-tools",
  "silo-vt",

@@ -71,6 +71,27 @@ enum Command {
         #[arg(long)]
         codex_notify: bool,
     },
+    /// Tell the terminal how to bring a program back after a restart (OSC
+    /// 7577): `silo resume -- nvim -S session.vim`, `--clear`, or `--claude`
+    /// in a Claude Code SessionStart hook. Does nothing outside a terminal
+    /// that supports it, and never fails.
+    Resume {
+        /// The program to resume (default: the one that ran this).
+        #[arg(long)]
+        pid: Option<i32>,
+        /// The directory to resume it in.
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Forget the program's resume command.
+        #[arg(long, conflicts_with_all = ["claude", "argv"])]
+        clear: bool,
+        /// Read a Claude Code hook's JSON on stdin and report `claude --resume <session>`.
+        #[arg(long, conflicts_with = "argv")]
+        claude: bool,
+        /// The command that resumes the program.
+        #[arg(last = true)]
+        argv: Vec<String>,
+    },
     /// Notify the user from this block.
     Notify {
         #[arg(long)]
@@ -901,6 +922,12 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => eprintln!("silo report: {error:#}"),
                 Err(_) => eprintln!("silo report: timed out"),
+            }
+            Ok(0)
+        }
+        Command::Resume { pid, cwd, clear, claude, argv } => {
+            if let Err(error) = silo_cli::resume::run(pid, cwd, clear, claude, argv) {
+                eprintln!("silo resume: {error:#}");
             }
             Ok(0)
         }
@@ -1781,7 +1808,11 @@ async fn show_status() -> anyhow::Result<i32> {
                 (Some(error), _) => println!("remote access:  off ({error})"),
                 (None, Some(port)) => {
                     let public = silo_client::direct::public_addrs(&info);
-                    let at = if public.is_empty() { String::new() } else { format!(" at {}", public.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")) };
+                    let at = if public.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" at {}", public.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
+                    };
                     println!("remote access:  UDP port {port}{at} (a firewall in front of this machine must let it in for direct connections)");
                 }
                 (None, None) => println!("remote access:  a random UDP port (changes at each start)"),

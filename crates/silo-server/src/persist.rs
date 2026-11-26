@@ -19,6 +19,7 @@ use crate::{
     Server,
     block::{self, BlockHandle, Checkpoint, Note},
     browser::Block,
+    program_resume,
     registry::{self, Session},
 };
 
@@ -53,11 +54,12 @@ struct Stamp {
     size: TermSize,
     lifecycle: Lifecycle,
     config: TerminalConfig,
+    resume: u64,
 }
 
 impl Stamp {
     fn of(cp: &Checkpoint) -> Self {
-        Self { epoch: cp.epoch, offset: cp.offset, size: cp.size, lifecycle: cp.lifecycle, config: cp.config }
+        Self { epoch: cp.epoch, offset: cp.offset, size: cp.size, lifecycle: cp.lifecycle, config: cp.config, resume: cp.resume.rev }
     }
 }
 
@@ -105,6 +107,7 @@ pub struct Restored {
 /// The key or store cannot be opened, or the manifest is unreadable.
 pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persist, Restored)> {
     let dir = state_dir(home);
+    program_resume::clean(home);
     let key = HostKey::load_or_create(&dir).with_context(|| format!("host key in {}", dir.display()))?;
     let store = Store::open(&dir, key).with_context(|| format!("open {}", dir.display()))?;
     let report = store.load::<Manifest>().with_context(|| format!("load {}", store.manifest_path().display()))?;
@@ -129,7 +132,7 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
             .generation
             .and_then(|g| snapshots.remove(&(id.clone(), g)).map(|bytes| (g, bytes)))
             .context("no readable checkpoint")
-            .and_then(|(g, bytes)| Ok((g, revive(record.info.clone(), decode(&bytes)?, notes)?)));
+            .and_then(|(g, bytes)| Ok((g, revive(home, record.info.clone(), decode(&bytes)?, notes)?)));
         let handle = match restored {
             Ok((generation, handle)) => {
                 generations.insert(id.clone(), (generation, None));
@@ -138,7 +141,7 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
             Err(error) => {
                 tracing::warn!(block = %id, "restoring block with an empty screen: {error:#}");
                 let size = record.info.size;
-                revive(record.info, empty_checkpoint(size)?, notes)?
+                revive(home, record.info, empty_checkpoint(size)?, notes)?
             }
         };
         blocks.insert(id, Block::Terminal(handle));
@@ -167,13 +170,26 @@ pub fn open(home: &Path, notes: &UnboundedSender<Note>) -> anyhow::Result<(Persi
 
 /// A block whose program exited stays exited; any other gets a fresh shell
 /// in its last cwd below the restored screen, or stays process-less if the
-/// shell cannot start.
-fn revive(info: BlockInfo, checkpoint: Checkpoint, notes: &UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
+/// shell cannot start. A program that reported how to resume it (OSC 7577)
+/// runs again at that shell's first prompt, where Silo's integration
+/// reaches the shell (zsh, bash, fish).
+fn revive(home: &Path, info: BlockInfo, checkpoint: Checkpoint, notes: &UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
     if checkpoint.lifecycle == Lifecycle::Exited {
         return block::spawn_restored(info, checkpoint, notes.clone());
     }
-    let config = registry::spawn_config(&info.id, &info.session_id, &[], info.cwd.as_deref());
-    block::spawn_resumed(info.clone(), checkpoint.clone(), &config, notes.clone()).or_else(|error| {
+    let integrated = crate::shell::Shell::of(&silo_pty::user_shell()).is_some();
+    let resumed = checkpoint.resume.pick().filter(|_| integrated).and_then(|record| program_resume::prepare(home, &info.id, record));
+    let cwd = resumed.as_ref().and_then(|r| r.cwd.clone()).or_else(|| info.cwd.clone());
+    let mut config = registry::spawn_config(&info.id, &info.session_id, &[], cwd.as_deref());
+    if let Some(resumed) = &resumed {
+        config.env.push((program_resume::RESUME_ENV.into(), resumed.file.clone().into_os_string()));
+    }
+    let mut checkpoint = checkpoint;
+    // The resumed program reports again when it starts; the old records
+    // are not resumed a second time.
+    checkpoint.resume = program_resume::ResumeState::default();
+    let name = resumed.as_ref().map(|r| r.name.as_str());
+    block::spawn_resumed(info.clone(), checkpoint.clone(), &config, name, notes.clone()).or_else(|error| {
         tracing::warn!(block = %info.id, "restoring block without a shell: {error:#}");
         block::spawn_restored(info, checkpoint, notes.clone())
     })
@@ -194,6 +210,7 @@ pub(crate) fn empty_checkpoint(size: TermSize) -> anyhow::Result<Checkpoint> {
         osc_pwd: None,
         command: false,
         status: None,
+        resume: program_resume::ResumeState::default(),
     })
 }
 
@@ -273,6 +290,9 @@ impl Persist {
                 continue;
             }
             let generation = prev.map_or(1, |(g, _)| g + 1);
+            // A program's token stays in memory (and a hot upgrade's socket).
+            let mut cp = cp;
+            cp.resume.token = None;
             match encode(cp) {
                 Ok(bytes) => {
                     next.insert(id.clone(), (generation, Some(stamp)));

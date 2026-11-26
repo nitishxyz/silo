@@ -107,6 +107,12 @@ fn merge_claude(settings: &mut Value) -> anyhow::Result<()> {
         }
         entries.push(entry);
     }
+    // Claude Code comes back with its session after a restart (OSC 7577).
+    let command = "silo resume --claude";
+    let entries = hooks.entry("SessionStart").or_insert_with(|| json!([])).as_array_mut().context("hook event must be an array")?;
+    if !entries.iter().any(|e| e["hooks"].as_array().is_some_and(|h| h.iter().any(|h| h["type"] == "command" && h["command"] == command))) {
+        entries.push(json!({"hooks":[{"type":"command", "command":command}]}));
+    }
     Ok(())
 }
 
@@ -122,6 +128,7 @@ mod tests {
         assert_eq!(config, once);
         assert_eq!(config["model"], "custom");
         assert_eq!(config["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        assert_eq!(config["hooks"]["SessionStart"][0]["hooks"][0]["command"], "silo resume --claude");
     }
     #[test]
     fn installation_preserves_codex_notify() {

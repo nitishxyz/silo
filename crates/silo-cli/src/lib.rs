@@ -6,6 +6,7 @@ pub mod hooks;
 pub mod link;
 pub mod login_cmd;
 pub mod mcp;
+pub mod resume;
 pub mod script;
 pub mod share;
 pub mod tool;

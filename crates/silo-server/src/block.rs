@@ -24,7 +24,7 @@ use silo_proto::{
         BlockId, BlockInfo, BlockStatus, Busy, ClientId, CommandRecord, CursorShape, Lifecycle, Progress, Sizer, StatusKind, StatusState, TermSize,
         TerminalConfig,
     },
-    offer::{Offer, OfferScanner},
+    offer::{Found, Offer, OfferScanner},
     text::{MAX_BODY, MAX_TITLE, untrusted},
 };
 use silo_pty::{Pty, PtyEvent, PtyInput, PtySize, SpawnConfig};
@@ -34,6 +34,7 @@ use silo_vt::{
 };
 
 use crate::{
+    program_resume::{self, ResumeState},
     prompts::{CommandLog, keep_end},
     status::{self, BusyInputs, PROGRESS_INTERVAL, PROGRESS_TTL, Pacer, Records, Report},
 };
@@ -361,6 +362,9 @@ pub struct Checkpoint {
     /// Block status and command records (Phase 7 §5.5).
     #[serde(default)]
     pub status: Option<SavedStatus>,
+    /// Program resume records (OSC 7577); the token only on a hot upgrade.
+    #[serde(default)]
+    pub resume: ResumeState,
 }
 
 /// A command's row in a checkpoint's snapshot.
@@ -747,8 +751,11 @@ struct Actor {
     /// Last `(echo, icanon)` read from the PTY and when it was polled.
     tty_mode: Option<(bool, bool)>,
     last_mode_poll: Instant,
-    /// Strips host offers from the output.
+    /// Strips host offers and resume reports from the output.
     scanner: OfferScanner,
+    /// The token given to the program and the resume commands reported
+    /// with it (OSC 7577).
+    resume: ResumeState,
     /// Tickets already offered and when recent offers were raised.
     offered: VecDeque<String>,
     offer_times: VecDeque<Instant>,
@@ -978,12 +985,18 @@ pub fn spawn(info: BlockInfo, config: &SpawnConfig, notes: UnboundedSender<Note>
 ///
 /// # Errors
 /// Fails if the snapshot cannot be restored or the program not spawned.
-pub fn spawn_resumed(info: BlockInfo, checkpoint: Checkpoint, config: &SpawnConfig, notes: UnboundedSender<Note>) -> anyhow::Result<BlockHandle> {
+pub fn spawn_resumed(
+    info: BlockInfo,
+    checkpoint: Checkpoint,
+    config: &SpawnConfig,
+    resuming: Option<&str>,
+    notes: UnboundedSender<Note>,
+) -> anyhow::Result<BlockHandle> {
     let (mut vt, terminal) = restore_vt(&checkpoint)?;
     // The old program is gone: the exit rule runs. Rows are re-pinned
     // before the banner moves them.
     let status = Status::restore(&mut vt, checkpoint.status, false);
-    let banner = resume_banner(&mut vt)?;
+    let banner = resume_banner(&mut vt, resuming)?;
     vt.write_output(banner.as_bytes()).map_err(|e| anyhow::anyhow!("{e}"))?;
     drop(vt.take_events());
     let mut info = info;
@@ -996,13 +1009,14 @@ pub fn spawn_resumed(info: BlockInfo, checkpoint: Checkpoint, config: &SpawnConf
 }
 
 /// Leave whatever modes the old program set, then a dim separator line
-/// below the cursor.
-fn resume_banner(vt: &mut TerminalCore) -> anyhow::Result<String> {
+/// below the cursor, naming the program resumed (OSC 7577) if any.
+fn resume_banner(vt: &mut TerminalCore, resuming: Option<&str>) -> anyhow::Result<String> {
     let frame = vt.frame().map_err(|e| anyhow::anyhow!("{e}"))?;
     let leave_alt = if frame.alt_screen { "\x1b[?1049l" } else { "" };
     let reset = "\x1b[!p\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[<99u\x1b[=0u";
     let newline = if frame.alt_screen || frame.cursor.column > 0 { "\r\n" } else { "\r" };
-    Ok(format!("{leave_alt}{reset}{newline}\x1b[2m\u{2014} restored {} \u{2014}\x1b[0m\r\n", local_time()))
+    let resuming = resuming.map(|name| format!(" \u{b7} resuming {name}")).unwrap_or_default();
+    Ok(format!("{leave_alt}{reset}{newline}\x1b[2m\u{2014} restored {}{resuming} \u{2014}\x1b[0m\r\n", local_time()))
 }
 
 /// `YYYY-MM-DD HH:MM` in local time.
@@ -1039,7 +1053,12 @@ fn launch(
 ) -> anyhow::Result<BlockHandle> {
     let (tx, rx) = mpsc::channel();
     let exit_tx = tx.clone();
-    let mut pty = Pty::spawn(config, pty_size(info.size), move |status| {
+    // A token of its own for every program started (OSC 7577), replacing
+    // any the server inherited.
+    let resume = ResumeState::fresh();
+    let mut config = config.clone();
+    config.env.push((program_resume::TOKEN_ENV.into(), resume.token.clone().unwrap_or_default().into()));
+    let mut pty = Pty::spawn(&config, pty_size(info.size), move |status| {
         let _ = exit_tx.send(BlockMsg::ChildExited(status.and_then(|s| s.code())));
     })?;
     let gate = Arc::new(ReadGate::default());
@@ -1053,6 +1072,7 @@ fn launch(
     actor.osc_title = carried.osc_title;
     actor.status = carried.status;
     actor.command = !config.command.is_empty() && !crate::shell::is_hooked_login(&config.command);
+    actor.resume = resume;
     actor.pty = Some(pty);
     actor.input = Some(input);
     actor.tx = Some(tx.clone());
@@ -1127,6 +1147,7 @@ pub fn spawn_adopted(info: BlockInfo, checkpoint: Checkpoint, pty: silo_pty::Det
     actor.status = status;
     actor.epoch = checkpoint.epoch;
     actor.command = checkpoint.command;
+    actor.resume = checkpoint.resume;
     actor.gate = gate;
     actor.ring_start = checkpoint.offset;
     actor.log.floor = checkpoint.offset;
@@ -1271,6 +1292,7 @@ impl Actor {
             tty_mode: None,
             last_mode_poll: Instant::now(),
             scanner: OfferScanner::default(),
+            resume: ResumeState::default(),
             offered: VecDeque::new(),
             offer_times: VecDeque::new(),
             clip_reads: HashMap::new(),
@@ -1670,6 +1692,14 @@ impl Actor {
         let _ = self.notes.send(Note::Offer(host));
     }
 
+    /// An OSC 7577 report from the program (checked against its token).
+    fn resume_report(&mut self, body: &[u8]) {
+        let Some(program) = self.pty.as_ref().map(Pty::pid) else { return };
+        if self.resume.report(body, program, now_ms(), &program_resume::System) {
+            self.mark_dirty();
+        }
+    }
+
     fn checkpoint(&mut self) -> Result<Checkpoint, String> {
         let snapshot = self.vt.snapshot().map_err(|e| e.to_string())?;
         self.dirty_armed = true;
@@ -1685,6 +1715,7 @@ impl Actor {
             osc_title: self.osc_title.clone(),
             osc_pwd: self.osc_pwd.clone(),
             status: Some(self.saved_status()),
+            resume: self.resume.clone(),
         })
     }
 
@@ -1989,8 +2020,11 @@ impl Actor {
             return self.apply(raw);
         }
         let mut bytes = Vec::with_capacity(raw.len());
-        for offer in self.scanner.feed(raw, &mut bytes) {
-            self.offer(offer);
+        for found in self.scanner.feed(raw, &mut bytes) {
+            match found {
+                Found::Offer(offer) => self.offer(offer),
+                Found::Resume(body) => self.resume_report(&body),
+            }
         }
         if !bytes.is_empty() {
             self.apply(&bytes);
@@ -2514,6 +2548,9 @@ impl Actor {
         };
         let foreground = pty.foreground_pid();
         let pid = pty.pid();
+        if !self.resume.records.is_empty() && self.resume.sweep(now_ms(), &program_resume::System) {
+            self.mark_dirty();
+        }
         let foreground_name = foreground.and_then(silo_pty::process_name);
         self.update_busy(foreground, foreground_name.clone());
         let title = if self.osc_title.is_empty() { foreground_name.unwrap_or_else(|| "shell".to_owned()) } else { self.osc_title.clone() };

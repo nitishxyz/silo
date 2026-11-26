@@ -1,15 +1,20 @@
 //! Host offers inside terminal output: a private OSC,
 //! `ESC ] 7717 ; offer ; <ticket> ; <name> (BEL | ESC \)`, printed by
 //! `silo` on a machine reached over SSH so the local server can offer to
-//! link it. [`OfferScanner`] finds and strips it from a byte stream.
+//! link it. [`OfferScanner`] finds and strips it from a byte stream, with
+//! the program resume reports of OSC 7577 (docs/RESUME.md), which the
+//! server takes for itself the same way.
 
 /// The OSC number.
 pub const OSC: &str = "7717";
 /// Longest sequence (introducer to terminator) recognised; longer ones are
-/// passed through untouched.
-pub const MAX_LEN: usize = 2048;
+/// passed through untouched. OSC 7577 asks for at least 2048 bytes.
+pub const MAX_LEN: usize = 4096;
 
 const PREFIX: &[u8] = b"\x1b]7717;";
+const RESUME_PREFIX: &[u8] = b"\x1b]7577;";
+/// Both prefixes have this length.
+const PREFIX_LEN: usize = 7;
 /// CAN and SUB abort any escape sequence.
 const CAN: u8 = 0x18;
 const SUB: u8 = 0x1a;
@@ -30,8 +35,18 @@ pub struct Offer {
     pub name: String,
 }
 
+/// A sequence the scanner took out of the stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Found {
+    Offer(Offer),
+    /// The body of an OSC 7577 report, unparsed (its `mac` covers the
+    /// exact bytes).
+    Resume(Vec<u8>),
+}
+
 /// Streaming scanner: feed output chunks, get them back without any
-/// `OSC 7717` sequence (even split across chunks) and the offers found.
+/// `OSC 7717` or `OSC 7577` sequence (even split across chunks) and what
+/// they held.
 #[derive(Default)]
 pub struct OfferScanner {
     /// Bytes held back: a prefix of [`PREFIX`], or a whole sequence so far.
@@ -50,9 +65,9 @@ impl OfferScanner {
         out.append(&mut self.held);
     }
 
-    /// Append `input` minus any OSC 7717 sequences to `out`. Bytes that may
-    /// start a sequence are held until the next call decides them.
-    pub fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> Vec<Offer> {
+    /// Append `input` minus any OSC 7717 and 7577 sequences to `out`. Bytes
+    /// that may start a sequence are held until the next call decides them.
+    pub fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> Vec<Found> {
         let mut offers = Vec::new();
         let mut i = 0;
         while i < input.len() {
@@ -68,8 +83,10 @@ impl OfferScanner {
                 }
                 continue;
             }
-            if self.held.len() < PREFIX.len() {
-                if byte == PREFIX[self.held.len()] {
+            if self.held.len() < PREFIX_LEN {
+                let at = self.held.len();
+                let fits = |prefix: &[u8]| prefix[..at] == self.held[..] && prefix[at] == byte;
+                if fits(PREFIX) || fits(RESUME_PREFIX) {
                     self.held.push(byte);
                     i += 1;
                 } else {
@@ -86,15 +103,11 @@ impl OfferScanner {
                     continue;
                 }
                 0x07 if !after_esc => {
-                    if let Some(offer) = parse(&self.held[PREFIX.len()..]) {
-                        offers.push(offer);
-                    }
+                    offers.extend(found(&self.held, self.held.len()));
                     self.held.clear();
                 }
                 b'\\' if after_esc => {
-                    if let Some(offer) = parse(&self.held[PREFIX.len()..self.held.len() - 1]) {
-                        offers.push(offer);
-                    }
+                    offers.extend(found(&self.held, self.held.len() - 1));
                     self.held.clear();
                 }
                 _ if after_esc => {
@@ -116,6 +129,15 @@ impl OfferScanner {
     }
 }
 
+/// What the held sequence (body ending at `end`) holds.
+fn found(held: &[u8], end: usize) -> Option<Found> {
+    let body = &held[PREFIX_LEN..end];
+    if held.starts_with(RESUME_PREFIX) {
+        return Some(Found::Resume(body.to_vec()));
+    }
+    parse(body).map(Found::Offer)
+}
+
 fn parse(body: &[u8]) -> Option<Offer> {
     let body = std::str::from_utf8(body).ok()?;
     let mut parts = body.splitn(3, ';');
@@ -132,12 +154,39 @@ mod tests {
     use super::*;
 
     fn scan(chunks: &[&[u8]]) -> (Vec<u8>, Vec<Offer>) {
-        let mut scanner = OfferScanner::default();
-        let (mut out, mut offers) = (Vec::new(), Vec::new());
-        for chunk in chunks {
-            offers.extend(scanner.feed(chunk, &mut out));
-        }
+        let (out, found) = scan_all(chunks);
+        let offers = found
+            .into_iter()
+            .filter_map(|f| match f {
+                Found::Offer(offer) => Some(offer),
+                Found::Resume(_) => None,
+            })
+            .collect();
         (out, offers)
+    }
+
+    fn scan_all(chunks: &[&[u8]]) -> (Vec<u8>, Vec<Found>) {
+        let mut scanner = OfferScanner::default();
+        let (mut out, mut found) = (Vec::new(), Vec::new());
+        for chunk in chunks {
+            found.extend(scanner.feed(chunk, &mut out));
+        }
+        (out, found)
+    }
+
+    #[test]
+    fn resume_reports_are_taken_out_whole() {
+        let input = b"a\x1b]7577;pid=1:time=2:clear=1:mac=ab\x1b\\b\x1b]7577;x=1\x07c\x1b]757;n\x07";
+        for cut in 0..=input.len() {
+            let (out, found) = scan_all(&[&input[..cut], &input[cut..]]);
+            assert_eq!(out, b"abc\x1b]757;n\x07", "cut {cut}");
+            assert_eq!(found, vec![Found::Resume(b"pid=1:time=2:clear=1:mac=ab".to_vec()), Found::Resume(b"x=1".to_vec())]);
+        }
+        // One of 2048 bytes in all is still read.
+        let body = "k=".to_owned() + &"v".repeat(2048 - 8 - 2);
+        let seq = format!("\x1b]7577;{body}\x07");
+        assert_eq!(seq.len(), 2048);
+        assert_eq!(scan_all(&[seq.as_bytes()]).1, vec![Found::Resume(body.into_bytes())]);
     }
 
     fn offer(ticket: &str, name: &str) -> Offer {
@@ -211,6 +260,6 @@ mod tests {
         assert_eq!(out, long.as_bytes());
         let (out, offers) = scan(&[b"\x1b]7717;offer;", &[b'a'; MAX_LEN], b"\x1b]7717;offer;silo1k;h\x07"]);
         assert_eq!(offers, vec![offer("silo1k", "h")]);
-        assert_eq!(out.len(), PREFIX.len() + 6 + MAX_LEN);
+        assert_eq!(out.len(), PREFIX_LEN + 6 + MAX_LEN);
     }
 }
