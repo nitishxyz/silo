@@ -23,8 +23,9 @@ const ENV: [(&str, &str); 3] = [("PAGER", "cat"), ("GIT_PAGER", "cat"), ("OTTO_S
 #[async_trait::async_trait]
 pub trait Terminals: Send + Sync {
     /// Start `command` in `cwd` with `env` for the session calling (`cx`);
-    /// `None` when no terminal host serves this call (pipes run it).
-    async fn start(&self, command: &str, cwd: &Path, env: &[(&str, &str)], cx: &ToolCx) -> Result<Option<Arc<dyn Terminal>>, ToolError>;
+    /// `None` when no terminal host serves this call (pipes run it). `login`: through `$SHELL -lc`; else `env`
+    /// already holds the user's shell environment ([`super::shell_env`]) and it is `$SHELL -c`.
+    async fn start(&self, command: &str, cwd: &Path, env: &[(&str, &str)], login: bool, cx: &ToolCx) -> Result<Option<Arc<dyn Terminal>>, ToolError>;
     /// Block `block` of host `host` (a [`Terminal::host`]), started before a restart: its command, watched again,
     /// when that block is still there. `None` when it is gone or `host` is not this one.
     async fn attach(&self, _block: &str, _host: &str, _cx: &ToolCx) -> Option<Arc<dyn Terminal>> {
@@ -87,7 +88,7 @@ impl Shell {
     pub fn with(host: Host) -> Self {
         let spec = spec(
             "shell",
-            "Run a command through $SHELL -lc (fallback /bin/sh -c) and return its exit code and output. It starts in the working directory (or cwd): use paths relative to it and don't cd into it. With Silo it runs in its own hidden terminal the user can open: a prompt for input (password, y/N) returns waiting_for_input with the screen and a job_id; answer with terminal_send to its block_id or let the user type, and the result arrives when it exits. Without Silo stdin is closed. timeout_ms defaults to 120000; a timeout or cancellation kills it. Use background:true for anything that may take more than a minute but ends by itself: test suites, builds, installs, deploys, and waiting for something (`gh run watch`, `gh pr checks --watch`, a loop polling until a server answers). It returns a job_id at once; the result arrives as a message when it exits, and starts a turn if you are idle. Meanwhile do other work, or end your turn when nothing else is left; don't poll it with job, sleep, or run it again. The user can also detach a running command: it then returns `Started <job_id>` and reports the same way. Use terminal_open only for what never exits on its own (dev servers, file watchers) or what you drive interactively, not background or nohup. Long output keeps its head and tail; the full text goes to a file.",
+            "Run a command through $SHELL with the environment of the user's own terminal (their PATH; fallback /bin/sh -c) and return its exit code and output. It starts in the working directory (or cwd): use paths relative to it and don't cd into it. With Silo it runs in its own hidden terminal the user can open: a prompt for input (password, y/N) returns waiting_for_input with the screen and a job_id; answer with terminal_send to its block_id or let the user type, and the result arrives when it exits. Without Silo stdin is closed. timeout_ms defaults to 120000; a timeout or cancellation kills it. Use background:true for anything that may take more than a minute but ends by itself: test suites, builds, installs, deploys, and waiting for something (`gh run watch`, `gh pr checks --watch`, a loop polling until a server answers). It returns a job_id at once; the result arrives as a message when it exits, and starts a turn if you are idle. Meanwhile do other work, or end your turn when nothing else is left; don't poll it with job, sleep, or run it again. The user can also detach a running command: it then returns `Started <job_id>` and reports the same way. Use terminal_open only for what never exits on its own (dev servers, file watchers) or what you drive interactively, not background or nohup. Long output keeps its head and tail; the full text goes to a file.",
             json!({"command":{"type":"string"},"cwd":{"type":"string","description":"Relative to the working directory; default: the working directory"},"timeout_ms":{"type":"integer","minimum":1},"background":{"type":"boolean"}}),
             &["command"],
             Effects::PROCESS,
@@ -144,7 +145,9 @@ impl Tool for Shell {
         let terminal = match &self.host.terminals {
             Some(terminals) if !quick(&command) => {
                 let cwd = crate::policy::resolve_path(&cx.cwd, &cx.project_root, input.get("cwd").and_then(Value::as_str).unwrap_or("."))?.path;
-                terminals.start(&command, &cwd, &ENV, &cx).await?
+                let user = super::shell_env::user_env().await;
+                let env: Vec<(&str, &str)> = user.iter().flat_map(|u| u.iter().map(|(k, v)| (k.as_str(), v.as_str()))).chain(ENV).collect();
+                terminals.start(&command, &cwd, &env, user.is_none(), &cx).await?
             }
             _ => None,
         };
@@ -613,8 +616,13 @@ async fn run(input: Value, cx: ToolCx, job: Option<Arc<Mutex<JobState>>>, opts: 
     crate::policy::validate_prepared(&input, &cx)?;
     let mut capture = Capture::new(&cx)?;
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty());
+    // The user's interactive setup (their PATH above all), resolved once; without it, their login files.
+    let user = super::shell_env::user_env().await;
     let mut cmd = tokio::process::Command::new(shell.as_deref().unwrap_or("/bin/sh"));
-    cmd.arg(if shell.is_some() { "-lc" } else { "-c" }).arg(string(&input, "command")?);
+    cmd.arg(if shell.is_some() && user.is_none() { "-lc" } else { "-c" }).arg(string(&input, "command")?);
+    if let Some(user) = &user {
+        cmd.envs(user.iter().map(|(k, v)| (k, v)));
+    }
     let cwd = crate::policy::resolve_path(&cx.cwd, &cx.project_root, input.get("cwd").and_then(Value::as_str).unwrap_or("."))?.path;
     cmd.current_dir(cwd).envs(ENV).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     cmd.process_group(0);

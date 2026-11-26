@@ -9,6 +9,7 @@ pub mod read;
 pub mod render;
 pub mod search;
 pub mod shell;
+pub mod shell_env;
 pub mod tree;
 pub mod undo_edit;
 pub mod update_todos;

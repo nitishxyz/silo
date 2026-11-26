@@ -28,7 +28,7 @@ struct FakeTerminal(Arc<Fake>);
 
 #[async_trait::async_trait]
 impl Terminals for FakeTerminals {
-    async fn start(&self, command: &str, _: &Path, env: &[(&str, &str)], _: &ToolCx) -> Result<Option<Arc<dyn Terminal>>, ToolError> {
+    async fn start(&self, command: &str, _: &Path, env: &[(&str, &str)], _: bool, _: &ToolCx) -> Result<Option<Arc<dyn Terminal>>, ToolError> {
         assert!(env.contains(&("PAGER", "cat")));
         self.0.started.lock().unwrap().push(command.into());
         Ok(Some(Arc::new(FakeTerminal(self.0.clone()))))

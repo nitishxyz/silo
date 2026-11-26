@@ -61,7 +61,7 @@ async fn command_blocks_and_hidden_terminals() {
     // A prompt is reported once quiet; answered, the command exits.
     let script = "echo \"$PAGER\"; printf 'continue? '; read a; echo \"got $a\"; exit 5";
     let env = [("PAGER".to_owned(), "cat".to_owned())].into();
-    let block = tools.spawn_command(&agent.block_id, "/bin/sh", script, Some("/tmp".into()), env).await.unwrap();
+    let block = tools.spawn_command(&agent.block_id, "/bin/sh", true, script, Some("/tmp".into()), env).await.unwrap();
     let watch = |prompt| tokio::time::timeout(Duration::from_secs(15), tools.watch(&block, prompt, |_| {}));
     let Watch::Waiting { screen } = watch(true).await.unwrap().unwrap() else { panic!("expected a prompt") };
     assert!(screen.contains("cat") && screen.ends_with("continue?"), "{screen}");
@@ -71,7 +71,7 @@ async fn command_blocks_and_hidden_terminals() {
     assert!(view.session.parked.is_empty(), "a command block closes on exit");
 
     // Stopped mid-run: its text so far, then gone.
-    let block = tools.spawn_command(&agent.block_id, "/bin/sh", "echo started; sleep 30", None, BTreeMap::new()).await.unwrap();
+    let block = tools.spawn_command(&agent.block_id, "/bin/sh", true, "echo started; sleep 30", None, BTreeMap::new()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(1), tools.watch(&block, false, |_| {})).await.unwrap_err();
     assert_eq!(tools.stop(&block).await.unwrap(), "started");
 

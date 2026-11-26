@@ -88,6 +88,7 @@ impl Terminals for Host {
         _: &str,
         _: &Path,
         _: &[(&str, &str)],
+        _: bool,
         _: &otto_tools::ToolCx,
     ) -> std::result::Result<Option<Arc<dyn Terminal>>, otto_tools::ToolError> {
         Ok(None)

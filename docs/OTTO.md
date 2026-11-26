@@ -683,7 +683,7 @@ separate hidden session).
   switcher shows them per session, with busy and exit status.
 
 **`shell` (one-shot), with silo:**
-1. `block.split`-style spawn of a **command block** (`SpawnSpec.command = [$SHELL, -lc, cmd]`, cwd, env), created
+1. `block.split`-style spawn of a **command block** (`SpawnSpec.command = [$SHELL, -c, cmd]` with the user's shell environment in `env`: what their interactive login shell sets beyond the daemon's (`otto_tools::builtin::shell_env`: `$SHELL -ilc env` in its own session, asked once and again after five minutes, since installers put tools on `PATH` in `~/.zshrc`, which `-lc` never reads); `[$SHELL, -lc, cmd]` when that can't be resolved. Pipes run the same way, cwd, env), created
    parked. A command block is one process: it exits when the command does, and the exit code is the block's
    `Exited{code}`. That needs no OSC 133 marks and leaks no shell state between calls.
 2. Output for the model comes from the **server terminal**, not the raw bytes: `terminal.capture {history: true}`

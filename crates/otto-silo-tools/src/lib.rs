@@ -309,7 +309,14 @@ struct SiloTerminals {
 
 #[async_trait]
 impl Terminals for SiloTerminals {
-    async fn start(&self, command: &str, cwd: &std::path::Path, env: &[(&str, &str)], cx: &ToolCx) -> Result<Option<Arc<dyn Terminal>>, ToolError> {
+    async fn start(
+        &self,
+        command: &str,
+        cwd: &std::path::Path,
+        env: &[(&str, &str)],
+        login: bool,
+        cx: &ToolCx,
+    ) -> Result<Option<Arc<dyn Terminal>>, ToolError> {
         // No silo, or no agent block showing the session: pipes.
         let Ok(tools) = self.shared.tools(&cx.cwd).await else { return Ok(None) };
         let Some(control) = self.shared.control().await else { return Ok(None) };
@@ -317,7 +324,7 @@ impl Terminals for SiloTerminals {
         let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
         let env: BTreeMap<String, String> = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
         let block = tools
-            .spawn_command(&owner, &shell, command, Some(cwd.to_string_lossy().into_owned()), env)
+            .spawn_command(&owner, &shell, login, command, Some(cwd.to_string_lossy().into_owned()), env)
             .await
             .map_err(|e| ToolError::failed(format!("could not start the command in Silo: {e:#}")))?;
         Ok(Some(Arc::new(SiloTerminal { tools, block, host: self.shared.host() })))

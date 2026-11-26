@@ -885,8 +885,9 @@ pub enum Watch {
 }
 
 impl Tools {
-    /// Run `command` through `shell -lc` in a parked command block owned by
-    /// `owner` (`block.spawn`); returns the block.
+    /// Run `command` through `shell -lc` (`login`; else `shell -c`: `env`
+    /// already holds the user's shell environment) in a parked command
+    /// block owned by `owner` (`block.spawn`); returns the block.
     ///
     /// # Errors
     /// A control failure, or `owner` is gone.
@@ -894,12 +895,13 @@ impl Tools {
         &self,
         owner: &str,
         shell: &str,
+        login: bool,
         command: &str,
         cwd: Option<String>,
         env: BTreeMap<String, String>,
     ) -> anyhow::Result<String> {
         self.subscribed.get_or_try_init(|| self.control.subscribe()).await?;
-        let command = vec![shell.to_owned(), "-lc".to_owned(), command.to_owned()];
+        let command = vec![shell.to_owned(), if login { "-lc" } else { "-c" }.to_owned(), command.to_owned()];
         let size = Some(silo_proto::model::TermSize::new(COMMAND_COLUMNS, 50));
         let created: Created =
             self.control.call(Method::BlockSpawn { block_id: owner.into(), command, cwd, env, size, kind: BlockKind::Terminal, url: None }).await?;
