@@ -45,7 +45,12 @@ fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let [a, b, ..] = v4.octets();
-            !(v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast() || (a == 100 && (64..128).contains(&b)))
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || (a == 100 && (64..128).contains(&b)))
         }
         IpAddr::V6(v6) => {
             let first = v6.segments()[0];
@@ -100,7 +105,10 @@ mod tests {
 
     #[test]
     fn public_addresses_skip_private_ones_and_come_ipv4_first() {
-        let info = info(Some(7842), &["172.31.10.179:7842", "[2406:da1a::1]:7842", "13.233.176.180:7842", "100.70.0.1:7842", "[fe80::1]:7842", "127.0.0.1:7842"]);
+        let info = info(
+            Some(7842),
+            &["172.31.10.179:7842", "[2406:da1a::1]:7842", "13.233.176.180:7842", "100.70.0.1:7842", "[fe80::1]:7842", "127.0.0.1:7842"],
+        );
         let public: Vec<String> = public_addrs(&info).iter().map(ToString::to_string).collect();
         assert_eq!(public, ["13.233.176.180:7842", "[2406:da1a::1]:7842"]);
     }
