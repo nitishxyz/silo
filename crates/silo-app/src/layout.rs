@@ -647,13 +647,18 @@ impl Workspace {
                         .child(button("close", "close", "Close Pane  ⌘W").on_click(close)),
                 )
             })
-            // Clicking the header focuses its pane.
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
+            // Clicking anywhere in the header focuses its pane, before the
+            // block's own controls (an address bar, tabs, buttons) take the
+            // press and stop it. A pane that already has focus keeps it where
+            // it is (typing in its address field).
+            .capture_any_mouse_down(cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                if event.button == gpui::MouseButton::Left
+                    && let Some(pane) = this.block_pane(&focus_block)
+                    && !pane.has_focus(window, cx)
+                {
                     this.focus_block(&focus_block, window, cx);
-                }),
-            )
+                }
+            }))
             .when_some(dragged, |el, d| {
                 let workspace = cx.entity().downgrade();
                 el.on_drag(d, move |d, offset, _, cx| {
