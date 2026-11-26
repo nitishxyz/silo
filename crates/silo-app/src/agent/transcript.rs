@@ -46,6 +46,8 @@ pub enum Kind {
     Media,
     Video,
     Audio,
+    /// A `generate_media` call still running whose kind nothing says yet (`media::kind_unknown`).
+    Generation,
     Error,
     /// A passing note from otto (a retry wait): not a step, not counted.
     Notice,
@@ -70,6 +72,7 @@ impl Kind {
             Kind::Media => "image",
             Kind::Video => "video",
             Kind::Audio => "audio-lines",
+            Kind::Generation => super::media::UNKNOWN_GLYPH,
             Kind::Error => "x-circle",
             Kind::Notice => "clock",
             Kind::Other => "circle",
@@ -1365,6 +1368,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
             let reason = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("it failed").trim_start_matches("Error: ");
             quiet = status != Status::Error;
             let (kind, noun) = match media {
+                _ if super::media::kind_unknown(name, input, text, cx.media) => (Kind::Generation, "media"),
                 Some(otto_proto::MediaKind::Image) if line.files.len() > 1 => (Kind::Media, "images"),
                 Some(otto_proto::MediaKind::Image) => (Kind::Media, "image"),
                 Some(otto_proto::MediaKind::Audio) => (Kind::Audio, "audio"),
@@ -1375,6 +1379,7 @@ fn tool(call_id: &str, name: &str, input: &Value, live: Option<&ToolState>, resu
                 "images" => ("Generating images", "Generated images"),
                 "image" => ("Generating image", "Generated image"),
                 "audio" => ("Generating audio", "Generated audio"),
+                "media" => ("Generating", "Generated"),
                 _ => ("Generating video", "Generated video"),
             };
             let subject = super::media::any_subject(input, cx.media);

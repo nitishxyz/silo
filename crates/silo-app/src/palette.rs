@@ -287,6 +287,7 @@ impl Workspace {
             Command::NewFilesTab => self.new_files_tab(window, cx),
             Command::OpenFolder => self.open_folder_command(block, window, cx),
             Command::NewChangesTab => self.new_changes_tab(window, cx),
+            Command::NewStudioTab => self.new_studio_tab(window, cx),
             Command::NewTabChooser | Command::NewPaneChooser => {
                 self.toggle_launcher(command, window, cx);
             }
@@ -364,6 +365,13 @@ impl Workspace {
                 }
             }
             Command::ReviewChanges => self.review_changes_command(block, window, cx),
+            Command::NewStudio => {
+                if let Some(block) = block {
+                    self.new_studio(block, cx);
+                }
+            }
+            Command::OpenStudio => self.open_studio_command(block, window, cx),
+            Command::ToggleWorld => self.toggle_world_command(block, cx),
             Command::AddHost => {
                 self.close_palette(window, cx);
                 self.open_add_host(None, None, window, cx);
@@ -493,7 +501,7 @@ impl Workspace {
     }
 
     /// Whether a command applies right now (hidden from the palette if not).
-    pub(crate) fn available(&self, command: Command, _cx: &gpui::App) -> bool {
+    pub(crate) fn available(&self, command: Command, cx: &gpui::App) -> bool {
         let host = self.hosts.get(self.active_host);
         let connected = host.is_some_and(|h| h.control.is_some());
         let paused = host.is_some_and(|h| h.paused.load(Ordering::Acquire));
@@ -544,6 +552,10 @@ impl Workspace {
             Command::NewChanges | Command::NewChangesTab | Command::ReviewChanges => {
                 connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::CHANGES)
             }
+            Command::NewStudio | Command::NewStudioTab | Command::OpenStudio => {
+                connected && self.view.is_some() && self.host_supports(silo_proto::compat::feature::STUDIO)
+            }
+            Command::ToggleWorld => self.studio_for(None, cx).is_some(),
             Command::RenameSession
             | Command::CloseSession
             | Command::NewTab
@@ -1721,13 +1733,15 @@ fn command_sound(command: Command) -> Option<crate::sound::Sound> {
         | Command::NewAgentTab
         | Command::NewFilesTab
         | Command::NewChangesTab
+        | Command::NewStudioTab
         | Command::NewPane
         | Command::SplitRight
         | Command::SplitDown
         | Command::NewBrowser
         | Command::NewAgent
         | Command::NewFiles
-        | Command::NewChanges => Sound::Open,
+        | Command::NewChanges
+        | Command::NewStudio => Sound::Open,
         Command::NextSession | Command::PreviousSession => Sound::Select,
         _ => return None,
     })
@@ -1743,6 +1757,11 @@ mod tests {
         assert_eq!(command_sound(Command::NewTab), Some(Sound::Open));
         assert_eq!(command_sound(Command::SplitRight), Some(Sound::Open));
         assert_eq!(command_sound(Command::NextSession), Some(Sound::Select));
+        for studio in [Command::NewStudioTab, Command::NewStudio] {
+            assert_eq!(command_sound(studio), Some(Sound::Open), "{studio:?}");
+        }
+        // Open Studio may only focus the one there; Toggle World switches a view.
+        assert_eq!(command_sound(Command::ToggleWorld), None);
         for quiet in [Command::Copy, Command::Paste, Command::SelectAll, Command::ClearScrollback, Command::FocusNextPane, Command::GrowPane] {
             assert_eq!(command_sound(quiet), None, "{quiet:?}");
         }

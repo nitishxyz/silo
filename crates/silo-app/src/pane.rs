@@ -2537,6 +2537,7 @@ mod tests {
             agent: None,
             files: None,
             changes: None,
+            studio: None,
         }
     }
 

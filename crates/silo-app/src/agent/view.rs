@@ -109,7 +109,7 @@ fn line_starts(layout: &gpui::TextLayout) -> Vec<usize> {
 }
 
 /// Tabular figures: ticking durations keep their width.
-pub(super) fn tabular() -> gpui::FontFeatures {
+pub(crate) fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
 }
 
@@ -250,7 +250,7 @@ fn faint() -> u32 {
     theme::mix(theme::background(), theme::foreground(), if theme::is_light() { 0.04 } else { 0.06 })
 }
 
-fn mono() -> SharedString {
+pub(super) fn mono() -> SharedString {
     theme::summary().1.into()
 }
 
@@ -402,7 +402,7 @@ thread_local! {
 
 /// Eased (`motion::ease_ui`) progress of an animation, or `None` once done
 /// (instant with Reduce Motion). Keeps frames coming while it runs.
-pub(super) fn eased(started: Instant, duration: std::time::Duration, now: Instant, cx: &App) -> Option<f32> {
+pub(crate) fn eased(started: Instant, duration: std::time::Duration, now: Instant, cx: &App) -> Option<f32> {
     let p = motion::enter(started, duration, now, cx.reduce_motion());
     if p.is_some() {
         MOVING.set(true);
@@ -411,7 +411,7 @@ pub(super) fn eased(started: Instant, duration: std::time::Duration, now: Instan
 }
 
 /// A [`motion::Toggle`]'s value, keeping frames coming while it moves.
-pub(super) fn toggled(toggle: &motion::Toggle, now: Instant, cx: &App) -> f32 {
+pub(crate) fn toggled(toggle: &motion::Toggle, now: Instant, cx: &App) -> f32 {
     let reduce = cx.reduce_motion();
     if toggle.moving(now, reduce) {
         MOVING.set(true);
@@ -420,7 +420,7 @@ pub(super) fn toggled(toggle: &motion::Toggle, now: Instant, cx: &App) -> f32 {
 }
 
 /// Request the next frame if anything drawn so far was mid-animation.
-pub(super) fn keep_moving(window: &mut Window) {
+pub(crate) fn keep_moving(window: &mut Window) {
     if MOVING.take() {
         window.request_animation_frame();
     }
@@ -776,7 +776,7 @@ impl AgentPane {
             .children(self.popover(Overlay::Sessions, window, cx))
             .children(self.popover(Overlay::Projects, window, cx))
             .children(self.render_signin_dialog(window, cx))
-            .children(self.render_viewer(window, cx))
+            .children(self.viewer.as_ref().map(|(v, _)| v.clone().into_any_element()))
             .into_any_element();
         keep_moving(window);
         pane
@@ -3145,76 +3145,61 @@ impl AgentPane {
             return menu::empty("agent-slash-empty", "No matching command").into_any_element();
         }
         let mut list = self.pick_list("agent-slash", Some(9.0));
-        for (i, c) in choices.into_iter().enumerate() {
-            let act = c.act;
-            let current = matches!(act, super::SlashAct::Mode(m) if mode_label(m) == mode);
+        for (i, choice) in choices.into_iter().enumerate() {
+            let (icon, name, about, current) = match choice {
+                super::SlashChoice::Command(c) => {
+                    let current = matches!(c.act, super::SlashAct::Mode(m) if mode_label(m) == mode);
+                    (c.icon, c.name.to_owned(), c.about.to_owned(), current)
+                }
+                // A skill of the project: `sparkles`, as its chip.
+                super::SlashChoice::Skill { name, about } => (super::mention::icon(otto_proto::MentionKind::Skill, &name), name, about, false),
+            };
             let row = menu::row(
                 ("agent-slash", i),
                 i == self.selected,
-                Some(menu::lead(c.icon, i == self.selected || current)),
-                div().font_family(mono()).text_size(px(12.5)).child(format!("/{}", c.name)),
-                Some(c.about.into()),
+                Some(menu::lead(icon, i == self.selected || current)),
+                div().font_family(mono()).text_size(px(12.5)).child(format!("/{name}")),
+                (!about.is_empty()).then(|| about.into()),
                 current.then(rows::check),
             );
             self.reveal_row(i, i);
             list = list.child(
                 self.pick_row(row, i, i == self.selected, cx)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run_slash(act, window, cx))),
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
             );
         }
         list.into_any_element()
     }
 
-    /// The `@` popup: agents (bot), media models (by kind), then the project's files and folders.
+    /// The `@` popup: agents (bot), a studio's entities and canvases (first for a bare `@`, under headings), media
+    /// models (by kind), then the project's files and folders; a canvas's nodes for `@canvas#…`, an entity's named
+    /// references for `@characters/mara#…`.
     fn render_mention(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let choices = self.mention_choices();
-        if choices.is_empty() {
-            return menu::empty("agent-mention-empty", "No matches").into_any_element();
-        }
-        let mut list =
-            div().id("agent-mention").min_h_0().flex().flex_col().max_h(px(menu::max_h(9.0))).overflow_y_scroll().track_scroll(&self.mention.scroll);
-        for (i, choice) in choices.into_iter().enumerate() {
-            let selected = i == self.selected;
-            let (glyph, title, about) = match choice {
-                super::mention::Choice::Agent { name, about } => ("bot", name, (!about.is_empty()).then_some(about)),
-                super::mention::Choice::File { path, dir } => (if dir { "folder" } else { "file-text" }, path, None),
-                super::mention::Choice::Model { name, provider_id, provider, kind, connected, .. } => {
-                    let kind_name = match kind {
-                        otto_proto::MediaKind::Image => "Image",
-                        otto_proto::MediaKind::Video => "Video",
-                        otto_proto::MediaKind::Audio => "Audio",
-                    };
-                    let note = (!connected)
-                        .then(|| div().flex_none().text_size(px(11.5)).text_color(rgb(theme::muted())).child("Not connected").into_any_element());
-                    let title = div().text_size(px(12.5)).child(name);
-                    let about = Some(format!("{provider} · {kind_name}").into());
-                    let row = menu::row(
-                        ("agent-mention", i),
-                        selected,
-                        Some(menu::lead(super::media_setup::logo(&provider_id), selected)),
-                        title,
-                        about,
-                        note,
-                    );
-                    list = list.child(
-                        self.pick_row(row, i, selected, cx)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
-                    );
-                    continue;
+        let nodes = self.mention.at.as_ref().is_some_and(|(_, q)| super::mention::node_query(q).is_some());
+        let looks = self.mention.at.as_ref().is_some_and(|(_, q)| super::mention::looks_query(q));
+        let loading = if looks {
+            "Finding references…"
+        } else if nodes {
+            "Finding cards…"
+        } else {
+            "Finding files…"
+        };
+        super::mention::list(
+            "agent-mention",
+            choices,
+            self.selected,
+            &self.mention.scroll,
+            loading,
+            cx,
+            |this, index, cx| {
+                if this.selected != index {
+                    this.selected = index;
+                    cx.notify();
                 }
-                super::mention::Choice::Loading => {
-                    list = list.child(menu::empty(("agent-mention-loading", i), "Finding files…"));
-                    continue;
-                }
-            };
-            let title = div().font_family(mono()).text_size(px(12.5)).child(title);
-            let row = menu::row(("agent-mention", i), selected, Some(menu::lead(glyph, selected)), title, about.map(Into::into), None);
-            list = list.child(
-                self.pick_row(row, i, selected, cx)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.activate_choice(i, window, cx))),
-            );
-        }
-        list.into_any_element()
+            },
+            |this, index, window, cx| this.activate_choice(index, window, cx),
+        )
     }
 }
 
@@ -3435,6 +3420,22 @@ fn inline_text(id: &str, inline: &Inline, lines: Option<&[(usize, f32)]>, fg: u3
     (super::select::register(id, 0, None, &layout, el), layout)
 }
 
+/// A settled code box with a copy button in its top right corner, shown while the pointer is over it.
+fn copyable(id: &str, text: &str, code: impl IntoElement) -> AnyElement {
+    let group = SharedString::from(format!("code-{id}"));
+    let copy = text.to_owned();
+    let button = icon_button(gpui::ElementId::Name(format!("copy-code-{id}").into()), "copy", 13.0, 24.0, theme::muted())
+        .bg(rgb(faint()))
+        .tooltip(Tooltip::text("Copy"))
+        .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone())));
+    div()
+        .group(group.clone())
+        .relative()
+        .child(code)
+        .child(div().absolute().top(px(4.0)).right(px(4.0)).opacity(0.0).group_hover(group, |s| s.opacity(1.0)).child(button))
+        .into_any_element()
+}
+
 /// `fx`: the block is being revealed (`Fx`); `fg`: its text colour.
 /// A block drawn as a settled transcript text draws it (a test view's rows, the Files block's markdown).
 pub(super) fn render_settled(id: &str, block: &Block, scroll: &std::rc::Rc<super::scroll::Inner>, cx: &App) -> AnyElement {
@@ -3516,7 +3517,7 @@ fn render_block(id: &str, block: &Block, fx: Option<&Fx>, fg: u32, scroll: &std:
                     )
                 }),
             ));
-            let (Some(lines), Some(f)) = (lines, fx) else { return code.into_any_element() };
+            let (Some(lines), Some(f)) = (lines, fx) else { return copyable(id, text, code) };
             let cell = f.wraps.borrow().get(id).map_or(0.0, |w| w.cell);
             let masks = lines.iter().map(|(v, p)| (*v, reveal::code_line(*v, *p))).filter(|(_, p)| *p > 0.0 && *p < 1.0).map(|(v, p)| {
                 let share = reveal::code_share(text.lines().nth(v).unwrap_or(""), cell);

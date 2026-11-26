@@ -360,11 +360,14 @@ impl Workspace {
                 crate::blocks::Kind::Unsupported => unsupported(UNSUPPORTED.into()),
                 // A server that lists the kind but can't answer for it yet.
                 crate::blocks::Kind::Changes if !self.host_supports(silo_proto::compat::feature::CHANGES) => unsupported(UNSUPPORTED.into()),
+                crate::blocks::Kind::Studio if !self.host_supports(silo_proto::compat::feature::STUDIO) => unsupported(UNSUPPORTED.into()),
                 crate::blocks::Kind::Agent => unsupported(self.agent_unsupported().into()),
                 // Its pane comes with the view that shows it.
-                crate::blocks::Kind::Terminal | crate::blocks::Kind::Browser | crate::blocks::Kind::Files | crate::blocks::Kind::Changes => {
-                    div().size_full().into_any_element()
-                }
+                crate::blocks::Kind::Terminal
+                | crate::blocks::Kind::Browser
+                | crate::blocks::Kind::Files
+                | crate::blocks::Kind::Changes
+                | crate::blocks::Kind::Studio => div().size_full().into_any_element(),
             },
         };
         let fill_color = self.card_fill(id, cx);
@@ -1269,6 +1272,7 @@ mod tests {
             agent: None,
             files: None,
             changes: None,
+            studio: None,
         };
         assert_eq!(header_labels(Some(&info("-zsh", Some(format!("{home}/dev"))))), ("zsh".into(), Some("~/dev".into())));
         assert_eq!(header_labels(Some(&info("", None))), ("shell".into(), None));

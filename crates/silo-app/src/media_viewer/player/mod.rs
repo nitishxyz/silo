@@ -1,6 +1,6 @@
 //! The viewer's video player (`docs/MEDIA.md` §6.4), drawn by gpui: frames come from `av::Video` as
 //! IOSurface-backed pixel buffers (a `surface` element), the controls are gpui (a frosted bar: scrubber,
-//! play/pause, ±5 s, time, volume, loop, Copy, Save…, fill). A poll on the main thread wakes the pane only
+//! play/pause, ±5 s, time, volume, loop, Copy, Save…, fill). A poll on the main thread wakes the viewer only
 //! when AVFoundation has a newer frame (so a 24 fps clip redraws 24 times a second), catches the end
 //! (stop, or loop), hides the chrome and pointer when idle, and pauses once the viewer isn't drawn.
 
@@ -20,7 +20,8 @@ pub(super) use autohide::AutoHide;
 pub(super) use chrome::{BAR_ROOM, scrim};
 pub(super) use keys::{Key, map};
 
-use super::{AgentPane, av, media::Clip};
+use super::MediaViewer;
+use crate::agent::{av, media::Clip};
 
 /// How often the poll looks: playing or settling a seek, and otherwise.
 const POLL: Duration = Duration::from_millis(8);
@@ -101,13 +102,13 @@ impl Playback {
 
 /// A frame as gpui draws it: the pixel buffer's IOSurface, sampled by the renderer, fit inside.
 #[cfg(target_os = "macos")]
-pub(super) fn surface(frame: av::Frame) -> gpui::AnyElement {
+pub(crate) fn surface(frame: av::Frame) -> gpui::AnyElement {
     use gpui::{IntoElement as _, Styled as _};
     gpui::surface(frame).absolute().size_full().object_fit(gpui::ObjectFit::Contain).into_any_element()
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn surface(frame: av::Frame) -> gpui::AnyElement {
+pub(crate) fn surface(frame: av::Frame) -> gpui::AnyElement {
     match frame {}
 }
 
@@ -141,21 +142,20 @@ pub fn volume_glyph(volume: f32, muted: bool) -> &'static str {
     if muted || volume <= 0.0 { "volume-off" } else { "volume" }
 }
 
-impl AgentPane {
-    /// The shown video's player, made once its file is ready (`id` attachment): the viewer's prefs applied,
-    /// its poll started. It plays once the viewer finished opening.
+impl MediaViewer {
+    /// The shown video's player, made once its file is ready (`id`: its media key): the viewer's prefs
+    /// applied, its poll started. It plays once the viewer finished opening.
     pub(super) fn ensure_playback(&mut self, id: &str, clip: &Clip, cx: &mut gpui::Context<Self>) {
-        let Some(v) = self.viewer.as_mut().filter(|v| v.closing.is_none()) else { return };
-        if v.video.as_ref().is_some_and(|p| p.id == id) {
+        if self.closing.is_some() || self.video.as_ref().is_some_and(|p| p.id == id) {
             return;
         }
         let Some(video) = av::Video::new(&clip.file) else { return };
-        video.player.set_volume(v.prefs.volume);
-        video.player.set_muted(v.prefs.muted);
+        video.player.set_volume(self.prefs.volume);
+        video.player.set_muted(self.prefs.muted);
         let now = Instant::now();
         let live = Rc::new(());
         let poll = Rc::downgrade(&live);
-        v.video = Some(Playback {
+        self.video = Some(Playback {
             id: id.to_owned(),
             video,
             hide: AutoHide::new(now),
@@ -186,9 +186,8 @@ impl AgentPane {
     /// hides the chrome. The time to the next.
     fn poll_video(&mut self, cx: &mut gpui::Context<Self>) -> Duration {
         let reduce = cx.reduce_motion();
-        let Some(v) = self.viewer.as_mut() else { return POLL_IDLE };
-        let (looping, closing) = (v.prefs.looping, v.closing.is_some());
-        let Some(p) = v.video.as_mut() else { return POLL_IDLE };
+        let (looping, closing) = (self.prefs.looping, self.closing.is_some());
+        let Some(p) = self.video.as_mut() else { return POLL_IDLE };
         let now = Instant::now();
         let player = &p.video.player;
         if player.playing() && now.duration_since(p.painted) > STALE {
@@ -218,7 +217,7 @@ impl AgentPane {
 
     /// The shown video's player.
     pub(super) fn playback(&mut self) -> Option<&mut Playback> {
-        self.viewer.as_mut()?.video.as_mut()
+        self.video.as_mut()
     }
 
     /// The pointer moved over the viewer, a click or a key: the chrome shows.
@@ -250,36 +249,30 @@ impl AgentPane {
 
     /// Volume to `level` (0–1), unmuting; kept for the next video.
     pub(super) fn player_volume(&mut self, level: f32, cx: &mut gpui::Context<Self>) {
-        let Some(v) = self.viewer.as_mut() else { return };
-        v.prefs.volume = level.clamp(0.0, 1.0);
-        v.prefs.muted = false;
-        if let Some(p) = v.video.as_ref() {
-            p.video.player.set_volume(v.prefs.volume);
+        self.prefs.volume = level.clamp(0.0, 1.0);
+        self.prefs.muted = false;
+        if let Some(p) = self.video.as_ref() {
+            p.video.player.set_volume(self.prefs.volume);
             p.video.player.set_muted(false);
         }
         cx.notify();
     }
 
     pub(super) fn player_mute(&mut self, cx: &mut gpui::Context<Self>) {
-        let Some(v) = self.viewer.as_mut() else { return };
-        v.prefs.muted = !v.prefs.muted;
-        if let Some(p) = v.video.as_ref() {
-            p.video.player.set_muted(v.prefs.muted);
+        self.prefs.muted = !self.prefs.muted;
+        if let Some(p) = self.video.as_ref() {
+            p.video.player.set_muted(self.prefs.muted);
         }
         cx.notify();
     }
 
     pub(super) fn player_loop(&mut self, cx: &mut gpui::Context<Self>) {
-        if let Some(v) = self.viewer.as_mut() {
-            v.prefs.looping = !v.prefs.looping;
-        }
+        self.prefs.looping = !self.prefs.looping;
         cx.notify();
     }
 
     pub(super) fn player_fill(&mut self, cx: &mut gpui::Context<Self>) {
-        if let Some(v) = self.viewer.as_mut() {
-            v.prefs.fill = !v.prefs.fill;
-        }
+        self.prefs.fill = !self.prefs.fill;
         cx.notify();
     }
 
@@ -290,15 +283,15 @@ impl AgentPane {
             Key::Toggle => self.player_toggle(cx),
             Key::Skip(by) => self.player_skip(by, cx),
             Key::Volume(by) => {
-                let level = self.viewer.as_ref().map_or(1.0, |v| if v.prefs.muted { 0.0 } else { v.prefs.volume });
+                let level = if self.prefs.muted { 0.0 } else { self.prefs.volume };
                 self.player_volume(level + by, cx);
             }
             Key::Mute => self.player_mute(cx),
             Key::Loop => self.player_loop(cx),
             Key::Fill => self.player_fill(cx),
-            Key::Step(dir) => self.step_viewer(dir, cx),
-            Key::Escape if self.viewer.as_ref().is_some_and(|v| v.prefs.fill) => self.player_fill(cx),
-            Key::Escape => self.close_viewer(window, cx),
+            Key::Step(dir) => self.step(dir, cx),
+            Key::Escape if self.prefs.fill => self.player_fill(cx),
+            Key::Escape => self.close(window, cx),
         }
     }
 }
@@ -334,8 +327,8 @@ mod tests {
     #[test]
     fn the_bar_reads_its_time_and_maps_presses() {
         // The bar's clock and its press math are the audio row's.
-        assert_eq!(super::super::audio::times(3.2, Some(5.0)), "0:03 / 0:05");
-        assert!((super::super::audio::fraction(250.0, 100.0, 600.0) - 0.25).abs() < 1e-9);
+        assert_eq!(crate::agent::audio::times(3.2, Some(5.0)), "0:03 / 0:05");
+        assert!((crate::agent::audio::fraction(250.0, 100.0, 600.0) - 0.25).abs() < 1e-9);
         assert_eq!((volume_glyph(0.6, false), volume_glyph(0.6, true), volume_glyph(0.0, false)), ("volume", "volume-off", "volume-off"));
     }
 }

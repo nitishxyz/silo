@@ -21,6 +21,7 @@ fn block(id: &str, kind: BlockKind) -> BlockInfo {
         agent: None,
         files: None,
         changes: None,
+        studio: None,
     }
 }
 
@@ -213,6 +214,8 @@ fn confirming_splits_to_the_chosen_side() {
         (Row::Open { url: "https://a.dev/".into(), title: String::new() }, BlockKind::Browser, Some("https://a.dev/".to_owned())),
         (Row::Run("make".into()), BlockKind::Terminal, None),
         (Row::Kind(Kind::Files, Vec::new()), BlockKind::Files, None),
+        (Row::Kind(Kind::Changes, Vec::new()), BlockKind::Changes, None),
+        (Row::Kind(Kind::Studio, Vec::new()), BlockKind::Studio, None),
     ];
     for side in SIDES {
         let want_axis = if *side == Side::Right { Axis::Horizontal } else { Axis::Vertical };
@@ -231,4 +234,31 @@ fn confirming_splits_to_the_chosen_side() {
         let Method::BlockSplit { kind, spawn, .. } = split_method("b", *side, &Row::Path("~/notes".into()), Some("/w".into())) else { panic!() };
         assert_eq!((kind, spawn.cwd.as_deref()), (BlockKind::Files, Some("~/notes")));
     }
+}
+
+#[test]
+fn studio_is_a_kind_offered_only_by_hosts_with_studios() {
+    use silo_proto::compat::feature;
+    assert_eq!(kinds("stu"), vec![Kind::Studio]);
+    assert_eq!(
+        (Kind::Studio.label(), Kind::Studio.icon(), Kind::Studio.block_kind(), Kind::Studio.tab_command(), Kind::Studio.split_command()),
+        ("Studio", crate::studio_block::ICON, BlockKind::Studio, Command::NewStudioTab, Command::NewStudio)
+    );
+    assert_eq!(Kind::Studio.split_command().feature(), Some(feature::STUDIO));
+    assert_eq!(Kind::Studio.tab_command().feature(), Some(feature::STUDIO));
+    // A host with every feature hides nothing.
+    assert!(hidden(|_| true).is_empty());
+    assert_eq!(offered("", &[], &hidden(|_| true)).len(), SHOWN.len());
+    // Without studios: no Studio row, typed or not; Changes stays.
+    let no_studio = hidden(|f| f != feature::STUDIO);
+    assert_eq!(no_studio, [Kind::Studio]);
+    let all = offered("", &[], &no_studio);
+    assert!(all.iter().all(|r| r.kind() != Kind::Studio), "{all:?}");
+    assert!(all.iter().any(|r| r.kind() == Kind::Changes));
+    assert!(offered("stu", &[], &no_studio).is_empty());
+    // An old host: neither.
+    assert_eq!(hidden(|f| f != feature::STUDIO && f != feature::CHANGES), [Kind::Changes, Kind::Studio]);
+    assert_eq!(offered("", &[], &hidden(|_| false)).len(), SHOWN.len() - 2);
+    // A path is still a Files row.
+    assert_eq!(offered("~/x", &[], &hidden(|_| false)), vec![Row::Path("~/x".into())]);
 }

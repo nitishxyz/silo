@@ -13,7 +13,7 @@ pub enum Key {
     Mute,
     Loop,
     Fill,
-    /// The session's previous (`-1`) or next (`1`) image or video.
+    /// The host's previous (`-1`) or next (`1`) image or video.
     Step(i32),
     /// Leaves fill, else closes the viewer.
     Escape,

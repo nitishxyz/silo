@@ -674,7 +674,7 @@ impl BrowserPane {
             page.set_focus(focused);
         }
         if focused {
-            self.own(silo_proto::control::OwnMode::Take);
+            self.own(silo_proto::control::OwnMode::Request);
             cx.emit(BrowserPaneEvent::Activated);
         } else {
             self.close_menu();
@@ -1471,6 +1471,7 @@ impl BrowserPane {
         let (Some(page), Some((x, y)), Some(b)) = (self.page.clone(), self.local(position), button(b)) else { return };
         if down {
             self.end_pinch();
+            self.own(silo_proto::control::OwnMode::Take);
         }
         self.held.retain(|h| *h != b);
         if down {
@@ -1761,6 +1762,9 @@ impl BrowserPane {
                 self.composing = None;
                 return true;
             }
+        }
+        if !release {
+            self.own(silo_proto::control::OwnMode::Take);
         }
         // RAWKEYDOWN + CHAR: the key event types its own text.
         let input =

@@ -41,11 +41,26 @@ pub(super) fn tool_kind(name: &str) -> Option<MediaKind> {
 }
 
 /// What a call of tool `name` makes: its tool's kind; `generate_media`'s its model's (by the media status), else
-/// its result's (`text`), else what its model and mode say.
+/// its result's (`text`), else what its model and mode say; a video when nothing says ([`kind_unknown`]).
 pub(super) fn call_kind(name: &str, input: &Value, text: &str, status: Option<&MediaStatus>) -> Option<MediaKind> {
     if name != ANY_TOOL {
         return tool_kind(name);
     }
+    Some(any_kind(input, text, status).unwrap_or(MediaKind::Video))
+}
+
+/// Nothing says yet what a `generate_media` call makes: its input is still arriving, or the media status isn't
+/// loaded and neither its model's name nor its mode tells. Its line and placeholder then show no kind, rather
+/// than a video's that turns into an image's a moment later.
+pub(super) fn kind_unknown(name: &str, input: &Value, text: &str, status: Option<&MediaStatus>) -> bool {
+    name == ANY_TOOL && any_kind(input, text, status).is_none()
+}
+
+/// The glyph of a generation whose kind isn't known yet ([`kind_unknown`]).
+pub(super) const UNKNOWN_GLYPH: &str = "sparkles";
+
+/// What a `generate_media` call makes, when something says.
+fn any_kind(input: &Value, text: &str, status: Option<&MediaStatus>) -> Option<MediaKind> {
     if let Some((kind, _)) = any_model(input, status) {
         return Some(kind);
     }
@@ -70,7 +85,7 @@ pub(super) fn call_kind(name: &str, input: &Value, text: &str, status: Option<&M
         .into_iter()
         .find_map(|(w, k)| said.contains(w).then_some(k))
     };
-    Some(started.or_else(made).or_else(|| parse(text).first().map(Media::kind)).or_else(hint).unwrap_or(MediaKind::Video))
+    started.or_else(made).or_else(|| parse(text).first().map(Media::kind)).or_else(hint)
 }
 
 /// `generate_media`'s model in the media status (by handle or id, `provider/…` too): its kind and name.
@@ -159,6 +174,8 @@ pub struct Shelf {
     pub key: String,
     pub call: String,
     pub kind: MediaKind,
+    /// Still running and nothing says what it makes ([`kind_unknown`]): its placeholder shows no kind.
+    pub unknown: bool,
     /// The prompt (audio: its text).
     pub prompt: String,
     /// `OpenAI gpt-image-2.5-flare`, from the result's first line.
@@ -168,6 +185,8 @@ pub struct Shelf {
     /// The background job it waits for (§6.5): its progress and time come from `job.list`.
     pub job: Option<String>,
     pub tiles: Tiles,
+    /// The canvas and node otto put it on (STUDIO.md §6.5), from the result's `Placed on canvas …` line.
+    pub placed: Option<(String, String)>,
 }
 
 /// `[generated <id>: <name>, <mime>, <size>[, <w>×<h>][, <seconds> s] — …]`.
@@ -197,6 +216,20 @@ pub fn parse_line(line: &str) -> Option<Media> {
         return None;
     }
     Some(Media { id: id.to_owned(), name: name.to_owned(), mime: mime.to_owned(), size: size.to_owned(), dims, ms })
+}
+
+/// `Placed on canvas <name> as <node>` (a generation with `canvas`, a card's run): the canvas and node.
+#[must_use]
+pub fn placed_line(line: &str) -> Option<(String, String)> {
+    let (canvas, node) = line.trim().strip_prefix("Placed on canvas ")?.rsplit_once(" as ")?;
+    let (canvas, node) = (canvas.trim(), node.trim().trim_end_matches('.'));
+    (!canvas.is_empty() && !node.is_empty() && !node.contains(' ')).then(|| (canvas.to_owned(), node.to_owned()))
+}
+
+/// The first canvas placement a result names.
+#[must_use]
+pub fn placed(text: &str) -> Option<(String, String)> {
+    text.lines().find_map(placed_line)
 }
 
 /// Every generated file a result names, in order.
@@ -267,6 +300,11 @@ pub(super) fn place(
         job_id(text).and_then(|id| jobs.get(id)).map_or(text, |(_, result)| result.as_str())
     };
     let kind = |id: &str, name: &str, input: &Value| call_kind(name, input, result(id), status);
+    let unknown = |id: &str| {
+        let call = items.iter().flat_map(Item::tool_calls).find(|(call, ..)| *call == id).map(|(_, name, input)| (name, input));
+        let call = call.or_else(|| tools.get(id).map(|t| (t.name.as_str(), &t.input)));
+        call.is_some_and(|(name, input)| kind_unknown(name, input, result(id), status))
+    };
     let mut calls: HashMap<&str, (MediaKind, &Value)> =
         items.iter().flat_map(Item::tool_calls).filter_map(|(id, name, input)| Some((id, (kind(id, name, input)?, fields(name, input))))).collect();
     for (id, t) in tools {
@@ -308,7 +346,9 @@ pub(super) fn place(
                         .filter(|m| !m.is_empty());
                     let (key, call, credit) = (format!("{}#media", l.key), l.key.clone(), credit(text));
                     let job = l.job.as_ref().map(|j| j.id.clone());
-                    Some(Row::Media(Shelf { key, call, kind, prompt, credit, progress, job, tiles }))
+                    let placed = matches!(tiles, Tiles::Ready(_)).then(|| placed(text)).flatten();
+                    let unknown = matches!(tiles, Tiles::Pending { .. }) && unknown(&l.key);
+                    Some(Row::Media(Shelf { key, call, kind, unknown, prompt, credit, progress, job, tiles, placed }))
                 })
                 .collect(),
             _ => Vec::new(),
@@ -321,7 +361,7 @@ pub(super) fn place(
 
 /// A fetched image: what the viewer draws, and a smaller copy for the tiles (an animated GIF's is itself: gpui
 /// plays it).
-pub(super) struct Loaded {
+pub(crate) struct Loaded {
     pub image: Arc<gpui::Image>,
     pub preview: Arc<gpui::Image>,
     pub dims: (u32, u32),
@@ -332,7 +372,7 @@ pub(super) struct Loaded {
 }
 
 #[derive(Clone)]
-pub(super) enum Entry {
+pub(crate) enum Entry {
     /// Tiles shimmer meanwhile.
     Loading,
     Ready(Arc<Loaded>),
@@ -343,7 +383,7 @@ pub(super) enum Entry {
 }
 
 /// A video or audio file in the cache, and what AVFoundation read from it.
-pub(super) struct Clip {
+pub(crate) struct Clip {
     pub file: PathBuf,
     /// A video's first frame, and its size in pixels.
     pub poster: Option<(Arc<gpui::Image>, (u32, u32))>,
@@ -360,7 +400,7 @@ pub fn cache_file(root: &Path, session: &str, id: &str, name: &str) -> PathBuf {
 }
 
 /// Off the main thread: `bytes` written to `file` (once; a partial write never takes its name), then read.
-fn store(file: PathBuf, bytes: Option<Vec<u8>>, video: bool) -> Option<Clip> {
+pub(crate) fn store(file: PathBuf, bytes: Option<Vec<u8>>, video: bool) -> Option<Clip> {
     if let Some(bytes) = bytes {
         std::fs::create_dir_all(file.parent()?).ok()?;
         let part = file.with_extension("part");
@@ -375,12 +415,6 @@ fn store(file: PathBuf, bytes: Option<Vec<u8>>, video: bool) -> Option<Clip> {
 /// Fetched media by `session/attachment`, for the pane's life.
 #[derive(Default)]
 pub(super) struct Cache(HashMap<String, Entry>);
-
-impl Cache {
-    pub(super) fn get(&self, key: &str) -> Option<&Entry> {
-        self.0.get(key)
-    }
-}
 
 /// A tile preview's longest edge in pixels (320 pt at 2×).
 const PREVIEW: u32 = 640;
@@ -404,7 +438,7 @@ pub(super) async fn fetch(c: Connection, session: String, id: String) -> Result<
 }
 
 /// Off the main thread: the image's size and a preview for the tiles (an SVG's at the tile's pixels).
-fn decode(bytes: Vec<u8>, mime: &str) -> Option<Loaded> {
+pub(crate) fn decode(bytes: Vec<u8>, mime: &str) -> Option<Loaded> {
     use gpui::ImageFormat as G;
     if mime == "image/svg+xml" || super::svg::sniff(&bytes) {
         let svg = super::svg::Svg::parse(&bytes)?;
@@ -487,12 +521,12 @@ impl AgentPane {
 }
 
 /// Tiles' corner radius, the gap between them, and their height bounds (under `MIN_H` they wrap).
-pub(super) const RADIUS: f32 = 10.0;
+pub(crate) const RADIUS: f32 = 10.0;
 const GAP: f32 = 8.0;
 const MAX_H: f32 = 320.0;
 const MIN_H: f32 = 120.0;
 /// A tile's pulse while it waits, and its image fading in.
-pub(super) const PULSE: f32 = 1.6;
+pub(crate) const PULSE: f32 = 1.6;
 const FADE_IN: std::time::Duration = std::time::Duration::from_millis(180);
 
 /// Tile sizes for aspect ratios `ratios` (w/h) in a column `avail` wide: one row of one height filling it, at most
@@ -507,7 +541,7 @@ pub fn tile_sizes(ratios: &[f32], avail: f32) -> Vec<(f32, f32)> {
 }
 
 /// A tile's frame: rounded, a faint border, its fill pulsing while `pulse`.
-pub(super) fn frame(w: f32, h: f32, pulse: Option<f32>) -> Div {
+pub(crate) fn frame(w: f32, h: f32, pulse: Option<f32>) -> Div {
     // Eased in and out over a span wide enough for a dozen-odd 8-bit steps: smooth, not stepped.
     let fill = pulse.map_or(0.05, |p| 0.04 + 0.05 * (0.5 - 0.5 * (p * std::f32::consts::TAU).cos()));
     div()
@@ -566,7 +600,7 @@ impl AgentPane {
                         let note =
                             |t: String, size: f32| div().text_size(px(size)).text_color(rgb(muted)).font_features(super::view::tabular()).child(t);
                         frame(w, h, pulse)
-                            .child(icon(glyph(shelf.kind), 18.0, muted))
+                            .child(icon(if shelf.unknown { UNKNOWN_GLYPH } else { glyph(shelf.kind) }, 18.0, muted))
                             .children(elapsed.clone().filter(|_| i == 0).map(|t| note(t, 12.0)))
                             .children(
                                 shelf
@@ -603,7 +637,33 @@ impl AgentPane {
                 media.iter().zip(entries).zip(sizes).map(|((m, e), (w, h))| self.media_tile(m, e, w, h, pulse, now, cx)).collect()
             }
         };
-        div().flex().flex_wrap().gap(px(GAP)).children(tiles).into_any_element()
+        let row = div().flex().flex_wrap().gap(px(GAP)).children(tiles);
+        match &shelf.placed {
+            Some(placed) => div().flex().flex_col().gap(px(6.0)).child(row).child(self.canvas_link(&shelf.key, placed, cx)).into_any_element(),
+            None => row.into_any_element(),
+        }
+    }
+
+    /// `On canvas · Ep 1 Pilot ›` (§6.5): opens that canvas in the Studio block of the session's folder.
+    fn canvas_link(&mut self, key: &str, (canvas, node): &(String, String), cx: &mut Context<Self>) -> AnyElement {
+        let muted = theme::muted();
+        self.want_canvas_title(canvas, cx);
+        let title = super::mention::label(otto_proto::MentionKind::Canvas, canvas, cx.try_global::<super::mention::StudioNames>());
+        let (canvas, node) = (canvas.clone(), node.clone());
+        div()
+            .id(gpui::ElementId::Name(format!("media-canvas-{key}").into()))
+            .flex_none()
+            .text_size(px(11.5))
+            .text_color(rgb(muted))
+            .cursor_pointer()
+            .hover(|s| s.text_color(rgb(theme::foreground())))
+            .child(format!("On canvas · {title} ›"))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if let Some(cwd) = this.files_cwd() {
+                    cx.emit(super::AgentPaneEvent::OpenCanvas { cwd, canvas: canvas.clone(), node: node.clone() });
+                }
+            }))
+            .into_any_element()
     }
 
     /// How long a pending shelf has waited: its call, or its background job since it started.
@@ -669,6 +729,61 @@ impl AgentPane {
             .tooltip(Tooltip::text(format!("{} · {}", m.name, m.size)))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_viewer(&id, window, cx)))
             .into_any_element()
+    }
+
+    /// Canvas `name`'s title for its link, from `studio.mentions` once per folder and canvas (it may not be known
+    /// yet after a reload).
+    fn want_canvas_title(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(cwd) = self.files_cwd() else { return };
+        let names = cx.default_global::<super::mention::StudioNames>();
+        if names.canvases.contains_key(name) || !names.asked.insert(format!("{cwd}\n{name}")) {
+            return;
+        }
+        let query = name.to_owned();
+        self.run(
+            cx,
+            move |c| async move { c.studio_mentions(&cwd, &query, super::mention::STUDIO_ASK).await },
+            |_, found, cx| cx.default_global::<super::mention::StudioNames>().add(&found.unwrap_or_default()),
+        );
+    }
+
+    /// The names of a sent message's entity and canvas mentions, from `studio.mentions` once per folder and target
+    /// (after a reload none is known, and a chip would read its id's last part). Row `key` is measured again when
+    /// they arrive: a badge is as wide as its name.
+    pub(super) fn want_mention_names(&mut self, key: &str, mentions: &[super::mention::Chip], cx: &mut Context<Self>) {
+        use otto_proto::MentionKind;
+        if !mentions.iter().any(|m| matches!(m.kind, MentionKind::Entity | MentionKind::Canvas)) {
+            return;
+        }
+        let Some(cwd) = self.files_cwd() else { return };
+        let names = cx.default_global::<super::mention::StudioNames>();
+        let mut queries = Vec::new();
+        for m in mentions {
+            let known = match m.kind {
+                MentionKind::Entity => names.entities.contains_key(&m.target),
+                MentionKind::Canvas => names.canvases.contains_key(&m.target),
+                _ => continue,
+            };
+            if !known && names.asked.insert(format!("{cwd}\n{}", m.target)) {
+                // A named reference's query lists its entity's references (and names the entity): once for them all.
+                let query = super::mention::name_query(m.kind, &m.target);
+                if !queries.contains(&query) {
+                    queries.push(query);
+                }
+            }
+        }
+        for query in queries {
+            let (cwd, key) = (cwd.clone(), key.to_owned());
+            self.run(
+                cx,
+                move |c| async move { c.studio_mentions(&cwd, &query, super::mention::STUDIO_ASK).await },
+                move |this, found, cx| {
+                    cx.default_global::<super::mention::StudioNames>().add(&found.unwrap_or_default());
+                    this.remeasure_row(&key);
+                    cx.notify();
+                },
+            );
+        }
     }
 }
 
@@ -1064,6 +1179,73 @@ mod tests {
     }
 
     #[test]
+    fn placement_lines_name_the_canvas_and_node() {
+        let p = |canvas: &str, node: &str| Some((canvas.to_owned(), node.to_owned()));
+        assert_eq!(placed_line("Placed on canvas ep01-pilot as n_3f2a9c"), p("ep01-pilot", "n_3f2a9c"));
+        assert_eq!(placed_line("  Placed on canvas ep01 as n_1.  "), p("ep01", "n_1"), "trimmed, a full stop dropped");
+        // A canvas name holding ` as `: the last one splits.
+        assert_eq!(placed_line("Placed on canvas tea as art as n_2"), p("tea as art", "n_2"));
+        for bad in [
+            "Placed on canvas  as n_1",
+            "Placed on canvas ep01 as ",
+            "Placed on canvas ep01 as two words",
+            "Placed on canvas ep01",
+            "placed on canvas ep01 as n_1",
+            "Saved to assets/x.png",
+            "",
+        ] {
+            assert_eq!(placed_line(bad), None, "{bad:?}");
+        }
+        let text = format!("Generated 1 image with OpenAI gpt-image-2.5-flare.\n{LINE}\nPlaced on canvas ep01 as n_a\nPlaced on canvas ep02 as n_b");
+        assert_eq!(placed(&text), p("ep01", "n_a"), "the first");
+        assert_eq!(placed(&format!("Generated 1 image.\n{LINE}")), None);
+    }
+
+    #[test]
+    fn a_placed_result_links_to_its_canvas_once_done() {
+        let result = format!("Generated 1 image with OpenAI gpt-image-2.5-flare.\n{LINE}\nPlaced on canvas ep01-pilot as n_3f2a9c");
+        let items = [
+            Item::new("a1", Role::Assistant, vec![call(json!({"prompt": "Mara at dawn", "canvas": "ep01-pilot"}))]),
+            Item::new("t1", Role::Tool, vec![Part::ToolResult { call_id: "c1".into(), content: vec![ResultPart::text(result)], is_error: false }]),
+        ];
+        let rows = rows(&items, &HashMap::new(), TurnStatus::Done);
+        let [Row::Group(_), Row::Media(shelf)] = &rows[..] else { panic!("{rows:?}") };
+        assert_eq!(shelf.placed, Some(("ep01-pilot".to_owned(), "n_3f2a9c".to_owned())));
+        // Still running: tiles held, no link yet.
+        let live = ToolState { name: TOOL.into(), status: ToolStatus::Running, ..ToolState::default() };
+        let rows = self::rows(&items[..1], &HashMap::from([("c1".to_owned(), live)]), TurnStatus::Running);
+        let [Row::Group(_), Row::Media(shelf)] = &rows[..] else { panic!("{rows:?}") };
+        assert!(matches!(shelf.tiles, Tiles::Pending { .. }), "{shelf:?}");
+        assert_eq!(shelf.placed, None);
+        // Not placed: none.
+        let plain = [
+            items[0].clone(),
+            Item::new("t1", Role::Tool, vec![Part::ToolResult { call_id: "c1".into(), content: vec![ResultPart::text(LINE)], is_error: false }]),
+        ];
+        let rows = self::rows(&plain, &HashMap::new(), TurnStatus::Done);
+        let [Row::Group(_), Row::Media(shelf)] = &rows[..] else { panic!("{rows:?}") };
+        assert_eq!(shelf.placed, None);
+    }
+
+    #[test]
+    fn a_background_jobs_report_places_it() {
+        let started =
+            Item::new("t1", Role::Tool, vec![Part::ToolResult { call_id: "c1".into(), content: vec![ResultPart::text(STARTED)], is_error: false }]);
+        let mut items =
+            vec![Item::new("a1", Role::Assistant, vec![named(VIDEO_TOOL, json!({"prompt": "A fox running", "canvas": "ep01"}))]), started];
+        let rows = self::rows(&items, &HashMap::new(), TurnStatus::Done);
+        let [Row::Group(_), Row::Media(shelf)] = &rows[..] else { panic!("{rows:?}") };
+        assert_eq!((shelf.job.as_deref(), &shelf.placed), (Some("job-a1"), &None), "waiting: no link");
+        let report = format!(
+            "Background media job-a1 (video) finished.\nGenerated 1 video with xAI grok-imagine-video-1.5.\n{VIDEO}\nPlaced on canvas ep01 as n_fox"
+        );
+        items.push(Item::new("s1", Role::System, vec![Part::System { text: report }]));
+        let rows = self::rows(&items, &HashMap::new(), TurnStatus::Done);
+        let [Row::Group(_), Row::Media(shelf)] = &rows[..] else { panic!("{rows:?}") };
+        assert_eq!(shelf.placed, Some(("ep01".to_owned(), "n_fox".to_owned())));
+    }
+
+    #[test]
     fn generate_media_without_the_catalog_takes_its_kind_from_the_result() {
         // An image model the app doesn't know: images by the result, the model as called.
         let call = json!({"model": "fal/fal-ai/flux/dev", "input": {"prompt": "Dunes"}});
@@ -1091,6 +1273,24 @@ mod tests {
         let [Row::Group(g)] = &rows[..] else { panic!("{rows:?}") };
         assert_eq!(g.lines[0].title, "Couldn't generate the image: Soul 2 input: prompt is required");
         assert_eq!(call_kind(ANY_TOOL, &json!({"model": "x", "mode": "text-to-speech"}), "", None), Some(MediaKind::Audio));
+        // Nothing says yet (the input still arriving, a model the status would name but isn't loaded): no kind
+        // shown, where it used to read as a video until the status or the result came.
+        let bare = json!({"model": "soul-2", "input": {"prompt": "A portrait"}});
+        for input in [json!({}), bare.clone()] {
+            assert!(kind_unknown(ANY_TOOL, &input, "", None), "{input}");
+        }
+        assert!(!kind_unknown(ANY_TOOL, &bare, "", Some(&status)), "its model, once the status is loaded");
+        assert!(!kind_unknown(ANY_TOOL, &bare, "Generated 1 image with Higgsfield Soul 2", None), "its result");
+        assert!(!kind_unknown(ANY_TOOL, &json!({"model": "x", "mode": "image-to-video"}), "", None), "its mode");
+        assert!(!kind_unknown(TOOL, &json!({}), "", None), "the typed tools always know");
+        let running = [Item::new("a1", Role::Assistant, vec![named(ANY_TOOL, bare)])];
+        let rows = rows_with(&running, &HashMap::new(), TurnStatus::Running, None);
+        let [Row::Group(g), Row::Media(shelf)] = &rows[..] else { panic!("{rows:?}") };
+        assert_eq!((g.lines[0].kind, g.lines[0].title.as_str()), (Kind::Generation, "Generating · soul-2"));
+        assert!(shelf.unknown);
+        let rows = rows_with(&running, &HashMap::new(), TurnStatus::Running, Some(&status));
+        let [Row::Group(g), Row::Media(shelf)] = &rows[..] else { panic!("{rows:?}") };
+        assert_eq!((g.lines[0].kind, shelf.unknown, shelf.kind), (Kind::Media, false, MediaKind::Image));
         assert_eq!(any_subject(&json!({"model": "soul-2", "mode": "image-to-image"}), Some(&status)), "Soul 2 · image");
     }
 }

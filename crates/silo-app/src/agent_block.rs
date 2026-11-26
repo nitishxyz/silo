@@ -146,6 +146,7 @@ impl crate::workspace::Workspace {
                     let method =
                         Method::AgentSet { block_id: block.clone(), session_id: Some(session_id.clone()), title: Some(title.clone()), cwd: None };
                     this.call_for(&block, method);
+                    this.studio_agent_session(&block, session_id, cx);
                 }
                 AgentPaneEvent::Project { cwd } => {
                     this.call_for(&block.clone(), Method::AgentSet { block_id: block, session_id: None, title: None, cwd: Some(cwd.clone()) });
@@ -173,10 +174,12 @@ impl crate::workspace::Workspace {
                     let ask = crate::changes_block::ReviewAsk { scope: scope.clone(), session: session.clone() };
                     this.review_changes(block, ask, window, cx);
                 }
+                AgentPaneEvent::OpenCanvas { cwd, canvas, node } => this.open_studio_canvas(block, cwd, canvas.clone(), node, window, cx),
             }
             cx.notify();
         });
         self.blocks.insert(block.to_owned(), crate::blocks::BlockPane::Agent(pane), sub);
+        self.studio_agent_pane(block, cx);
     }
 
     /// Jump to `block` (named by a tool call, picked in ⌘P's Blocks or the
@@ -245,9 +248,16 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn create_agent(&mut self, method: Method, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        // Split off a Studio block: the `studio` agent (`studio_block.rs`).
+        let studio = self.splits_off_studio(&method);
         // Shown at once where the host can; its composer focuses as it appears.
         let method = match self.instant_block(method, window, cx) {
-            Ok(_) => return,
+            Ok(id) => {
+                if studio {
+                    self.studio_agent_created(&id, cx);
+                }
+                return;
+            }
             Err(method) => method,
         };
         let Some(control) = self.control() else { return };
@@ -255,7 +265,12 @@ impl crate::workspace::Workspace {
         cx.spawn(async move |this, cx| {
             let created = task.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update(cx, |this, cx| match created {
-                Ok(created) => this.composer_pending = Some(created.block_id),
+                Ok(created) => {
+                    if studio {
+                        this.studio_agent_created(&created.block_id, cx);
+                    }
+                    this.composer_pending = Some(created.block_id);
+                }
                 Err(error) => {
                     tracing::warn!("new agent: {error:#}");
                     this.otto_settings_pending = false;

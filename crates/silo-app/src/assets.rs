@@ -16,6 +16,9 @@ macro_rules! icons {
 }
 
 icons!(
+    "mouse-pointer",
+    "frame",
+    "upload",
     "laptop",
     "arrow-left-right",
     "waypoints",
@@ -103,6 +106,11 @@ icons!(
     "volume",
     "volume-off",
     "video",
+    "clapperboard",
+    "earth",
+    "sparkles",
+    "sticky-note",
+    "user",
     "audio-lines",
     "play",
     "pause",

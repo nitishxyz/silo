@@ -56,4 +56,12 @@ impl MarkdownView {
         .size_full();
         div().relative().size_full().child(list).child(self.scroll.router()).into_any_element()
     }
+
+    /// The rendered document at its full height, not scrolling: for a page that scrolls as a whole (a scroller
+    /// inside one would scroll along with it, since gpui passes wheel events on). Every block is laid out, so
+    /// for texts of a page or two.
+    pub(crate) fn render_flat(&self, cx: &gpui::App) -> AnyElement {
+        let blocks = self.blocks.iter().enumerate().map(|(ix, block)| render_settled(&format!("md-{ix}"), block, &self.scroll, cx));
+        div().w_full().flex().flex_col().children(blocks).into_any_element()
+    }
 }

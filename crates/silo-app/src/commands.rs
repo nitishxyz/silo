@@ -91,6 +91,7 @@ commands! {
     NewAgentTab => "New Agent Tab", "Tabs", [];
     NewFilesTab => "New Files Tab", "Tabs", [], "The focused block's folder";
     NewChangesTab => "New Changes Tab", "Tabs", [], "The focused block's repo";
+    NewStudioTab => "New Studio Tab", "Tabs", [], "A media studio in the focused block's folder";
     NewTabChooser => "New Tab…", "Tabs", ["ctrl-cmd-t"], "Choose a terminal, browser, agent, address or >command";
     CloseTab => "Close Tab", "Tabs", [];
     RenameTab => "Rename Tab…", "Tabs", [];
@@ -133,6 +134,10 @@ commands! {
     // Changes
     NewChanges => "New Changes Pane", "Changes", [], "The focused block's repo, beside it";
     ReviewChanges => "Review Changes", "Changes", ["cmd-shift-g"], "This session's Changes block, or a new one beside the focused pane";
+    // Studio
+    NewStudio => "New Studio Pane", "Studio", [], "A media studio in the focused block's folder, beside it";
+    OpenStudio => "Open Studio", "Studio", [], "This session's Studio block, or a new one beside the focused pane";
+    ToggleWorld => "Toggle World", "Studio", [], "The focused Studio block's World view, or back to its canvas";
     // Hosts
     AddHost => "Add Machine…", "Hosts", [], "Pair another machine running Silo";
     RenameHost => "Rename Host…", "Hosts", [];
@@ -206,6 +211,7 @@ impl Command {
             | Self::NewAgentTab
             | Self::NewFilesTab
             | Self::NewChangesTab
+            | Self::NewStudioTab
             | Self::NewTabChooser => Method("window.create"),
             Self::CloseTab => Method("window.close"),
             Self::RenameTab => Method("window.rename"),
@@ -220,7 +226,10 @@ impl Command {
             | Self::NewFiles
             | Self::BrowseFiles
             | Self::NewChanges
-            | Self::ReviewChanges => Method("block.split"),
+            | Self::ReviewChanges
+            | Self::NewStudio
+            | Self::OpenStudio => Method("block.split"),
+            Self::ToggleWorld => Method("studio.set"),
             Self::OttoSettings => Method("app.settings_open"),
             Self::OpenFolder => Method("files.root"),
             Self::ClosePane => Method("block.close"),
@@ -281,6 +290,7 @@ impl Command {
             Self::BrowseFiles => Some(silo_proto::compat::feature::FILES_OPS),
             Self::MinimizeFloat => Some(silo_proto::compat::feature::FLOAT_PANES),
             Self::NewChanges | Self::NewChangesTab | Self::ReviewChanges => Some(silo_proto::compat::feature::CHANGES),
+            Self::NewStudio | Self::NewStudioTab | Self::OpenStudio | Self::ToggleWorld => Some(silo_proto::compat::feature::STUDIO),
             _ => None,
         }
     }
@@ -403,6 +413,24 @@ mod tests {
                 Api::Cli(name) => assert_eq!((*command, name), (Command::StartServer, "up"), "only Start Server has no method"),
             }
         }
+    }
+
+    #[test]
+    fn studio_commands_need_a_host_with_studios() {
+        use silo_proto::compat::feature;
+        let studio = [Command::NewStudioTab, Command::NewStudio, Command::OpenStudio, Command::ToggleWorld];
+        for c in studio {
+            assert!(Command::ALL.contains(&c), "{c:?} is listed");
+            assert_eq!(c.feature(), Some(feature::STUDIO), "{c:?}");
+        }
+        assert_eq!(Command::ALL.iter().filter(|c| c.feature() == Some(feature::STUDIO)).count(), studio.len());
+        assert_eq!(studio.map(Command::title), ["New Studio Tab", "New Studio Pane", "Open Studio", "Toggle World"]);
+        assert_eq!(
+            studio.map(Command::api),
+            [Api::Method("window.create"), Api::Method("block.split"), Api::Method("block.split"), Api::Method("studio.set")]
+        );
+        // No shortcut: ⇧⌘W is Close Window everywhere (docs/STUDIO.md §4.3).
+        assert!(studio.iter().all(|c| c.default_keys().is_empty()), "no default keys");
     }
 
     #[test]

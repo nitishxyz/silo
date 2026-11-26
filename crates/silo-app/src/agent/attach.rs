@@ -155,6 +155,7 @@ impl AgentPane {
         mentions: &[super::mention::Chip],
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.want_mention_names(key, mentions, cx);
         let chips: Vec<Div> = files
             .iter()
             .map(|f| {
@@ -175,7 +176,7 @@ impl AgentPane {
                 .line_height(px(USER_LINE_H))
                 .map(|el| {
                     // Selectable as the row's one leaf; mentions show as chips inline.
-                    let (text_el, layout) = super::mention::inline(text, mentions, super::select::selected(super::select::USER));
+                    let (text_el, layout) = super::mention::inline(text, mentions, super::select::selected(super::select::USER), cx);
                     // Laid out whole, then measured: taller than the collapsed height, it gets Show more.
                     let measure = {
                         let (seen, key, layout, pane) = (self.users_tall.clone(), key.to_owned(), layout.clone(), cx.entity().downgrade());

@@ -8,7 +8,7 @@ use silo_proto::{
     model::BlockKind,
 };
 
-use super::{Dialog, Kind, Row, Target, chooser_target, digit_pick, intent_note, preselect, rows, same_kind, side_key, split_method, step};
+use super::{Dialog, Kind, Row, Target, chooser_target, digit_pick, intent_note, offered, preselect, same_kind, side_key, split_method, step};
 use crate::{
     commands::Command,
     text_field::{FieldEvent, TextField},
@@ -71,14 +71,13 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A kind the host has no blocks of isn't offered (Changes on an older server).
-    fn launcher_hidden(&self) -> Option<Kind> {
-        (!self.host_supports(silo_proto::compat::feature::CHANGES)).then_some(Kind::Changes)
+    /// Kinds the host has no blocks of aren't offered (Changes, Studio on an older server).
+    fn launcher_hidden(&self) -> Vec<Kind> {
+        super::hidden(|f| self.host_supports(f))
     }
 
     fn launcher_rows(&self, text: &str, recents: &[crate::browser_home::RecentPage]) -> Vec<Row> {
-        let hidden = self.launcher_hidden();
-        rows(text, recents).into_iter().filter(|r| hidden.is_none_or(|h| r.kind() != h)).collect()
+        offered(text, recents, &self.launcher_hidden())
     }
 
     fn launcher_event(&mut self, event: &FieldEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -87,7 +86,7 @@ impl Workspace {
         let count = dialog.rows.len();
         match event {
             FieldEvent::Changed(text) => {
-                dialog.rows = rows(text, &dialog.recents).into_iter().filter(|r| hidden.is_none_or(|h| r.kind() != h)).collect();
+                dialog.rows = offered(text, &dialog.recents, &hidden);
                 dialog.selected = preselect(text, &dialog.rows, dialog.same);
                 dialog.note = intent_note(text);
             }
@@ -193,7 +192,7 @@ impl Workspace {
                     Row::Kind(Kind::Terminal, _) => self.split_block(block, side.axis(), window, cx),
                     Row::Kind(Kind::Browser, _) => self.create_browser(method, window, cx),
                     Row::Kind(Kind::Agent, _) => self.create_agent(method, window, cx),
-                    Row::Kind(Kind::Files | Kind::Changes, _) | Row::Open { .. } => self.call(method),
+                    Row::Kind(Kind::Files | Kind::Changes | Kind::Studio, _) | Row::Open { .. } => self.call(method),
                     Row::Path(_) => self.open_files_path(method, cx),
                     Row::Run(command) => self.launch_command(method, command, cx),
                 }

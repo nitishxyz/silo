@@ -257,23 +257,31 @@ impl Editor {
         &self.chips
     }
 
+    /// Replace the chips, the text as it is (a host that finds them in the text: the Studio's card prompts).
+    pub fn set_chips(&mut self, chips: Vec<Chip>, cx: &mut Context<Self>) {
+        if self.chips != chips {
+            self.chips = chips;
+            cx.notify();
+        }
+    }
+
     pub fn caret(&self) -> usize {
         self.cursor()
     }
 
-    /// Replace `range` (an `@query`) with a chip for `target`, then a space unless one follows
-    /// (a folder gets none: typing on opens it).
+    /// Replace `range` (an `@query`, a `/query`) with a chip for `target`, then a space unless one follows
+    /// (a folder or a whole canvas gets none: typing on, `#` for a canvas, opens it).
     pub fn insert_chip(&mut self, range: Range<usize>, kind: otto_proto::MentionKind, target: String, cx: &mut Context<Self>) {
         if self.read_only || range.end > self.text.len() {
             return;
         }
         let chip = Chip::new(range.start, kind, target);
         let spaced = self.text[range.end..].starts_with(char::is_whitespace);
-        let label = format!("@{}", chip.target);
-        let text = if chip.folder() || spaced { label } else { format!("{label} ") };
+        let label = format!("{}{}", chip.sigil(), chip.target);
+        let text = if chip.drills() || spaced { label } else { format!("{label} ") };
         self.history.record(self.snapshot(), crate::undo::Kind::Other, Instant::now());
         self.edit(range, &text);
-        let caret = if spaced && !chip.folder() { chip.range.end + 1 } else { chip.range.start + text.len() };
+        let caret = if spaced && !chip.drills() { chip.range.end + 1 } else { chip.range.start + text.len() };
         self.chips.push(chip);
         self.chips.sort_by_key(|c| c.range.start);
         self.selection = caret..caret;
@@ -403,6 +411,8 @@ impl Editor {
             "up" if self.nav && !m.modified() => cx.emit(EditorEvent::Nav(Nav::Up)),
             "down" if self.nav && !m.modified() => cx.emit(EditorEvent::Nav(Nav::Down)),
             "tab" if self.nav && !m.modified() => cx.emit(EditorEvent::Nav(Nav::Tab)),
+            // A menu over a document: ⏎ picks from it rather than breaking the line.
+            "enter" if self.nav && self.multiline && !m.modified() => cx.emit(EditorEvent::Submit),
             "enter" if m.shift || m.alt || (self.multiline && !m.platform) => self.insert("\n", cx),
             "enter" if self.multiline => cx.emit(EditorEvent::Submit),
             "enter" if !m.platform && !m.control => cx.emit(EditorEvent::Submit),
@@ -735,8 +745,11 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> (LayoutId, ()) {
         let editor = self.editor.read(cx);
-        let text = if editor.text.is_empty() { editor.placeholder.to_string() } else { editor.display() };
         let placeholder = editor.text.is_empty();
+        // Measured as painted: chips as wide as their badges.
+        let chips: &[super::mention::Chip] = if placeholder || editor.mask { &[] } else { &editor.chips };
+        let ranges: Vec<Range<usize>> = chips.iter().map(|c| c.range.clone()).collect();
+        let text = if placeholder { editor.placeholder.to_string() } else { super::mention::laid_out(&editor.display(), chips, cx) };
         let grow = editor.animate_growth.then(|| editor.grow.get()).filter(|g| g.lines > 0);
         let single = editor.single_line;
         let reduce = cx.reduce_motion();
@@ -758,7 +771,7 @@ impl Element for EditorElement {
                 return size(width.unwrap_or(px(0.0)), px(grow.height(f32::from(lh), max, Instant::now(), reduce)));
             }
             let lines = width.filter(|_| !single && !placeholder).map_or(1, |w| {
-                let runs = runs(&text, None, &[], font.clone(), color);
+                let runs = runs(&text, None, &ranges, font.clone(), color);
                 shape(&text, &runs, font_size, Some(w), window).iter().map(|l| l.wrap_boundaries().len() + 1).sum::<usize>().max(1)
             });
             #[allow(clippy::cast_precision_loss)]
@@ -801,7 +814,8 @@ impl Element for EditorElement {
         let ranges: Vec<Range<usize>> = chips.iter().map(|c| c.range.clone()).collect();
         let runs = runs(&text, marked.as_ref(), &ranges, window.text_style().font(), color);
         let wrap = (!single && !empty).then_some(bounds.size.width);
-        let lines = shape(&text, &runs, font_size, wrap, window);
+        // Each chip's hidden text is as wide as its badge (`laid_out`): same bytes, so offsets hold.
+        let lines = shape(&super::mention::laid_out(&text, &chips, cx), &runs, font_size, wrap, window);
         let line_height = window.line_height();
         let mut starts = Vec::with_capacity(lines.len());
         let mut tops = Vec::with_capacity(lines.len());
@@ -1029,12 +1043,12 @@ fn word_end(text: &str, at: usize) -> usize {
 
 // ---- chips ----
 
-/// Chips after `range` became `text`: those it touches go, as does a folder typed onto (it is a query
-/// again); later ones move.
+/// Chips after `range` became `text`: those it touches go, as does a folder typed onto, or a canvas `#` is
+/// typed onto (it is a query again); later ones move.
 fn shift(chips: &mut Vec<Chip>, range: Range<usize>, text: &str) {
     chips.retain_mut(|c| {
         if c.range.end <= range.start {
-            return !(c.folder() && range.is_empty() && c.range.end == range.start && text.starts_with(|ch: char| !ch.is_whitespace()));
+            return !(range.is_empty() && c.range.end == range.start && c.opens_on(text));
         }
         if c.range.start >= range.end {
             let at = |offset: usize| offset - range.end + range.start + text.len();
@@ -1138,6 +1152,80 @@ mod tests {
         assert_eq!(editor.read_with(cx, |e, _| e.text.clone()), "");
     }
 
+    #[gpui::test]
+    fn picked_chips_take_their_query_s_place(cx: &mut gpui::TestAppContext) {
+        use otto_proto::MentionKind::{Canvas, Skill};
+        let (editor, cx) = host(cx);
+        let state = |cx: &mut gpui::VisualTestContext| {
+            editor.read_with(cx, |e, _| (e.text.clone(), e.chips.iter().map(|c| (c.range.start, c.range.end)).collect::<Vec<_>>(), e.cursor()))
+        };
+        // A leading `/fi` becomes `/fight ` with the caret after the space, to type the request.
+        editor.update(cx, |e, cx| {
+            e.set_text("/fi", cx);
+            e.insert_chip(0..3, Skill, "fight".into(), cx);
+        });
+        assert_eq!(state(cx), ("/fight ".into(), vec![(0, 6)], 7));
+        // Mid-text, before a space that is kept.
+        editor.update(cx, |e, cx| {
+            e.set_text("then /act now", cx);
+            e.insert_chip(5..9, Skill, "action-choreography".into(), cx);
+        });
+        assert_eq!(state(cx), ("then /action-choreography now".into(), vec![(5, 25)], 26));
+        // A whole canvas gets no space (`#` drills in); typing `#` then makes it the query `@ep01#`.
+        editor.update(cx, |e, cx| {
+            e.set_text("see @ep", cx);
+            e.insert_chip(4..7, Canvas, "ep01".into(), cx);
+        });
+        assert_eq!(state(cx), ("see @ep01".into(), vec![(4, 9)], 9));
+        editor.update_in(cx, |e, window, cx| e.replace_text_in_range(None, "#", window, cx));
+        assert_eq!(state(cx), ("see @ep01#".into(), vec![], 10));
+        // Its node replaces that query, spaced.
+        editor.update(cx, |e, cx| e.insert_chip(4..10, Canvas, "ep01#n_1".into(), cx));
+        assert_eq!(state(cx), ("see @ep01#n_1 ".into(), vec![(4, 13)], 14));
+    }
+
+    #[gpui::test]
+    fn a_studio_prompt_s_chips_and_its_menu(cx: &mut gpui::TestAppContext) {
+        use otto_proto::MentionKind::{Canvas, Entity as EntityKind};
+        let (editor, cx) = host(cx);
+        // A node of the canvas: `@#id`, spaced (no drilling in).
+        editor.update(cx, |e, cx| {
+            e.multiline = true;
+            e.set_text("with @he", cx);
+            e.insert_chip(5..8, Canvas, "#n_1".into(), cx);
+        });
+        assert_eq!(editor.read_with(cx, |e, _| (e.text.clone(), e.chips[0].range.clone(), e.cursor())), ("with @#n_1 ".into(), 5..10, 11));
+        // Its host gives the chips their faces; the text stays, backspace takes a chip whole.
+        let face = Some(super::super::mention::Face { label: "Hero".into(), icon: "image", quiet: true });
+        let chip = Chip { face, ..Chip::new(0, EntityKind, "characters/mara".into()) };
+        editor.update(cx, |e, cx| {
+            e.set_text("@characters/mara x", cx);
+            e.set_chips(vec![chip.clone()], cx);
+        });
+        assert_eq!(editor.read_with(cx, |e, _| e.chips.clone()), [chip]);
+        press(&editor, "left left", cx);
+        press(&editor, "backspace", cx);
+        assert_eq!(editor.read_with(cx, |e, _| (e.text.clone(), e.chips.len())), (" x".into(), 0));
+        // In a document ⏎ breaks the line, unless a menu is over it: then it picks.
+        let submits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = submits.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&editor, move |_, e: &EditorEvent, _| {
+                if matches!(e, EditorEvent::Submit) {
+                    seen.set(seen.get() + 1);
+                }
+            })
+            .detach();
+        });
+        press(&editor, "enter", cx);
+        cx.run_until_parked();
+        assert_eq!((editor.read_with(cx, |e, _| e.text.clone()), submits.get()), ("\n x".into(), 0));
+        editor.update(cx, |e, _| e.nav = true);
+        press(&editor, "enter", cx);
+        cx.run_until_parked();
+        assert_eq!((editor.read_with(cx, |e, _| e.text.clone()), submits.get()), ("\n x".into(), 1));
+    }
+
     #[test]
     fn caret_motion() {
         let t = "fix the lock\nfile now";
@@ -1183,6 +1271,23 @@ mod tests {
         let mut c = chips();
         shift(&mut c, 10..10, "!");
         assert_eq!((c.len(), c[0].range.clone()), (2, 4..10));
+        // A whole canvas opens again on `#` only; a node, or a skill, never.
+        use otto_proto::MentionKind::{Canvas, Skill};
+        let canvas = || vec![Chip::new(0, Canvas, "ep01".into()), Chip::new(6, Canvas, "ep01#n_1".into()), Chip::new(16, Skill, "fight".into())];
+        let mut c = canvas();
+        shift(&mut c, 5..5, "#");
+        assert_eq!(c.iter().map(|c| c.target.as_str()).collect::<Vec<_>>(), ["ep01#n_1", "fight"]);
+        for typed in [",", " ", "x"] {
+            let mut c = canvas();
+            shift(&mut c, 5..5, typed);
+            assert_eq!(c.len(), 3, "{typed:?}");
+        }
+        let mut c = canvas();
+        shift(&mut c, 15..15, "#");
+        assert_eq!(c.len(), 3);
+        let mut c = canvas();
+        shift(&mut c, 22..22, "x");
+        assert_eq!(c.len(), 3);
         // Backspace at a chip's end, or delete at its start, takes it whole.
         let c = chips();
         assert_eq!(widen(&c, 9..10), 4..10);

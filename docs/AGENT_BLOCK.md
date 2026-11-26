@@ -370,7 +370,7 @@ Units are points.
   stays), the compaction card in the thread and a count back to 0 after; refused inline with no
   session or while a turn runs, never queued; `/providers` and `/settings` open the Otto settings, §4h); fuzzy filter, ↑/↓, ⏎/Tab, esc (keeps
   the text, menu stays closed until the `/` goes); the current mode
-  is checked. No chord overrides: ⌘N is New Window everywhere; menus show `/new`, `⌘J`, `/providers`.
+  is checked. The project's skills follow the commands, and a `/` later in the text lists skills alone (§4g2). No chord overrides: ⌘N is New Window everywhere; menus show `/new`, `⌘J`, `/providers`.
 - **Compaction card** (otto's `compaction.started` / `.delta` / `compaction` / `.failed`, `/compact` or auto): a
   tool-style row in the thread. Running: spinner, `Compacting context (auto)` or `(/compact)` shimmering, the summary
   streaming into a 160 tall box that follows its newest lines (scrolled up in it, it stays put); auto compaction
@@ -546,11 +546,27 @@ Units are points.
   otto, basename first; `.gitignore` respected). Queries wait 60 ms of quiet; older replies are dropped. A query
   naming a folder (`src/ma`) lists inside it. Until otto's first reply the agents show with a quiet, unpickable
   `Finding files…` row (never `No matches`). Moving the caret (keys, a click) reopens, refilters or closes it as
-  typing does.
+  typing does. In a studio (`docs/STUDIO.md` §6.3) its entities and canvases come after agents for a typed query,
+  and first for a bare `@` (4 of each), the popup then grouped under headings (`World`, `Canvases`, `Agents`,
+  `Models`, `Files`; never outside a studio). `@canvas#text` lists that canvas's nodes alone (`Finding cards…`
+  until otto answers).
 - **Chips:** a pick becomes an inline token in the editor (`@build`, `@src/main.rs`): a rounded fill, its icon
-  (`bot`, `file-text`, `folder`) in place of the `@`. The caret skips over it, backspace removes it whole, an edit
-  inside it makes it text. A folder chip gets no trailing space: typing on reopens it as a query (drilling in).
-  A plain `@word` typed without picking stays text.
+  (`bot`, `file-text`, `folder`, `earth`, the canvas's, `sparkles` for a skill) in place of the `@`. The caret skips
+  over it, backspace removes it whole, an edit inside it makes it text. A folder chip gets no trailing space: typing
+  on reopens it as a query (drilling in). A whole canvas's chip gets none either: `#` typed right after it reopens
+  it as `@canvas#` (its nodes); anything else leaves it. A plain `@word` typed without picking stays text.
+  A badge is as wide as what it reads, not as its target's text: the hidden text under it is laid out as
+  stand-in glyphs of that width (`mention::laid_out`: same byte count, so offsets hold; word characters only, so
+  a chip never wraps inside), which is how `@characters/sanjaya` reading "Sanjaya" and `@soul-2` with its icon
+  both fit. A name over 16 em is cut with an ellipsis. A sent message's entity and canvas names are asked for
+  once per folder and target (`want_mention_names`), since none is known after a reload.
+- **Skills** (`agent/skills.rs`): the slash menu lists the project's skills (`skills.list` for the session's
+  project root, asked each time a `/` appears) after its commands, `sparkles`, `/name` with the description on one
+  line (cut at 64 characters), fuzzy on the name like the commands (none once the query has a space). A `/` after
+  whitespace later in the text opens the same menu with skills only, and only when one matches (so ` /tmp/x`
+  never holds it open; past a `/` it isn't a query). A pick replaces the `/query` with a chip reading `/name`, a
+  space after it and the caret past it, to type the request; it is sent as `InputPart::Mention {kind: skill}` and
+  otto tells the model to load it (`docs/OTTO.md` §5.1). A skill chip at the start isn't a `/command`.
 - **Sent:** the draft goes as text and `InputPart::Mention`s; the optimistic bubble, the transcript and replay show
   them inline as chips (from the user item's `mentions`); one otto couldn't find is struck through. A failed send
   puts the chips back. Retry re-sends the message's text with its mentions rebuilt from the item's `mentions`

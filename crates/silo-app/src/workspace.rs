@@ -716,6 +716,7 @@ impl Workspace {
             ConnEvent::Event(Event::FilesChanged { block_id, paths, truncated }) => self.files_changed(block_id, paths, *truncated, cx),
             ConnEvent::Event(Event::ChangesChanged { block_id }) => self.changes_changed(block_id, cx),
             ConnEvent::Event(Event::ChangesProgress { block_id, text, .. }) => self.changes_progress(block_id, text.clone(), cx),
+            ConnEvent::Event(Event::StudioChanged { block_id, what, name, rev }) => self.studio_changed(block_id, *what, name.clone(), *rev, cx),
             ConnEvent::Event(Event::BrowserCommand { block_id, command }) => {
                 if let Some(pane) = self.blocks.browser(block_id) {
                     pane.update(cx, |pane, cx| pane.apply_command(command, cx));
@@ -1097,8 +1098,9 @@ impl Workspace {
                     crate::blocks::Kind::Changes if self.host_supports(silo_proto::compat::feature::CHANGES) => {
                         self.ensure_changes(&block, window, cx)
                     }
+                    crate::blocks::Kind::Studio if self.host_supports(silo_proto::compat::feature::STUDIO) => self.ensure_studio(&block, window, cx),
                     // No pane: its card says why (`render_cell`).
-                    crate::blocks::Kind::Agent | crate::blocks::Kind::Changes | crate::blocks::Kind::Unsupported => {}
+                    crate::blocks::Kind::Agent | crate::blocks::Kind::Changes | crate::blocks::Kind::Studio | crate::blocks::Kind::Unsupported => {}
                 }
             }
         }
@@ -2226,6 +2228,7 @@ fn placeholder_info(id: &str, session_id: &str, cwd: Option<String>) -> BlockInf
         agent: None,
         files: None,
         changes: None,
+        studio: None,
     }
 }
 

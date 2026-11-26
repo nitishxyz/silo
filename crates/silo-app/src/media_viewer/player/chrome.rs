@@ -5,12 +5,13 @@ use gpui::{ClickEvent, Div, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, P
 
 use super::{Drag, Playback, Prefs, bubble_left, keys::SKIP, played, volume_glyph};
 use crate::{
-    agent::{AgentPane, audio, media},
+    agent::{audio, media},
     assets::icon,
+    media_viewer::MediaViewer,
     tooltip::Tooltip,
 };
 
-pub(in crate::agent) const BAR_INSET: f32 = 16.0;
+pub(in crate::media_viewer) const BAR_INSET: f32 = 16.0;
 const BAR_RADIUS: f32 = 22.0;
 const BAR_PAD: f32 = 12.0;
 const BAR_MAX_W: f32 = 760.0;
@@ -23,7 +24,7 @@ const ROW: f32 = 36.0;
 /// The bar's height: border, padding, the scrubber, the gap, the transport row.
 const BAR_H: f32 = 2.0 + (BAR_PAD - 2.0) + HIT + 2.0 + ROW + (BAR_PAD - 4.0);
 /// Room under a fitted (not filling) video for the bar.
-pub(in crate::agent) const BAR_ROOM: f32 = BAR_INSET + BAR_H + 8.0;
+pub(in crate::media_viewer) const BAR_ROOM: f32 = BAR_INSET + BAR_H + 8.0;
 const SCRIM: f32 = 150.0;
 const VOLUME_WIDTH: f32 = 96.0;
 /// Narrower bars drop the volume slider, then the skips.
@@ -36,7 +37,7 @@ fn white(a: f32) -> Hsla {
 }
 
 /// An unframed round glyph button on the bar's glass.
-pub(in crate::agent) fn bar_button(id: &'static str, glyph: &'static str, size: f32) -> Stateful<Div> {
+pub(in crate::media_viewer) fn bar_button(id: &'static str, glyph: &'static str, size: f32) -> Stateful<Div> {
     div()
         .id(id)
         .flex_none()
@@ -52,7 +53,7 @@ pub(in crate::agent) fn bar_button(id: &'static str, glyph: &'static str, size: 
 }
 
 /// A gradient from the edge (`top` or bottom) into the picture, under the chrome there.
-pub(in crate::agent) fn scrim(top: bool) -> Div {
+pub(in crate::media_viewer) fn scrim(top: bool) -> Div {
     let (angle, edge) = if top { (180.0, 0.5) } else { (0.0, 0.65) };
     div().absolute().left_0().right_0().h(px(SCRIM)).map(|el| if top { el.top_0() } else { el.bottom_0() }).bg(gpui::linear_gradient(
         angle,
@@ -62,7 +63,7 @@ pub(in crate::agent) fn scrim(top: bool) -> Div {
 }
 
 /// Dark glass: blurred where the renderer can, else nearly opaque.
-pub(in crate::agent) fn glass<E: Styled>(el: E) -> E {
+pub(in crate::media_viewer) fn glass<E: Styled>(el: E) -> E {
     let el = el.border_1().border_color(white(0.1));
     if crate::surface::current().frosted() {
         el.bg(gpui::hsla(0.0, 0.0, 0.1, 0.58)).backdrop_blur(px(crate::surface::BLUR)).backdrop_saturation(crate::surface::SATURATION)
@@ -77,9 +78,9 @@ fn at(x: Pixels, bounds: gpui::Bounds<Pixels>) -> f32 {
     audio::fraction(f32::from(x), f32::from(bounds.origin.x), f32::from(bounds.size.width)) as f32
 }
 
-impl AgentPane {
+impl MediaViewer {
     /// The bar, centred at the pane's bottom; `width` is the viewer's.
-    pub(in crate::agent) fn player_bar(p: &Playback, prefs: Prefs, width: f32, cx: &mut gpui::Context<Self>) -> Div {
+    pub(in crate::media_viewer) fn player_bar(p: &Playback, prefs: Prefs, width: f32, cx: &mut gpui::Context<Self>) -> Div {
         use crate::theme::Continuous as _;
         let room = (width - 2.0 * BAR_INSET).min(BAR_MAX_W);
         let bar = glass(div())
@@ -179,7 +180,7 @@ fn time_bubble(at: f32, duration: f64, track: f32) -> Div {
     div().absolute().bottom(px(HIT + 2.0)).left(px(bubble_left(at, W, track))).w(px(W)).flex().justify_center().child(label)
 }
 
-impl AgentPane {
+impl MediaViewer {
     /// Play/pause (replay at the end), ±5 s, the time; volume, loop, Copy, Save…, fill. `room` is the bar's
     /// width: narrow bars drop the volume slider, then the skips.
     fn transport(p: &Playback, prefs: Prefs, room: f32, cx: &mut gpui::Context<Self>) -> Div {
@@ -239,7 +240,7 @@ impl AgentPane {
             .child(
                 bar_button("player-copy", "copy", 32.0)
                     .tooltip(Tooltip::text("Copy video  ⌘C"))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.copy_viewed(cx))),
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.copy(cx))),
             )
             .child(
                 div()
@@ -257,7 +258,7 @@ impl AgentPane {
                     .active(|s| s.bg(white(0.2)))
                     .child("Save…")
                     .tooltip(Tooltip::text("Save  ⌘S"))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save_viewed(cx))),
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save(cx))),
             )
             .child(
                 bar_button("player-fill", if prefs.fill { "shrink" } else { "expand" }, 32.0)
@@ -267,7 +268,7 @@ impl AgentPane {
         div().h(px(ROW)).flex().items_center().justify_between().gap(px(8.0)).child(left).child(right)
     }
 
-    /// The volume slider: a press sets it and a drag follows (`viewer_drag`).
+    /// The volume slider: a press sets it and a drag follows (`MediaViewer::moved`).
     fn volume_slider(p: &Playback, level: f32, cx: &mut gpui::Context<Self>) -> Stateful<Div> {
         let cell = p.level.clone();
         let dragging = p.drag == Some(Drag::Volume);
@@ -299,7 +300,7 @@ impl AgentPane {
     }
 
     /// A round frosted replay button over the last frame.
-    pub(in crate::agent) fn replay_disc(cx: &mut gpui::Context<Self>) -> Div {
+    pub(in crate::media_viewer) fn replay_disc(cx: &mut gpui::Context<Self>) -> Div {
         div().absolute().size_full().flex().items_center().justify_center().child(
             glass(div())
                 .id("player-replay")
@@ -318,9 +319,9 @@ impl AgentPane {
     }
 }
 
-impl AgentPane {
+impl MediaViewer {
     /// Scrub to the track's `x`: pauses for the drag (and plays on release when it played).
-    pub(in crate::agent) fn scrub_to(&mut self, x: Pixels, cx: &mut gpui::Context<Self>) {
+    pub(in crate::media_viewer) fn scrub_to(&mut self, x: Pixels, cx: &mut gpui::Context<Self>) {
         let now = std::time::Instant::now();
         let Some(p) = self.playback() else { return };
         let to = at(x, p.track.get());
@@ -340,7 +341,7 @@ impl AgentPane {
     }
 
     /// Volume at the slider's `x`.
-    pub(in crate::agent) fn volume_to(&mut self, x: Pixels, cx: &mut gpui::Context<Self>) {
+    pub(in crate::media_viewer) fn volume_to(&mut self, x: Pixels, cx: &mut gpui::Context<Self>) {
         let Some(p) = self.playback() else { return };
         p.drag = Some(Drag::Volume);
         let level = at(x, p.level.get());
@@ -348,7 +349,7 @@ impl AgentPane {
     }
 
     /// A drag ends: a scrub plays on when it played.
-    pub(in crate::agent) fn player_release(&mut self, cx: &mut gpui::Context<Self>) {
+    pub(in crate::media_viewer) fn player_release(&mut self, cx: &mut gpui::Context<Self>) {
         let Some(p) = self.playback() else { return };
         if let Some(Drag::Scrub { resume: true, .. }) = p.drag.take() {
             p.play(std::time::Instant::now());

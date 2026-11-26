@@ -7,23 +7,22 @@
 //! ⌘J (with focus in the pane) opens the session switcher.
 
 mod attach;
-mod audio;
-mod av;
+pub(crate) mod audio;
+pub(crate) mod av;
 mod branch;
 pub(crate) mod client;
 pub(crate) mod editor;
 mod form_card;
 mod header;
 mod jobs;
-mod markdown;
+pub(crate) mod markdown;
 mod markdown_view;
-mod media;
-mod media_setup;
+pub(crate) mod media;
+pub(crate) mod media_setup;
 pub(crate) mod mention;
 mod partial_json;
 mod pill_input;
 mod plan;
-mod player;
 mod relocate;
 mod rename;
 mod reveal;
@@ -35,11 +34,13 @@ pub(crate) mod settings;
 mod settings_agents;
 mod settings_mcp;
 mod signin;
+mod skills;
+pub(crate) mod studio_link;
 mod subagents;
-mod svg;
-mod transcript;
+pub(crate) mod svg;
+pub(crate) mod transcript;
 mod usage;
-mod view;
+pub(crate) mod view;
 mod viewer;
 
 use std::{
@@ -56,6 +57,8 @@ use otto_client::{ClientError, Connection, FollowerState, SessionCreateOptions, 
 use otto_proto::{ApprovalDecision, ApprovalMode, Delivery, Effort, InputPart, Method, ProjectInfo, SessionInfo, TurnStatus};
 use silo_client::transport::tunnel::TunnelErrCode;
 
+/// A video frame as gpui draws it (the Studio viewer's too).
+pub(crate) use crate::media_viewer::surface as video_surface;
 use crate::text_field::{FieldEvent, TextField};
 use attach::{Attachment, upload};
 use client::Catalog;
@@ -115,6 +118,12 @@ pub enum AgentPaneEvent {
         scope: silo_proto::model::ChangesScope,
         session: String,
     },
+    /// Show `canvas` (focusing `node` where it can) in the Studio block of folder `cwd` (a placed result's link).
+    OpenCanvas {
+        cwd: String,
+        canvas: String,
+        node: String,
+    },
 }
 
 /// Entry motion of rows and lines (`docs/AGENT_BLOCK.md` §6).
@@ -156,6 +165,7 @@ enum SlashAct {
     Rename,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct SlashCommand {
     name: &'static str,
     about: &'static str,
@@ -186,6 +196,38 @@ fn compact_refusal(session: bool, running: bool, compacting: bool) -> Option<&'s
         (_, true, _) => Some("Can't compact while the agent works"),
         _ => None,
     }
+}
+
+/// A row of the `/` menu: a command, or a skill of the session's project (picked as a `/name` chip).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SlashChoice {
+    Command(&'static SlashCommand),
+    Skill { name: String, about: String },
+}
+
+/// What the `/` menu is completing: the `/query`'s range and the query; `commands` for a leading `/` (commands,
+/// then skills), else a `/` after whitespace later in the text (skills only, [`skills::query`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SlashAt {
+    range: std::ops::Range<usize>,
+    query: String,
+    commands: bool,
+}
+
+/// The `/` menu's query in `text` with the caret at `caret`: a leading `/` (not a chip there), else a skill query.
+fn slash_at(text: &str, caret: usize, chips: &[mention::Chip]) -> Option<SlashAt> {
+    if let Some(query) = slash_query(text).filter(|_| !chips.iter().any(|c| c.range.start == 0)) {
+        return Some(SlashAt { range: skills::leading(text), query: query.to_owned(), commands: true });
+    }
+    skills::query(text, caret, chips).map(|(range, query)| SlashAt { range, query: query.to_owned(), commands: false })
+}
+
+/// The `/` menu's rows for `at`: matching commands (leading only), then matching skills.
+fn slash_rows(at: &SlashAt, skills: &[otto_proto::SkillInfo]) -> Vec<SlashChoice> {
+    let commands = if at.commands { slash_matches(&at.query) } else { Vec::new() };
+    let skills =
+        skills::matches(skills, &at.query).into_iter().map(|s| SlashChoice::Skill { name: s.name.clone(), about: skills::about(&s.description) });
+    commands.into_iter().map(SlashChoice::Command).chain(skills).collect()
 }
 
 /// What follows a leading `/` on a single line.
@@ -438,6 +480,11 @@ pub struct AgentPane {
     overlay_anim: crate::motion::Toggle,
     /// Esc closed the slash menu; it stays closed until the `/` goes.
     slash_dismissed: bool,
+    /// The `/` query last seen (its range's start and text): the selection resets when it changes.
+    slash_seen: Option<(usize, String)>,
+    /// The project's skills (`skills.list`) for the `/` menu, and whether this `/` asked for them already.
+    skills: Vec<otto_proto::SkillInfo>,
+    skills_asked: bool,
     /// The `@` popup.
     mention: mention::Popup,
     selected: usize,
@@ -490,7 +537,7 @@ pub struct AgentPane {
     thumbs: HashMap<String, Option<std::sync::Arc<gpui::Image>>>,
     /// Generated media fetched for the transcript and the viewer (`media.rs`), and the open viewer (`viewer.rs`).
     media: media::Cache,
-    viewer: Option<viewer::Viewer>,
+    viewer: Option<(Entity<crate::media_viewer::MediaViewer>, Subscription)>,
     /// The generated audio playing, or paused where it was (`audio.rs`).
     audio: Option<audio::Playing>,
     /// Bars above the composer by key: expanded motion, and when each appeared.
@@ -668,6 +715,9 @@ impl AgentPane {
             overlay_shown: None,
             overlay_anim: crate::motion::Toggle::new(false, crate::motion::UI_FAST),
             slash_dismissed: false,
+            slash_seen: None,
+            skills: Vec::new(),
+            skills_asked: false,
             mention: mention::Popup::default(),
             selected: 0,
             pick_scroll: gpui::ScrollHandle::new(),
@@ -1494,8 +1544,11 @@ impl AgentPane {
                 self.sync_slash(cx);
                 self.sync_mention(cx);
             }
-            // The caret moved (keys, a click): the `@` popup follows it.
-            EditorEvent::Moved => self.sync_mention(cx),
+            // The caret moved (keys, a click): the `@` popup and a skill's `/` follow it.
+            EditorEvent::Moved => {
+                self.sync_slash(cx);
+                self.sync_mention(cx);
+            }
             EditorEvent::Nav(nav) => {
                 let count = self.overlay_count(cx);
                 match nav {
@@ -1505,7 +1558,7 @@ impl AgentPane {
                     Nav::Tab => {}
                 }
                 if self.overlay == Some(Overlay::Mention) {
-                    self.mention.scroll.scroll_to_item(self.selected);
+                    self.mention.scroll.scroll_to_item(mention::child(&self.mention_choices(), self.selected));
                 }
                 self.reveal_pick = true;
                 cx.notify();
@@ -1523,24 +1576,66 @@ impl AgentPane {
         }
     }
 
-    /// Open, filter or close the slash menu as the composer's text changes.
+    /// Open, filter or close the slash menu as the composer's text (or, for a skill's `/` later in the text, its
+    /// caret) changes. A `/` asks otto for the project's skills once; a skill's `/` opens only when one matches.
     fn sync_slash(&mut self, cx: &mut Context<Self>) {
-        let text = self.editor.read(cx).text().to_owned();
-        let query = slash_query(&text).filter(|_| self.mention_query(cx).is_none());
-        if query.is_none() {
-            self.slash_dismissed = false;
+        let at = self.slash_at(cx).filter(|_| self.mention_query(cx).is_none());
+        let Some(at) = at else {
+            (self.slash_dismissed, self.skills_asked, self.slash_seen) = (false, false, None);
+            if self.overlay == Some(Overlay::Slash) {
+                self.set_overlay(None, cx);
+            }
+            cx.notify();
+            return;
+        };
+        if !std::mem::replace(&mut self.skills_asked, true) {
+            self.reload_skills(cx);
         }
-        let open = query.is_some() && !self.slash_dismissed && self.composer_visible();
+        let open = !self.slash_dismissed && self.composer_visible() && (at.commands || !slash_rows(&at, &self.skills).is_empty());
+        let seen = Some((at.range.start, at.query.clone()));
         if open {
+            let fresh = self.overlay != Some(Overlay::Slash) || self.slash_seen != seen;
             if self.overlay != Some(Overlay::Slash) {
                 self.set_overlay(Some(Overlay::Slash), cx);
             }
-            self.selected = 0;
-            self.pick_scroll.set_offset(gpui::Point::default());
+            if fresh {
+                self.selected = 0;
+                self.pick_scroll.set_offset(gpui::Point::default());
+            }
         } else if self.overlay == Some(Overlay::Slash) {
             self.set_overlay(None, cx);
         }
+        self.slash_seen = seen;
         cx.notify();
+    }
+
+    /// The `/` query at the composer's caret, if any ([`slash_at`]).
+    fn slash_at(&self, cx: &gpui::App) -> Option<SlashAt> {
+        let e = self.editor.read(cx);
+        slash_at(e.text(), e.caret(), e.chips())
+    }
+
+    /// The project whose skills a `/` lists: the shown session's, else the pane's (its root).
+    fn skills_root(&self) -> Option<String> {
+        let session = self.mirror().and_then(|m| self.projects.iter().find(|p| p.id == m.info.project_id)).map(|p| p.root.clone());
+        session.or_else(|| self.project.as_ref().map(|p| p.root.clone())).or_else(|| self.files_cwd())
+    }
+
+    /// `skills.list` for [`Self::skills_root`], then the `/` menu again (a skill's `/` may open now).
+    fn reload_skills(&mut self, cx: &mut Context<Self>) {
+        let root = self.skills_root();
+        self.run(
+            cx,
+            move |c| async move { c.skills_list(root).await },
+            |this, result, cx| {
+                if let Ok(skills) = result {
+                    this.skills = skills;
+                }
+                if this.skills_asked {
+                    this.sync_slash(cx);
+                }
+            },
+        );
     }
 
     /// The `@query` at the composer's caret, if any.
@@ -1561,12 +1656,13 @@ impl AgentPane {
                 // Just opened: no paths yet (the popup shows the agents and a loading row).
                 if self.mention.at.is_none() {
                     self.mention.files = None;
+                    self.mention.studio.clear();
                 }
                 self.mention.at = Some((range, query.clone()));
                 if self.overlay != Some(Overlay::Mention) {
                     self.set_overlay(Some(Overlay::Mention), cx);
-                    // Its media models.
-                    self.want_media(None, cx);
+                    // Its media models, fresh each time: a key added since, or a catalog fetched since, shows.
+                    self.reload_media(cx);
                 }
                 if fresh {
                     self.selected = 0;
@@ -1592,18 +1688,44 @@ impl AgentPane {
             .or_else(|| self.cwd.clone())
     }
 
-    /// `files.complete` for `query` once typing pauses; a reply to an older query is dropped.
+    /// `files.complete` and `studio.mentions` for `query` once typing pauses (a `canvas#…` query: only
+    /// `studio.mentions`, for that canvas's nodes, its reply standing for the paths' too); a reply to an older query
+    /// is dropped.
     fn complete_files(&mut self, query: String, cx: &mut Context<Self>) {
         let Some(cwd) = self.files_cwd() else {
             self.mention.files = Some(Vec::new());
+            self.mention.studio.clear();
             return;
         };
+        let nodes = mention::node_query(&query).is_some();
+        if nodes {
+            self.mention.files = None;
+        }
         self.mention.asked += 1;
         let asked = self.mention.asked;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(mention::DEBOUNCE).await;
             let _ = this.update(cx, |this, cx| {
                 if this.mention.asked != asked {
+                    return;
+                }
+                // Not a studio (or an otto without it): none, quietly.
+                let (studio_cwd, studio_query) = (cwd.clone(), query.clone());
+                this.run(
+                    cx,
+                    move |c| async move { c.studio_mentions(&studio_cwd, &studio_query, mention::STUDIO_ASK).await },
+                    move |this, result, cx| {
+                        let found = result.unwrap_or_default();
+                        cx.default_global::<mention::StudioNames>().add(&found);
+                        if this.mention.asked == asked {
+                            this.mention.studio = found;
+                            if nodes {
+                                this.mention.files = Some(Vec::new());
+                            }
+                        }
+                    },
+                );
+                if nodes {
                     return;
                 }
                 this.run(
@@ -1624,12 +1746,14 @@ impl AgentPane {
         self.mention
             .at
             .as_ref()
-            .map(|(_, query)| mention::choices(&self.agent_choices(), self.media_status(), query, self.mention.files.as_deref()))
+            .map(|(_, query)| {
+                mention::choices(&self.agent_choices(), &self.mention.studio, self.media_status(), query, self.mention.files.as_deref())
+            })
             .unwrap_or_default()
     }
 
-    fn slash_choices(&self, cx: &gpui::App) -> Vec<&'static SlashCommand> {
-        slash_query(self.editor.read(cx).text()).map(slash_matches).unwrap_or_default()
+    fn slash_choices(&self, cx: &gpui::App) -> Vec<SlashChoice> {
+        self.slash_at(cx).map(|at| slash_rows(&at, &self.skills)).unwrap_or_default()
     }
 
     fn run_slash(&mut self, act: SlashAct, window: &mut Window, cx: &mut Context<Self>) {
@@ -2352,11 +2476,14 @@ impl AgentPane {
                 }
                 _ => self.open_otto_settings(settings::Entry::Providers, window, cx),
             },
-            Some(Overlay::Slash) => {
-                if let Some(c) = self.slash_choices(cx).get(index) {
-                    self.run_slash(c.act, window, cx);
+            Some(Overlay::Slash) => match (self.slash_choices(cx).into_iter().nth(index), self.slash_at(cx)) {
+                (Some(SlashChoice::Command(c)), _) => self.run_slash(c.act, window, cx),
+                // The `/query` becomes the skill's chip, the caret after it to type the request.
+                (Some(SlashChoice::Skill { name, .. }), Some(at)) => {
+                    self.editor.update(cx, |e, cx| e.insert_chip(at.range, otto_proto::MentionKind::Skill, name, cx));
                 }
-            }
+                _ => {}
+            },
             Some(Overlay::Mention) => {
                 // The `@word` at the caret now (it may have moved since the popup opened).
                 if let (Some((kind, target)), Some((range, _))) =
@@ -2728,6 +2855,45 @@ mod tests {
         for c in &SLASH {
             assert!(crate::assets::has_icon(c.icon), "{}", c.icon);
         }
+    }
+
+    #[test]
+    fn the_slash_menu_lists_skills_after_commands() {
+        let skill = |name: &str, about: &str| otto_proto::SkillInfo { name: name.into(), description: about.into() };
+        let skills = [skill("action-choreography", "Stage fights"), skill("mode-sheet", "Model sheets"), skill("shot-listing", "Shots")];
+        let rows = |text: &str, caret: usize, chips: &[mention::Chip]| slash_at(text, caret, chips).map(|at| (at.clone(), slash_rows(&at, &skills)));
+        let named = |rows: &[SlashChoice]| {
+            rows.iter()
+                .map(|r| match r {
+                    SlashChoice::Command(c) => c.name.to_owned(),
+                    SlashChoice::Skill { name, .. } => format!("skill {name}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        // A leading `/`: commands, then skills, both filtered; a skill row carries its description.
+        let (at, all) = rows("/", 1, &[]).unwrap();
+        assert_eq!((at.range, at.commands), (0..1, true));
+        assert_eq!(all.len(), SLASH.len() + skills.len());
+        assert_eq!(all[SLASH.len()], SlashChoice::Skill { name: "action-choreography".into(), about: "Stage fights".into() });
+        let (at, mode) = rows("/mode", 5, &[]).unwrap();
+        assert_eq!(at.range, 0..5);
+        let mode = named(&mode);
+        assert!(mode.iter().position(|n| n == "skill mode-sheet") > mode.iter().position(|n| n == "mode ask"), "{mode:?}");
+        // `/mode auto`: a command's argument, no skills; the range is the first word, the query the line.
+        let (at, auto) = rows("/mode auto", 10, &[]).unwrap();
+        assert_eq!((at.range, at.query.as_str()), (0..5, "mode auto"));
+        assert!(named(&auto).iter().all(|n| !n.starts_with("skill")));
+        // Mid-text, after whitespace: skills only, filtered.
+        let (at, mid) = rows("then /shot", 10, &[]).unwrap();
+        assert_eq!((at.range, at.commands), (5..10, false));
+        assert_eq!(named(&mid), ["skill shot-listing"]);
+        // A path matches nothing (the menu stays closed), past its first segment it isn't a query.
+        assert!(rows("cat /tmp", 8, &[]).unwrap().1.is_empty());
+        assert!(rows("cat /tmp/x", 10, &[]).is_none());
+        // A skill chip at the start isn't the `/` menu again.
+        let chip = [mention::Chip::new(0, otto_proto::MentionKind::Skill, "shot-listing".into())];
+        assert!(rows("/shot-listing do it", 19, &chip).is_none());
+        assert!(rows("/shot-listing do it /act", 24, &chip).is_some_and(|(_, r)| named(&r) == ["skill action-choreography"]));
     }
 
     #[test]

@@ -8,6 +8,7 @@
 
 pub(crate) mod browse;
 mod browser;
+pub(crate) use browser::DraggedFiles;
 mod browser_view;
 mod create;
 mod diff;

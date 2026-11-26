@@ -94,9 +94,9 @@ impl HeaderMode {
 pub fn header_mode(kind: Kind, headers: PaneHeaders) -> HeaderMode {
     let shown = |on: bool| if on { HeaderMode::Full } else { HeaderMode::Hidden };
     match kind {
-        // Browsers, Files and Changes hold their address or tabs there.
-        Kind::Browser | Kind::Files | Kind::Changes if headers.none() => HeaderMode::Middle,
-        Kind::Browser | Kind::Files | Kind::Changes => HeaderMode::Full,
+        // Browsers, Files, Changes and Studio hold their address or tabs there.
+        Kind::Browser | Kind::Files | Kind::Changes | Kind::Studio if headers.none() => HeaderMode::Middle,
+        Kind::Browser | Kind::Files | Kind::Changes | Kind::Studio => HeaderMode::Full,
         Kind::Agent => shown(headers.get(HeaderBlock::Agent)),
         Kind::Terminal | Kind::Unsupported => shown(headers.get(HeaderBlock::Terminal)),
     }

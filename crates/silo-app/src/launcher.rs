@@ -34,10 +34,11 @@ pub enum Kind {
     Agent,
     Files,
     Changes,
+    Studio,
 }
 
 /// The kinds listed, in order (their digits are 1, 2, 3…).
-pub const SHOWN: &[Kind] = &[Kind::Terminal, Kind::Browser, Kind::Agent, Kind::Files, Kind::Changes];
+pub const SHOWN: &[Kind] = &[Kind::Terminal, Kind::Browser, Kind::Agent, Kind::Files, Kind::Changes, Kind::Studio];
 
 /// Recent pages listed under the kinds.
 const RECENTS: usize = 3;
@@ -50,6 +51,7 @@ impl Kind {
             Self::Agent => "Agent",
             Self::Files => "Files",
             Self::Changes => "Changes",
+            Self::Studio => "Studio",
         }
     }
 
@@ -60,6 +62,7 @@ impl Kind {
             Self::Agent => crate::agent_block::ICON,
             Self::Files => crate::files_block::ICON,
             Self::Changes => crate::changes_block::ICON,
+            Self::Studio => crate::studio_block::ICON,
         }
     }
 
@@ -70,6 +73,7 @@ impl Kind {
             Self::Agent => BlockKind::Agent,
             Self::Files => BlockKind::Files,
             Self::Changes => BlockKind::Changes,
+            Self::Studio => BlockKind::Studio,
         }
     }
 
@@ -81,6 +85,7 @@ impl Kind {
             Self::Agent => Command::NewAgentTab,
             Self::Files => Command::NewFilesTab,
             Self::Changes => Command::NewChangesTab,
+            Self::Studio => Command::NewStudioTab,
         }
     }
 
@@ -92,6 +97,7 @@ impl Kind {
             Self::Agent => Command::NewAgent,
             Self::Files => Command::NewFiles,
             Self::Changes => Command::NewChanges,
+            Self::Studio => Command::NewStudio,
         }
     }
 }
@@ -193,6 +199,7 @@ pub fn split_method(block: &str, side: Side, row: &Row, cwd: Option<String>) -> 
         Row::Kind(Kind::Agent, _) => (BlockKind::Agent, spawn, None),
         Row::Kind(Kind::Files, _) => (BlockKind::Files, spawn, None),
         Row::Kind(Kind::Changes, _) => (BlockKind::Changes, spawn, None),
+        Row::Kind(Kind::Studio, _) => (BlockKind::Studio, spawn, None),
         Row::Path(path) => (BlockKind::Files, SpawnSpec { cwd: Some(path.clone()), ..SpawnSpec::default() }, None),
         Row::Open { url, .. } => (BlockKind::Browser, SpawnSpec::default(), Some(url.clone())),
     };
@@ -277,6 +284,17 @@ pub fn rows(text: &str, recents: &[RecentPage]) -> Vec<Row> {
         Intent::Agent(_) => vec![Row::Kind(Kind::Agent, Vec::new())],
         Intent::Path(path) => vec![Row::Path(path)],
     }
+}
+
+/// Kinds a host without their feature has no blocks of (Changes, Studio on an older server): not offered.
+pub fn hidden(supports: impl Fn(&str) -> bool) -> Vec<Kind> {
+    use silo_proto::compat::feature;
+    [(feature::CHANGES, Kind::Changes), (feature::STUDIO, Kind::Studio)].into_iter().filter(|(f, _)| !supports(f)).map(|(_, k)| k).collect()
+}
+
+/// [`rows`] without the `hidden` kinds' (a path opens Files, which every host with the launcher has).
+pub fn offered(text: &str, recents: &[RecentPage], hidden: &[Kind]) -> Vec<Row> {
+    rows(text, recents).into_iter().filter(|r| !hidden.contains(&r.kind())).collect()
 }
 
 /// What the dialog says about `text` beyond its rows.

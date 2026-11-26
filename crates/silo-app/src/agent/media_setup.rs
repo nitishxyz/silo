@@ -97,13 +97,13 @@ pub(super) fn offered<'a>(q: &PendingQuestion, kind: MediaKind, providers: &'a [
 }
 
 /// The default model's name for `kind` (else its first), e.g. `GPT Image 2.5 Flare`.
-pub(super) fn models_line(p: &MediaProviderInfo, kind: MediaKind) -> String {
+pub(crate) fn models_line(p: &MediaProviderInfo, kind: MediaKind) -> String {
     let of_kind = || p.models.iter().filter(|m| m.kind == kind);
     of_kind().find(|m| m.default).or_else(|| of_kind().next()).map(|m| m.name.clone()).unwrap_or_default()
 }
 
 /// `Images`, `Images · Video`, `Audio`.
-pub(super) fn kinds_label(kinds: &[MediaKind]) -> String {
+pub(crate) fn kinds_label(kinds: &[MediaKind]) -> String {
     let label = |k: &MediaKind| match k {
         MediaKind::Image => "Images",
         MediaKind::Video => "Video",
@@ -130,7 +130,7 @@ fn noun(kind: MediaKind) -> (&'static str, &'static str) {
     }
 }
 
-pub(super) fn logo(provider: &str) -> &'static str {
+pub(crate) fn logo(provider: &str) -> &'static str {
     match provider {
         "openai" => "provider-openai",
         "google" => "provider-google",
@@ -142,7 +142,7 @@ pub(super) fn logo(provider: &str) -> &'static str {
     }
 }
 
-pub(super) fn key_hint(provider: &str) -> &'static str {
+pub(crate) fn key_hint(provider: &str) -> &'static str {
     match provider {
         "openai" => "Create one on the OpenAI platform",
         "google" => "Create one in Google AI Studio",
@@ -154,7 +154,7 @@ pub(super) fn key_hint(provider: &str) -> &'static str {
     }
 }
 
-pub(super) fn key_placeholder(provider: &str) -> &'static str {
+pub(crate) fn key_placeholder(provider: &str) -> &'static str {
     match provider {
         "openai" => "sk-…",
         "google" => "AIza…",
@@ -165,7 +165,7 @@ pub(super) fn key_placeholder(provider: &str) -> &'static str {
 }
 
 /// A plausible key: no spaces, a sane length; OpenAI's prefix; Higgsfield's two parts.
-pub(super) fn key_valid(provider: &str, key: &str) -> bool {
+pub(crate) fn key_valid(provider: &str, key: &str) -> bool {
     let key = key.trim();
     let ok = match provider {
         "openai" => key.starts_with("sk-"),
@@ -174,6 +174,10 @@ pub(super) fn key_valid(provider: &str, key: &str) -> bool {
     };
     ok && key.len() >= 20 && !key.contains(char::is_whitespace)
 }
+
+/// The media status the app loaded last, in any pane ([`AgentPane::want_media`]).
+struct LastMedia(MediaStatus);
+impl gpui::Global for LastMedia {}
 
 impl AgentPane {
     /// The kind a question's asking tool makes: such a question gets the setup card.
@@ -196,6 +200,16 @@ impl AgentPane {
 
     /// Fetch `media.status` once, and again for each new setup `question`.
     pub(super) fn want_media(&mut self, question: Option<&str>, cx: &mut Context<Self>) {
+        // What another pane loaded serves until this one's own answer comes: a generation's kind and model name
+        // are right from its first frame.
+        if question.is_none()
+            && self.media_keys.status.is_none()
+            && !self.media_keys.loading
+            && let Some(last) = cx.try_global::<LastMedia>()
+        {
+            self.media_keys.status = Some(last.0.clone());
+            return self.refresh_media(cx);
+        }
         let m = &self.media_keys;
         let stale = match question {
             Some(q) => m.asked.as_deref() != Some(q),
@@ -205,6 +219,13 @@ impl AgentPane {
             if let Some(q) = question {
                 self.media_keys.asked = Some(q.to_owned());
             }
+            self.refresh_media(cx);
+        }
+    }
+
+    /// Fetch `media.status` again unless a fetch is under way (the `@` popup, each time it opens).
+    pub(super) fn reload_media(&mut self, cx: &mut Context<Self>) {
+        if !self.media_keys.loading {
             self.refresh_media(cx);
         }
     }
@@ -221,6 +242,7 @@ impl AgentPane {
                 match result {
                     Ok(status) => {
                         cx.set_global(super::mention::ModelProviders::of(&status));
+                        cx.set_global(LastMedia(status.clone()));
                         (m.status, m.error) = (Some(status), None);
                     }
                     Err(error) => m.error = Some(short(&error)),
