@@ -973,9 +973,14 @@ impl Workspace {
         let (glyph, rtt, tip) = match self.link.as_ref()? {
             Link::Down => (Some("spinner"), None, "Reconnecting\u{2026}".to_owned()),
             Link::Local(rtt) => (Some("plug"), Some(*rtt), format!("This Mac \u{00b7} local socket\nRound trip {:.1} ms", rtt.as_secs_f64() * 1e3)),
-            Link::Remote(path) => {
+            Link::Remote(path, advice) => {
                 let (glyph, how) = if path.relay { ("waypoints", "Relay") } else { ("arrow-left-right", "Direct") };
-                (Some(glyph), Some(path.rtt), format!("{how} \u{00b7} {}\nRound trip {} ms", path.addr, ms(&path.rtt)))
+                let mut tip = format!("{how} \u{00b7} {}\nRound trip {} ms", path.addr, ms(&path.rtt));
+                if let Some(advice) = advice {
+                    tip.push_str("\n\nNot a direct connection. ");
+                    tip.push_str(advice);
+                }
+                (Some(glyph), Some(path.rtt), tip)
             }
         };
         let color = match rtt.map(|r| r.as_millis()) {

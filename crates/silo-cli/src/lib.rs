@@ -265,6 +265,37 @@ pub async fn connect_remote(home: &Path, host: &str, options: &NetOptions, clien
     }
 }
 
+/// How a connection to a remote host goes, once it had
+/// [`silo_client::direct::SETTLE`] to leave the relay.
+#[derive(Debug)]
+pub struct PathCheck {
+    /// The report, one line, then on a relay the advice.
+    pub text: String,
+    /// Still on a relay.
+    pub relayed: bool,
+}
+
+/// See [`PathCheck`]; `name` is the host's name here.
+pub async fn check_path(control: &Control, name: &str) -> PathCheck {
+    let silo_client::transport::Conn::Iroh(conn) = control.conn() else {
+        return PathCheck { text: format!("{name}: this machine (local socket)"), relayed: false };
+    };
+    match silo_client::direct::settle(conn, silo_client::direct::SETTLE).await {
+        Some(path) if path.relay => {
+            let info = server_info(control).await.unwrap_or_else(|_| control.hello().server.clone());
+            let text = format!(
+                "{name}: relay {}, rtt {} ms\n  {}",
+                path.addr,
+                path.rtt.as_millis(),
+                silo_client::direct::relay_hint(name, &path, &silo_client::direct::relay_advice(&info))
+            );
+            PathCheck { text, relayed: true }
+        }
+        Some(path) => PathCheck { text: format!("{name}: direct {}, rtt {} ms", path.addr, path.rtt.as_millis()), relayed: false },
+        None => PathCheck { text: format!("{name}: no path (reconnecting)"), relayed: true },
+    }
+}
+
 /// Redeem `ticket` and store the host (see [`hosts::Hosts::pair`]): named
 /// `name` when the user chose one, else as before, else by the server's
 /// hostname. `server_of` (a login server's ticket only) asks for that

@@ -324,6 +324,7 @@ mod tests {
             hostname: String::new(),
             remote_error: None,
             endpoint_addr: None,
+            udp_port: None,
             idle_exit_secs: 0,
             started_at: 0,
         });

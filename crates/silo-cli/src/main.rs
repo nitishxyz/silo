@@ -107,8 +107,9 @@ enum Command {
         /// Do not advertise or discover on the LAN via mDNS.
         #[arg(long)]
         no_mdns: bool,
-        /// Fixed UDP port for remote access (default: random), so paired
-        /// devices can reach the server across restarts without relays or mDNS.
+        /// Fixed UDP port for remote access (default: one picked at the first
+        /// start and kept in `<SILO_HOME>/state/udp-port`). Behind a firewall,
+        /// let this port in (UDP) for direct connections instead of a relay.
         #[arg(long)]
         port: Option<u16>,
     },
@@ -555,6 +556,14 @@ enum HostsCommand {
     },
     /// List remembered hosts.
     Ls,
+    /// Connect to hosts (all, or one by name or id prefix) and show whether
+    /// each connection is direct or through a relay, its round trip, and
+    /// what to open in a firewall when it stays on the relay. Exits 1 when
+    /// one does.
+    Check {
+        #[arg(value_name = "HOST")]
+        name: Option<String>,
+    },
     /// Forget a host (by name or id prefix).
     Rm {
         #[arg(value_name = "HOST")]
@@ -934,6 +943,8 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                 relay,
                 mdns: !no_mdns,
                 port,
+                // A firewall rule for the port stays valid across restarts.
+                remember_port: true,
                 system_clipboard: silo_server::sysclip::native(),
                 require_approval: true,
                 agent_closed: Some(std::sync::Arc::new(hand_back)),
@@ -1331,6 +1342,7 @@ async fn run(command: Command, host: Option<String>, status: Option<std::fs::Fil
                         println!("{}  {}", h.name, h.id);
                     }
                 }
+                HostsCommand::Check { name } => return check_hosts(&home, name.as_deref()).await,
                 HostsCommand::Rm { name } => {
                     let removed = Hosts::update(&home, |hosts| hosts.remove(&name))?;
                     println!("removed {} ({})", removed.name, removed.id);
@@ -1653,7 +1665,40 @@ async fn remote_install(target: &str, source: &silo_cli::upgrade::Source) -> any
     // A reinstall keeps the server's key: the host keeps the name given here.
     let host = silo_cli::add_host(&paths::home(), &offer.ticket, None, None, &NetOptions::default(), &device_name()).await?;
     println!("Added {}.", host.name);
+    // A firewall in front of the host (a cloud's, most often) keeps every
+    // connection on a relay: say so now, with the port to open.
+    eprintln!("silo: checking the connection to {}…", host.name);
+    match silo_cli::connect_remote(&paths::home(), &host.id, &NetOptions::default(), &device_name()).await {
+        Ok(remote) => {
+            println!("{}", silo_cli::check_path(&remote.control, &host.name).await.text);
+            let _ = remote.net.close().await;
+        }
+        Err(error) => eprintln!("silo: could not check the connection: {error:#}"),
+    }
     Ok(0)
+}
+
+/// `silo hosts check`: each host's path, 1 when one stays on a relay or
+/// cannot be reached.
+async fn check_hosts(home: &std::path::Path, name: Option<&str>) -> anyhow::Result<i32> {
+    let hosts = Hosts::load(home)?.select(name)?;
+    let mut bad = false;
+    for host in &hosts {
+        match silo_cli::connect_remote(home, &host.id, &NetOptions::default(), &device_name()).await {
+            Ok(remote) => {
+                let check = silo_cli::check_path(&remote.control, &host.name).await;
+                println!("{}", check.text);
+                bad |= check.relayed;
+                let _ = remote.net.close().await;
+            }
+            Err(error) if hosts.len() == 1 => return Err(error),
+            Err(error) => {
+                println!("{}: {error:#}", host.name);
+                bad = true;
+            }
+        }
+    }
+    Ok(i32::from(bad))
 }
 
 async fn down(yes: bool) -> anyhow::Result<i32> {
@@ -1731,6 +1776,16 @@ async fn show_status() -> anyhow::Result<i32> {
             println!("pid:            {}", hello.server.pid);
             println!("build:          {}", hello.build);
             println!("endpoint id:    {}", hello.server.endpoint_id);
+            let info = silo_cli::server_info(&control).await.unwrap_or_else(|_| hello.server.clone());
+            match (&info.remote_error, info.udp_port) {
+                (Some(error), _) => println!("remote access:  off ({error})"),
+                (None, Some(port)) => {
+                    let public = silo_client::direct::public_addrs(&info);
+                    let at = if public.is_empty() { String::new() } else { format!(" at {}", public.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")) };
+                    println!("remote access:  UDP port {port}{at} (a firewall in front of this machine must let it in for direct connections)");
+                }
+                (None, None) => println!("remote access:  a random UDP port (changes at each start)"),
+            }
             println!("managed by:     {managed}");
             println!("sessions:       {sessions}");
             println!("paired devices: {devices}");

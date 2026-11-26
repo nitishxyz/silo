@@ -649,6 +649,12 @@ impl Workspace {
                 }
             }
             ConnEvent::Quit | ConnEvent::Addr(_) => {}
+            ConnEvent::Relayed(path, advice) if active => {
+                let name = self.hosts.get(host).map_or("This host", |h| h.info.name.as_str());
+                let hint = silo_client::direct::relay_hint(name, path, advice);
+                self.flash_for(Status::warning(hint), RELAY_NOTICE, cx);
+            }
+            ConnEvent::Relayed(..) => {}
             ConnEvent::NotPaired | ConnEvent::Incompatible | ConnEvent::IncompatibleServer(_) => {
                 self.refresh_settings(None, cx);
                 if active {
@@ -1673,7 +1679,13 @@ impl Workspace {
         let reading = match control {
             None => Link::Down,
             Some(control) => match control.conn() {
-                silo_client::transport::Conn::Iroh(conn) => conn.path().map_or(Link::Down, Link::Remote),
+                silo_client::transport::Conn::Iroh(conn) => match conn.path() {
+                    Some(path) => {
+                        let advice = path.relay.then(|| silo_client::direct::relay_advice(&control.hello().server));
+                        Link::Remote(path, advice)
+                    }
+                    None => Link::Down,
+                },
                 silo_client::transport::Conn::Unix(_) => {
                     let started = Instant::now();
                     match rt.spawn(async move { control.call_value(Method::Ping {}).await }).await {
@@ -2172,13 +2184,18 @@ pub(crate) type AfterCreated = Box<dyn FnOnce(&mut Workspace, &mut Window, &mut 
 /// How often the shown connection info is read.
 const LINK_TICK: Duration = Duration::from_secs(1);
 
+/// How long the warning that a host stays on a relay is shown: long
+/// enough to read the port to open.
+const RELAY_NOTICE: Duration = Duration::from_secs(15);
+
 /// The active host's connection, as the session pill shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Link {
     /// This Mac: the round trip of a `ping`.
     Local(Duration),
-    /// A remote host's selected path.
-    Remote(silo_client::transport::PathInfo),
+    /// A remote host's selected path; on a relay, what would make it
+    /// direct ([`silo_client::direct::relay_advice`]).
+    Remote(silo_client::transport::PathInfo, Option<String>),
     /// Not connected (reconnecting).
     Down,
 }

@@ -172,6 +172,13 @@ pub struct ServerInfo {
     /// remote access.
     #[serde(default)]
     pub endpoint_addr: Option<Value>,
+    /// The UDP port remote access listens on when it stays the same across
+    /// restarts (`--port`, or the one `silo server` remembers): the port a
+    /// firewall in front of this host must let in for direct connections.
+    /// `None` for a random port, without remote access, and from older
+    /// servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_port: Option<u16>,
     /// Seconds without clients after which the server exits; 0 = never.
     pub idle_exit_secs: u64,
 }
@@ -1840,6 +1847,7 @@ mod tests {
             hostname: String::new(),
             remote_error: None,
             endpoint_addr: None,
+            udp_port: None,
             idle_exit_secs: 0,
         };
         let mut json = serde_json::to_value(ServerHello::ours(1, info)).unwrap();

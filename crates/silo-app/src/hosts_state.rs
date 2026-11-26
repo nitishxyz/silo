@@ -396,6 +396,8 @@ impl HostsState {
                 self.host_down(host);
             }
             ConnEvent::Quit => cx.quit(),
+            // Shown by the windows (`Workspace::host_event`).
+            ConnEvent::Relayed(..) => {}
             ConnEvent::Resync => self.refresh_sessions(host, cx),
             ConnEvent::Addr(addr) => self.save_addr(host, addr),
             ConnEvent::NotPaired => {

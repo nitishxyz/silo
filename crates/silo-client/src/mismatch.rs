@@ -355,6 +355,7 @@ mod tests {
                     hostname: String::new(),
                     remote_error: None,
                     endpoint_addr: None,
+                    udp_port: None,
                     idle_exit_secs: 0,
                 };
                 let ours = build == silo_proto::BUILD;

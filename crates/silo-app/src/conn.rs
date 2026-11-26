@@ -41,6 +41,11 @@ pub enum ConnEvent {
     Incompatible,
     /// "Quit Silo" stopped the server on purpose: quit, don't reconnect.
     Quit,
+    /// The remote connection is still on a relay after
+    /// [`silo_client::direct::SETTLE`]: its path, and what to open in the
+    /// host's firewall ([`silo_client::direct::relay_advice`]). Sent once
+    /// per host per run.
+    Relayed(silo_client::transport::PathInfo, String),
 }
 
 /// How often to look again while an incompatible server holds the host.
@@ -472,6 +477,8 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
     let mut other_channel = false;
     let mut incompatible: Option<IncompatibleServer> = None;
     let mut ensured = Ensure::now();
+    // A relayed connection is reported once: reconnects keep the cause.
+    let mut relay_reported = !remote;
     loop {
         if paused.load(Ordering::Acquire) {
             if tx.is_closed() {
@@ -538,6 +545,10 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                 let mut info = tokio::time::interval(ADDR_REFRESH);
                 let heartbeat = control.clone().heartbeat();
                 tokio::pin!(heartbeat);
+                // Hole punching gets its time before the path counts.
+                let relay_check = tokio::time::sleep(silo_client::direct::SETTLE);
+                tokio::pin!(relay_check);
+                let mut relay_checked = relay_reported;
                 let mut stale = control.stale();
                 let mut hung = false;
                 loop {
@@ -565,6 +576,19 @@ async fn run(mut transport: Transport, tx: mpsc::UnboundedSender<ConnEvent>, pau
                             tracing::warn!(pid, "server not responding");
                             hung = true;
                             break;
+                        }
+                        () = &mut relay_check, if !relay_checked => {
+                            relay_checked = true;
+                            if let silo_client::transport::Conn::Iroh(conn) = control.conn()
+                                && let Some(path) = conn.path().filter(|p| p.relay)
+                            {
+                                let advice = silo_client::direct::relay_advice(&control.hello().server);
+                                tracing::warn!(path = conn.path_summary().as_deref().unwrap_or("none"), "still on a relay: {advice}");
+                                relay_reported = true;
+                                if tx.send(ConnEvent::Relayed(path, advice)).is_err() {
+                                    return;
+                                }
+                            }
                         }
                         _ = info.tick(), if remote => {
                             if let Some(addr) = server_addr(&control).await

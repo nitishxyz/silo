@@ -610,6 +610,7 @@ async fn fixed_port_survives_takeover_and_bind_failure_is_reported() {
     let live: EndpointAddr = serde_json::from_value(info.endpoint_addr.expect("endpoint_addr")).unwrap();
     assert_eq!(live.id, addr.id);
     assert!(live.ip_addrs().all(|a| a.port() == port) && live.ip_addrs().next().is_some(), "{live:?}");
+    assert_eq!(info.udp_port, Some(port), "a fixed port is the one to let in");
     drop(control);
 
     // The successor rebinds the same port once the old endpoint closed.
@@ -638,6 +639,62 @@ async fn fixed_port_survives_takeover_and_bind_failure_is_reported() {
     net.close().await.unwrap();
     control.call_value(Method::ServerShutdown { force: false }).await.unwrap();
     timeout(T, third).await.unwrap().unwrap().unwrap();
+}
+
+async fn info_of(home: &Path) -> silo_proto::control::ServerInfo {
+    let control = owner(home).await;
+    control.call(Method::ServerInfo {}).await.unwrap()
+}
+
+async fn wait_running(home: &Path) {
+    for _ in 0..500 {
+        if silo_client::server_running(home).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("server did not start");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remembered_port_is_kept_across_restarts_and_moves_when_taken() {
+    let home = temp_home("remember");
+    let config = || silo_server::Config { remember_port: true, port: None, ..port_config(&home, 0) };
+    let file = silo_proto::paths::udp_port(&home);
+
+    // The first start picks a port, remembers it and reports it.
+    let first = tokio::spawn(silo_server::run(config()));
+    wait_running(&home).await;
+    let port = info_of(&home).await.udp_port.expect("udp_port");
+    assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), port.to_string());
+
+    // A successor (takeover) binds the same port once the old one let go.
+    let second = tokio::spawn(silo_server::takeover(config(), false));
+    timeout(T, first).await.unwrap().unwrap().unwrap();
+    let info = info_of(&home).await;
+    assert_eq!(info.udp_port, Some(port));
+    let live: EndpointAddr = serde_json::from_value(info.endpoint_addr.expect("endpoint_addr")).unwrap();
+    assert!(live.ip_addrs().all(|a| a.port() == port), "{live:?}");
+    owner(&home).await.call_value(Method::ServerShutdown { force: false }).await.unwrap();
+    timeout(T, second).await.unwrap().unwrap().unwrap();
+
+    // Taken by something else: a new port, remembered instead.
+    let busy = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+    let third = tokio::spawn(silo_server::run(config()));
+    wait_running(&home).await;
+    let moved = info_of(&home).await.udp_port.expect("udp_port");
+    assert_ne!(moved, port);
+    assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), moved.to_string());
+    drop(busy);
+    owner(&home).await.call_value(Method::ServerShutdown { force: false }).await.unwrap();
+    timeout(T, third).await.unwrap().unwrap().unwrap();
+
+    // Without remembering (embedders, tests): random and not reported.
+    let fourth = tokio::spawn(silo_server::run(silo_server::Config { remember_port: false, ..config() }));
+    wait_running(&home).await;
+    assert_eq!(info_of(&home).await.udp_port, None);
+    owner(&home).await.call_value(Method::ServerShutdown { force: false }).await.unwrap();
+    timeout(T, fourth).await.unwrap().unwrap().unwrap();
 }
 
 /// A valid pairing ticket of some other machine.

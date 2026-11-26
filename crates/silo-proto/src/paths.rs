@@ -123,6 +123,13 @@ pub fn iroh_identity(home: &std::path::Path) -> PathBuf {
     home.join("state").join("iroh")
 }
 
+/// The UDP port the remote endpoint keeps across restarts (decimal text),
+/// so a firewall rule for it stays valid (`silo server` remembers it).
+#[must_use]
+pub fn udp_port(home: &std::path::Path) -> PathBuf {
+    home.join("state").join("udp-port")
+}
+
 #[must_use]
 pub fn log(home: &std::path::Path) -> PathBuf {
     home.join("server.log")

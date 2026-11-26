@@ -5,6 +5,7 @@ pub mod cache;
 pub mod callback;
 mod control;
 mod data;
+pub mod direct;
 mod download;
 pub mod hosts;
 pub mod launch_services;

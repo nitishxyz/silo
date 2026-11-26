@@ -69,8 +69,15 @@ pub struct Config {
     pub mdns: bool,
     /// Keep each remote connection on the path it was established on.
     pub pin_initial_path: bool,
-    /// Fixed UDP port for the remote endpoint; `None` picks a random one.
+    /// Fixed UDP port for the remote endpoint; `None` picks a random one
+    /// (or the remembered one, see [`Self::remember_port`]). A fixed port
+    /// that cannot be bound leaves remote access off.
     pub port: Option<u16>,
+    /// Without [`Self::port`], keep the port the endpoint got the first time
+    /// (`<home>/state/udp-port`) across restarts, so a firewall rule for it
+    /// stays valid; a random one when that port is taken. On in `silo
+    /// server`; off by default for tests and embedders.
+    pub remember_port: bool,
     /// The host's system clipboard remote pastes are pushed into and, where
     /// it can be watched, copied back from; `None` (the default) for none.
     pub system_clipboard: Option<Arc<dyn sysclip::SystemClipboard>>,
@@ -130,6 +137,7 @@ impl Default for Config {
             mdns: true,
             pin_initial_path: false,
             port: None,
+            remember_port: false,
             system_clipboard: None,
             require_approval: false,
             grant_sweep: GRANT_SWEEP,
@@ -149,8 +157,8 @@ impl Default for Config {
 pub const GRANT_SWEEP: Duration = Duration::from_secs(60);
 
 impl Config {
-    fn net_options(&self) -> NetOptions {
-        NetOptions { relay: self.relay.clone(), mdns: self.mdns, pin_initial_path: self.pin_initial_path, port: self.port }
+    fn net_options(&self, port: Option<u16>) -> NetOptions {
+        NetOptions { relay: self.relay.clone(), mdns: self.mdns, pin_initial_path: self.pin_initial_path, port }
     }
 }
 
@@ -437,8 +445,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     tracing::info!(sessions = restored.sessions.len(), blocks = restored.blocks.len(), "state restored");
     let identity = Identity::load_or_create(paths::iroh_identity(&config.home)).context("load iroh identity")?;
     let auth = auth::Auth::open(&config.home)?;
-    let net = Net::bind_with(&identity, config.net_options()).await?;
-    let remote = Remote { identity, auth, net: Ok(net) };
+    let (net, udp_port) = bind_remote(&identity, &config, false).await;
+    let net = net.map_err(anyhow::Error::msg)?;
+    let remote = Remote { identity, auth, net: Ok(net), udp_port };
     let start = Start { lock, listener, notes_tx, notes_rx, persist, sessions: restored.sessions, blocks: restored.blocks, remote };
     serve(config, start).await
 }
@@ -467,8 +476,8 @@ pub async fn takeover(config: Config, fail_before_ready: bool) -> anyhow::Result
     });
     // The old server closed its endpoint before COMMIT. Not fatal: the
     // programs we now hold must not end here.
-    let net = rebind(&identity, &config).await;
-    let remote = Remote { identity, auth, net };
+    let (net, udp_port) = bind_remote(&identity, &config, true).await;
+    let remote = Remote { identity, auth, net, udp_port };
     let start = Start { lock: ServerLock::adopt(lock), listener, notes_tx, notes_rx, persist, sessions, blocks, remote };
     serve(config, start).await
 }
@@ -477,16 +486,49 @@ pub async fn takeover(config: Config, fail_before_ready: bool) -> anyhow::Result
 /// may take to close the endpoint ([`close_net`]).
 const REBIND_WAIT: Duration = Duration::from_secs(3);
 
-/// The successor's endpoint. A fixed port may still be held by the old
-/// endpoint for a moment after it closed (its socket outlives `close` on a
-/// loaded machine), so that bind is retried for [`REBIND_WAIT`]; a random
-/// port cannot collide and fails at once.
-async fn rebind(identity: &Identity, config: &Config) -> Result<Net, String> {
+/// The remote endpoint and the port it keeps across restarts (see
+/// [`ServerInfo::udp_port`]): `config.port`, else with
+/// [`Config::remember_port`] the remembered one (a random one, then
+/// remembered, when there is none or it is taken), else a random port.
+async fn bind_remote(identity: &Identity, config: &Config, successor: bool) -> (Result<Net, String>, Option<u16>) {
+    if let Some(port) = config.port {
+        let net = bind_port(identity, config, Some(port), successor).await;
+        let stable = net.is_ok().then_some(port);
+        return (net, stable);
+    }
+    if !config.remember_port {
+        return (bind_port(identity, config, None, false).await, None);
+    }
+    let file = paths::udp_port(&config.home);
+    let remembered = std::fs::read_to_string(&file).ok().and_then(|s| s.trim().parse::<u16>().ok()).filter(|&p| p != 0);
+    if let Some(port) = remembered {
+        match bind_port(identity, config, Some(port), successor).await {
+            Ok(net) => return (Ok(net), Some(port)),
+            Err(error) => tracing::warn!(port, "remembered UDP port unavailable ({error}); remote access moves to a new port"),
+        }
+    }
+    let net = bind_port(identity, config, None, false).await;
+    let port = net.as_ref().ok().and_then(|net| net.bound_sockets().into_iter().find(std::net::SocketAddr::is_ipv4)).map(|a| a.port());
+    if let Some(port) = port.filter(|&p| p != 0) {
+        if let Err(error) = std::fs::write(&file, format!("{port}\n")) {
+            tracing::warn!("remember UDP port in {}: {error}", file.display());
+        }
+        return (net, Some(port));
+    }
+    (net, None)
+}
+
+/// Bind the endpoint on `port` (random for `None`). A successor's fixed
+/// port may still be held by the old endpoint for a moment after it closed
+/// (its socket outlives `close` on a loaded machine), so that bind is
+/// retried for [`REBIND_WAIT`]; a random port cannot collide and fails at
+/// once.
+async fn bind_port(identity: &Identity, config: &Config, port: Option<u16>, successor: bool) -> Result<Net, String> {
     let deadline = tokio::time::Instant::now() + REBIND_WAIT;
     loop {
-        match Net::bind_with(identity, config.net_options()).await {
+        match Net::bind_with(identity, config.net_options(port)).await {
             Ok(net) => return Ok(net),
-            Err(error) if config.port.is_some() && tokio::time::Instant::now() < deadline => {
+            Err(error) if successor && port.is_some() && tokio::time::Instant::now() < deadline => {
                 tracing::debug!("rebind remote endpoint: {error:#}; retrying");
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -500,6 +542,8 @@ struct Remote {
     auth: auth::Auth,
     /// The endpoint, or why remote access is unavailable.
     net: Result<Net, String>,
+    /// See [`ServerInfo::udp_port`].
+    udp_port: Option<u16>,
 }
 
 struct Start {
@@ -515,7 +559,7 @@ struct Start {
 
 async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
     let Start { mut lock, listener, notes_tx, mut notes_rx, persist, sessions, blocks, remote } = start;
-    let Remote { identity, auth, net } = remote;
+    let Remote { identity, auth, net, udp_port } = remote;
     let (net, incoming, remote_error) = match net.and_then(|mut net| net.serve(16).map(|incoming| (net, incoming)).map_err(|e| format!("{e:#}"))) {
         Ok((net, incoming)) => (Some(net), Some(incoming), None),
         Err(error) => {
@@ -523,6 +567,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
             (None, None, Some(error))
         }
     };
+    let udp_port = udp_port.filter(|_| remote_error.is_none());
     let home = config.home;
     let socket = paths::socket(&home);
     let started_at = block::now_ms();
@@ -535,6 +580,7 @@ async fn serve(config: Config, start: Start) -> anyhow::Result<()> {
         hostname: hostname(),
         remote_error,
         endpoint_addr: None,
+        udp_port,
         idle_exit_secs: config.idle_exit.map_or(0, |d| d.as_secs().max(1)),
     };
     let runtime = paths::Runtime {
