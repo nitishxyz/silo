@@ -295,6 +295,9 @@ fn main() {
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
         cx.on_app_quit(|_| {
             web::shutdown();
+            // Before `exit()`: whisper.cpp aborts the process when its GPU
+            // device is torn down under a loaded model.
+            silo_voice::session::unload(std::time::Duration::from_secs(3));
             async {}
         })
         .detach();

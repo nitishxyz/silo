@@ -93,6 +93,16 @@ impl Session {
         Self { shared, control }
     }
 
+    /// Transcribe a recorded clip (16 kHz mono) on the engine thread, as a
+    /// stopped recording would be.
+    #[must_use]
+    pub fn transcribe(config: Config, pcm: Vec<f32>) -> Self {
+        let shared = Arc::new(Mutex::new(Snapshot { phase: Phase::Transcribing, levels: [0.0; BANDS], partial: String::new(), seconds: 0.0 }));
+        let control = Arc::new(AtomicU8::new(STOP));
+        submit(Job { work: Work::Finish(pcm), config, shared: shared.clone(), control: control.clone() });
+        Self { shared, control }
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         self.shared.lock().map(|s| s.clone()).unwrap_or_else(|e| e.into_inner().clone())
@@ -190,18 +200,33 @@ struct Job {
     control: Arc<AtomicU8>,
 }
 
-/// Queue `job` on the engine thread, started on first use; it keeps the
-/// loaded engines for the app's life.
+/// What the engine thread is asked to do.
+enum Msg {
+    Job(Job),
+    /// Free every loaded engine, then answer.
+    Unload(mpsc::Sender<()>),
+}
+
+/// The engine thread's queue, started on first use; it keeps the loaded
+/// engines until [`unload`].
+static TX: OnceLock<Option<Mutex<mpsc::Sender<Msg>>>> = OnceLock::new();
+
+/// Queue `job` on the engine thread.
 fn submit(job: Job) {
-    static TX: OnceLock<Option<Mutex<mpsc::Sender<Job>>>> = OnceLock::new();
     let tx = TX.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<Job>();
+        let (tx, rx) = mpsc::channel::<Msg>();
         std::thread::Builder::new()
             .name("silo-voice-engine".into())
             .spawn(move || {
                 let mut engines: HashMap<EngineKind, Box<dyn Engine>> = HashMap::new();
-                while let Ok(job) = rx.recv() {
-                    run(job, &mut engines);
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        Msg::Job(job) => run(job, &mut engines),
+                        Msg::Unload(done) => {
+                            engines.clear();
+                            let _ = done.send(());
+                        }
+                    }
                 }
             })
             .map_err(|e| tracing::warn!(%e, "voice: no engine thread"))
@@ -209,8 +234,26 @@ fn submit(job: Job) {
             .map(|_| Mutex::new(tx))
     });
     match tx.as_ref().and_then(|tx| tx.lock().ok()) {
-        Some(tx) => drop(tx.send(job)),
+        Some(tx) => drop(tx.send(Msg::Job(job))),
         None => set(&job.shared, |s| s.phase = Phase::Failed("Couldn't start transcribing".into())),
+    }
+}
+
+/// Free the loaded models before the app exits, waiting at most `wait`
+/// for a transcription in progress. whisper.cpp's GPU (Metal) device is a
+/// C++ static torn down by `exit()`, and it aborts the process when a
+/// loaded model still holds its buffers. A later dictation loads them
+/// again.
+pub fn unload(wait: Duration) {
+    let Some(tx) = TX.get().and_then(Option::as_ref).and_then(|tx| tx.lock().ok()) else {
+        return;
+    };
+    let (done, freed) = mpsc::channel();
+    if tx.send(Msg::Unload(done)).is_ok() {
+        drop(tx);
+        if freed.recv_timeout(wait).is_err() {
+            tracing::warn!("voice: the engine did not unload in time");
+        }
     }
 }
 
