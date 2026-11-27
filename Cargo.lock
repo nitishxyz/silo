@@ -8459,6 +8459,7 @@ name = "silo-tools"
 version = "0.1.36"
 dependencies = [
  "anyhow",
+ "data-encoding",
  "regex",
  "schemars",
  "serde",

@@ -32,6 +32,9 @@ pub const NO_FETCH_APP: &str = "No Silo app is running on this Mac to load pages
 /// How long a forwarded `browser.fetch` may take, queue included.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long a forwarded `browser.upload` may take.
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
 struct Pending {
     /// The app the request went to: only it may reply.
     client: ClientId,
@@ -148,6 +151,9 @@ pub async fn handle(server: &Server, client_id: u64, method: Method) -> Result<V
     let browser = name.starts_with("browser.") && !fetch;
     let timeout = if fetch {
         FETCH_TIMEOUT
+    } else if matches!(method, Method::BrowserUpload(_)) {
+        // Megabytes to a remote app, then a chooser to wait for.
+        UPLOAD_TIMEOUT
     } else if browser {
         params.get("timeout_ms").and_then(Value::as_u64).map_or(APP_TIMEOUT, |ms| Duration::from_millis(ms.saturating_add(5000).min(120_000)))
     } else {

@@ -43,6 +43,10 @@ pub enum Event {
     Find(crate::FindResult),
     /// A file chooser wants paths: answer with `Browser::file_dialog_done`.
     FileDialog(crate::FileDialog),
+    /// The page waits on a JavaScript dialog: answer with `Browser::answer_js_dialog`.
+    JsDialog(crate::JsDialog),
+    /// Dialog `id` was answered (by the app or an agent) or went.
+    JsDialogClosed(u32),
     /// The page asks for a permission: answer with `Browser::answer_permission`.
     PermissionAsked(crate::PermissionRequest),
     /// A request no longer waits (its document went, CEF dismissed it).
@@ -171,6 +175,10 @@ pub(crate) struct Shared {
     /// Open file choosers, by id.
     pub(crate) file_dialogs: Mutex<std::collections::HashMap<u32, cef::FileDialogCallback>>,
     pub(crate) next_dialog: AtomicU32,
+    /// The JavaScript dialog the page waits on, by id.
+    pub(crate) js_dialog: Mutex<Option<(u32, cef::JsdialogCallback)>>,
+    /// Files for the next file chooser the page opens (`Browser::arm_upload`).
+    pub(crate) upload: Mutex<Option<Vec<std::path::PathBuf>>>,
     /// The profile's remembered permission decisions (set at creation).
     pub(crate) sites: Mutex<Option<Arc<crate::permission::SiteStore>>>,
     /// Permission requests waiting for the user.
@@ -250,6 +258,8 @@ impl Shared {
             wheel_relatch: AtomicBool::new(false),
             file_dialogs: Mutex::default(),
             next_dialog: AtomicU32::new(1),
+            js_dialog: Mutex::new(None),
+            upload: Mutex::new(None),
             sites: Mutex::new(None),
             permissions: Mutex::new(Vec::new()),
             next_permission: AtomicU64::new(1),

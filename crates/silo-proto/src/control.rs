@@ -250,6 +250,8 @@ pub enum Method {
     BrowserWaitFor(BrowserWaitForParams),
     #[serde(rename = "browser.dialog")]
     BrowserDialog(BrowserDialogParams),
+    #[serde(rename = "browser.upload")]
+    BrowserUpload(BrowserUploadParams),
     #[serde(rename = "browser.eval")]
     BrowserEval(BrowserEvalParams),
     #[serde(rename = "browser.console")]
@@ -1090,6 +1092,7 @@ pub const METHODS: &[(&str, &str)] = &[
     ("browser.scroll", "Scroll the page or an element into view."),
     ("browser.wait_for", "Wait for text to appear or disappear."),
     ("browser.dialog", "Accept or dismiss a page dialog."),
+    ("browser.upload", "Give files to a file input, or to the file chooser an element opens."),
     ("browser.eval", "Evaluate a JavaScript function with optional element refs."),
     ("browser.console", "Read captured console messages."),
     ("browser.network", "Read captured network requests."),

@@ -180,7 +180,8 @@ fn result_schema(method: &Method) -> Schema {
         | M::BrowserType(_)
         | M::BrowserPress(_)
         | M::BrowserScroll(_)
-        | M::BrowserDialog(_) => schema_for!(BrowserAction),
+        | M::BrowserDialog(_)
+        | M::BrowserUpload(_) => schema_for!(BrowserAction),
         M::ServerInfo {} => schema_for!(ServerInfo),
         M::ApiList {} => schema_for!(Vec<ApiMethod>),
         M::ApiDescribe { .. } => schema_for!(MethodDescription),
@@ -319,6 +320,12 @@ pub fn examples() -> Vec<Method> {
         M::BrowserScroll(BrowserScrollParams { block_id: b(), target: None, dx: None, dy: Some(500.0), include_snapshot: false }),
         M::BrowserWaitFor(BrowserWaitForParams { block_id: b(), text: Some(vec!["Ready".into()]), gone: None, timeout_ms: Some(1000) }),
         M::BrowserDialog(BrowserDialogParams { block_id: b(), accept: true, prompt_text: None, include_snapshot: false }),
+        M::BrowserUpload(BrowserUploadParams {
+            block_id: b(),
+            target: "e7".into(),
+            files: vec![BrowserUploadFile { name: "photo.png".into(), data_base64: "iVBORw0KGgo=".into() }],
+            include_snapshot: false,
+        }),
         M::BrowserEval(BrowserEvalParams { block_id: b(), function: "() => document.title".into(), args: None }),
         M::BrowserConsole(BrowserConsoleParams { block_id: b(), since: None, level: None, limit: Some(100) }),
         M::BrowserNetwork(BrowserNetworkParams { block_id: b(), since: None, limit: Some(100), failed_only: None }),

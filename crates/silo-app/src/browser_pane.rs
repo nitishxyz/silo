@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 mod downloads;
 mod file_chooser;
 mod find;
+mod js_dialog;
 mod look_up;
 mod menu;
 mod permissions;
@@ -381,6 +382,10 @@ pub struct BrowserPane {
     find: Option<find::FindBar>,
     /// Permission requests waiting for the user, oldest first.
     permissions: Vec<silo_web::PermissionRequest>,
+    /// The JavaScript dialog the page waits on.
+    js_dialog: Option<js_dialog::DialogCard>,
+    /// A prompt's card went: the page takes focus back if nothing has it.
+    refocus_page: bool,
     _subs: Vec<gpui::Subscription>,
     /// Focus subscriptions of the window showing the pane.
     window_subs: Vec<gpui::Subscription>,
@@ -476,6 +481,8 @@ impl BrowserPane {
             downloads: Vec::new(),
             find: None,
             permissions: Vec::new(),
+            js_dialog: None,
+            refocus_page: false,
             _subs: subs,
             window_subs: Vec::new(),
         }
@@ -1023,6 +1030,8 @@ impl BrowserPane {
                     cx.notify();
                 }
                 silo_web::Event::FileDialog(dialog) => dialogs.push(dialog),
+                silo_web::Event::JsDialog(dialog) => self.js_dialog_opened(dialog, cx),
+                silo_web::Event::JsDialogClosed(id) => self.js_dialog_closed(id, cx),
                 silo_web::Event::PermissionAsked(request) => self.permission_asked(request, cx),
                 silo_web::Event::PermissionDismissed(id) => self.permission_dismissed(id, cx),
                 silo_web::Event::ImeBounds { x, y, width, height } => self.ime_rect = Some((x, y, width, height)),
@@ -1040,6 +1049,7 @@ impl BrowserPane {
                     }
                     self.menu = None;
                     self.permissions.clear();
+                    self.js_dialog = None;
                     self.find = None;
                     closed = by_page;
                 }
@@ -2327,6 +2337,7 @@ pub(crate) fn spinner(id: &str, size: f32, color: u32, cx: &gpui::App) -> gpui::
 impl gpui::Render for BrowserPane {
     fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use gpui::{div, prelude::*, rgb};
+        self.js_dialog_focus(window, cx);
         let mut page = div()
             .id(gpui::ElementId::Name(format!("browser-{}", self.block_id).into()))
             .key_context("Browser")
@@ -2339,6 +2350,8 @@ impl gpui::Render for BrowserPane {
                 this.input_frames(cx);
                 if this.menu.is_some() {
                     this.menu_key(&e.keystroke.key, window, cx);
+                    cx.stop_propagation()
+                } else if !e.keystroke.modifiers.modified() && this.js_dialog_key(&e.keystroke.key, cx) {
                     cx.stop_propagation()
                 } else if close_on_escape(&mut this.security_open, &e.keystroke.key) {
                     cx.notify();
@@ -2446,6 +2459,7 @@ impl gpui::Render for BrowserPane {
             .child(page)
             .children(self.find_bar(cx))
             .children(self.permission_card(cx))
+            .children(self.js_dialog_card(cx))
             .children(menu)
     }
 }

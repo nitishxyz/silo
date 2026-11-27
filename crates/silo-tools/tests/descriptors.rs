@@ -1,7 +1,7 @@
 #[test]
 fn descriptors_need_no_connection_or_runtime() {
     let descriptors = silo_tools::descriptors();
-    assert_eq!(descriptors.len(), 34);
+    assert_eq!(descriptors.len(), 35);
     // The Studio tools (docs/STUDIO.md §6.1): deferred, reads marked as reads.
     for (name, read, required) in [
         ("studio_open", false, serde_json::json!([])),
@@ -26,6 +26,10 @@ fn descriptors_need_no_connection_or_runtime() {
     assert!(serde_json::to_string(&edit.input_schema).unwrap().contains("\"tidy\""), "and in the ops' schema");
     assert!(descriptors.iter().any(|tool| tool.name == "terminal_run"));
     assert!(descriptors.iter().any(|tool| tool.name == "browser_snapshot" && tool.deferred));
+    let upload = descriptors.iter().find(|tool| tool.name == "browser_upload").expect("browser_upload");
+    assert!(upload.deferred && !upload.effects.read);
+    assert_eq!(upload.input_schema["required"], serde_json::json!(["target", "paths"]));
+    assert_eq!(upload.input_schema["properties"]["paths"]["items"]["type"], "string");
     let show = descriptors.iter().find(|tool| tool.name == "files_show").expect("files_show");
     assert!(show.deferred && show.effects.read, "loaded on demand; it changes no files");
     assert_eq!(show.input_schema["required"], serde_json::json!(["path"]));

@@ -18,6 +18,7 @@ mod frame;
 mod handlers;
 mod input;
 mod inspector;
+mod jsdialog;
 mod keyboard;
 pub mod layout;
 mod menu;
@@ -35,6 +36,7 @@ pub use download::{DownloadProgress, DownloadRequest, DownloadState, dangerous, 
 pub use find::FindResult;
 pub use frame::{BGRA, Frame};
 pub use input::{Modifiers, MouseButton};
+pub use jsdialog::{JsDialog, JsDialogKind};
 pub use keyboard::KeyInput;
 pub use menu::{ContextMenu, EditState, Media, MediaAction, MediaKind, MediaState, MenuCommand};
 pub use permission::{Answer, Decision, Decisions, Permission, PermissionRequest, origin_key};

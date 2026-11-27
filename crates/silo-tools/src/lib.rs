@@ -5,6 +5,7 @@ mod descriptors;
 pub mod files;
 pub mod provider;
 pub mod studio;
+mod upload;
 
 use std::{
     collections::BTreeMap,
@@ -355,6 +356,16 @@ impl Tools {
                     result.content.push(Part::Image { mime: shot.mime, data_base64: shot.data_base64 });
                 }
                 return Ok(result);
+            }
+            "browser_upload" => {
+                let block_id = self.block(&input, anchor)?;
+                let cwd = input["cwd"].as_str().map(PathBuf::from).or_else(|| self.cx.cwd.clone());
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let files = upload::read(&input, cwd.as_deref(), home.as_deref()).await?;
+                let target = input["target"].as_str().filter(|t| !t.trim().is_empty()).context("target must be a ref or CSS selector")?.to_owned();
+                let include_snapshot = input["include_snapshot"].as_bool().unwrap_or(false);
+                let params = silo_proto::control::BrowserUploadParams { block_id, target, files, include_snapshot };
+                self.control.call_value(Method::BrowserUpload(params)).await?
             }
             name if descriptors::BROWSER.contains(&name) => {
                 input["block_id"] = json!(self.block(&input, anchor)?);

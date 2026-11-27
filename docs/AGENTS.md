@@ -89,6 +89,7 @@ engine) as `app.request {request_id, request: {method, params}, caller}`, and th
 | `browser.scroll` | `target?, dx?: f64, dy?: f64` (target: scroll into view) | `Action` | interact |
 | `browser.wait_for` | `text?: [string], gone?: bool, timeout_ms?` | `{found: bool, url, title}` | view |
 | `browser.dialog` | `accept: bool, prompt_text?` | `Action` | interact |
+| `browser.upload` | `target, files: [{name, data_base64}]` (≤ 10 MiB together) | `Action` | interact |
 | `browser.eval` | `function: string` (JS function source), `args?: [ref]` | `{value: json}` | control |
 | `browser.console` | `since?: u64, level?: string, limit?: u32` | `{messages: [{id, level, text, url?, line?, at}]}` | view |
 | `browser.network` | `since?: u64, limit?: u32, failed_only?: bool` | `{requests: [{id, method, url, status?, type, failed?: string, at}]}` | view |
@@ -160,9 +161,17 @@ network, dialog handling and `evaluate` with element args. We follow that design
   document) by script: synthetic wheel events miss scrollers away from the pointer.
 - Console (`Runtime.consoleAPICalled`, `Runtime.exceptionThrown`, `Log.entryAdded`) and network
   (`Network.requestWillBeSent`/`responseReceived`/`loadingFailed`) kept in ring buffers per pane (500 each).
-- Dialogs: while `Page` is enabled the CEF `JsdialogHandler` holds the dialog's callback (a windowless engine shows
-  none); `Page.javascriptDialogOpening` marks it pending and actions report it. `browser.dialog` answers through the
-  held callback: a page blocked in a dialog answers no CDP, `Page.handleJavaScriptDialog` included.
+- Dialogs: the CEF `JsdialogHandler` holds every dialog's callback (a windowless engine shows none, and CEF's
+  default for one blocks the page for good). A user's page shows it as a card over the page (alert, confirm, prompt,
+  "Leave site?"; ↩ OK, esc Cancel); `Page.javascriptDialogOpening` marks it pending for an agent and actions report
+  it. `browser.dialog` answers through the held callback (the card then goes): a page blocked in a dialog answers no
+  CDP, `Page.handleJavaScriptDialog` included. An agent's page no agent drives accepts alerts and leaving and
+  dismisses confirms and prompts by itself.
+- Uploads: `browser.upload` carries the files' bytes (the caller reads them; the app may be on another machine),
+  which the app writes under `$TMPDIR/silo-uploads/` (kept a day: a page reads a chosen file when it uses it). A
+  `target` that is an `<input type=file>` gets them through `DOM.setFileInputFiles` (hidden inputs too; several
+  only with `multiple`); anything else is clicked with the files armed (`Browser::arm_upload`), and the file
+  chooser that click opens takes them with no panel. No chooser within 3 s is an error naming the input to target.
 - Console entries from silo's own page scripts (`\u{1}silo-…`) are left out.
 - Screenshot: `Page.captureScreenshot`, capped at 4 MiB (jpeg fallback, then scaled).
 - The app accepts `browser.*` requests from **any** host for a block it owns and renders (not only the local one, as
@@ -219,6 +228,7 @@ feeds concurrent waits. Tool names are MCP-safe (`[a-z_]`).
 `browser_open {url, place, visible}` (a browser block; `visible: false` parks it: `block.spawn {kind: browser}`, run by the off-screen host (§4.1) until revealed, gated on feature `parked_browsers`), `browser_navigate {url | back | forward | reload}`, then one tool per
 §3.3 method: `browser_snapshot`, `browser_find`, `browser_click`, `browser_hover`, `browser_fill`,
 `browser_fill_form`, `browser_type`, `browser_press`, `browser_scroll`, `browser_wait_for`, `browser_dialog`,
+`browser_upload` (`paths` on the agent's machine, read by the tool and sent as `files`),
 `browser_eval`, `browser_console`, `browser_network`, `browser_screenshot` (an image result).
 
 `browser_fetch {url, timeout_ms?, screenshot?, selector?}` (`browser.fetch`, §3.3): JSON `{url, title, status?,

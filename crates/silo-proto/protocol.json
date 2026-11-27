@@ -8330,6 +8330,108 @@
         "type": "object"
       }
     },
+    "browser.upload": {
+      "params": {
+        "$defs": {
+          "BrowserUploadFile": {
+            "properties": {
+              "data_base64": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "data_base64"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/$defs/BrowserUploadFile"
+            },
+            "type": "array"
+          },
+          "include_snapshot": {
+            "default": false,
+            "type": "boolean"
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id",
+          "target",
+          "files"
+        ],
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "BrowserDialog": {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "dialog": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BrowserDialog"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "navigating_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "snapshot": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "title"
+        ],
+        "title": "BrowserAction",
+        "type": "object"
+      }
+    },
     "browser.wait_for": {
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

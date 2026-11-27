@@ -60,6 +60,7 @@ struct Fields {
     prompt_text: String,
     function: String,
     args: Vec<String>,
+    paths: Vec<String>,
     since: u64,
     level: String,
     limit: u32,
@@ -215,6 +216,13 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
             "Accept or dismiss the pending dialog; prompt_text answers a prompt.",
             "block_id accept prompt_text include_snapshot",
             "accept",
+            false,
+        ),
+        (
+            "browser_upload",
+            "Upload files through a page's file input. target is the <input type=file> (a ref or CSS selector such as input[type=file]; hidden ones work) or the button, label or drop zone that opens a file chooser when clicked: the chooser gets the files with no panel. paths: files on this machine (absolute, ~/…, or relative to your working directory), at most 10 MiB together; several only where the input takes multiple. The page sees them as chosen by the user (input and change events fire).",
+            "block_id target paths include_snapshot",
+            "target paths",
             false,
         ),
         (

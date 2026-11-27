@@ -118,6 +118,13 @@ enum Request {
         #[serde(flatten)]
         action: Action,
     },
+    #[serde(rename = "browser.upload")]
+    Upload {
+        target: String,
+        files: Vec<UploadFile>,
+        #[serde(flatten)]
+        action: Action,
+    },
     #[serde(rename = "browser.eval")]
     Eval {
         function: String,
@@ -137,6 +144,19 @@ enum Request {
         quality: Option<u32>,
     },
 }
+
+#[derive(Deserialize)]
+struct UploadFile {
+    name: String,
+    data_base64: String,
+}
+
+/// How long a click may take to open the file chooser an upload waits for.
+const CHOOSER_WAIT: Duration = Duration::from_secs(3);
+
+/// Uploads' files older than this are deleted: a page reads a chosen file
+/// when it uses it (a form's submit), so they stay a while.
+const UPLOAD_KEEP: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -384,6 +404,7 @@ impl Executor {
             | Request::Type { action, .. }
             | Request::Press { action, .. }
             | Request::Scroll { action, .. }
+            | Request::Upload { action, .. }
             | Request::Dialog { action, .. } => Some(*action),
             _ => None,
         };
@@ -552,6 +573,47 @@ impl Executor {
         Ok(())
     }
 
+    async fn click(&self, target: &str, double: bool, button: Button) -> Result<()> {
+        let (_, x, y) = self.point(target).await?;
+        let button = button.name();
+        self.cdp("Input.dispatchMouseEvent", json!({"type":"mouseMoved", "x":x, "y":y})).await?;
+        for count in 1..=if double { 2 } else { 1 } {
+            for kind in ["mousePressed", "mouseReleased"] {
+                self.cdp("Input.dispatchMouseEvent", json!({"type":kind, "x":x, "y":y, "button":button, "clickCount":count})).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `files` into `target`: a file input's files are set (hidden ones too);
+    /// anything else is clicked and the chooser it opens gets them.
+    async fn upload(&self, target: &str, files: Vec<UploadFile>) -> Result<()> {
+        let paths = save_uploads(files)?;
+        let object = self.resolve(target).await?;
+        let input = self.function(&object, FILE_INPUT, Vec::new()).await?;
+        if let Some(multiple) = input.as_bool() {
+            if paths.len() > 1 && !multiple {
+                bail!("{target} takes one file (no multiple attribute); give one path");
+            }
+            let files: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            self.cdp("DOM.setFileInputFiles", json!({"files": files, "objectId": object})).await?;
+            return Ok(());
+        }
+        self.page.arm_upload(paths);
+        let clicked = self.click(target, false, Button::Left).await;
+        let deadline = Instant::now() + CHOOSER_WAIT;
+        while clicked.is_ok() && self.page.upload_armed() && Instant::now() < deadline {
+            self.background.timer(Duration::from_millis(50)).await;
+        }
+        if self.page.disarm_upload() {
+            clicked?;
+            bail!(
+                "clicking {target} opened no file chooser; target the page's <input type=file> instead (it may be hidden: try the selector input[type=file])"
+            );
+        }
+        Ok(())
+    }
+
     async fn press(&self, key: &str) -> Result<()> {
         let (key, code, modifiers, vk) = key_event(key)?;
         for kind in ["keyDown", "keyUp"] {
@@ -570,9 +632,11 @@ impl Executor {
 
     async fn execute(&self, request: Request) -> Result<Value> {
         // Subscribed before input so a navigation it starts is not missed.
-        let events =
-            matches!(request, Request::Click { .. } | Request::Press { .. } | Request::Type { submit: Some(_), .. } | Request::Dialog { .. })
-                .then(|| self.page.subscribe_cdp());
+        let events = matches!(
+            request,
+            Request::Click { .. } | Request::Press { .. } | Request::Type { submit: Some(_), .. } | Request::Dialog { .. } | Request::Upload { .. }
+        )
+        .then(|| self.page.subscribe_cdp());
         let action = match request {
             Request::Snapshot { within, depth, boxes } => {
                 let snapshot = self.snapshot(within.as_deref(), depth, boxes).await?;
@@ -588,14 +652,11 @@ impl Executor {
                 return Ok(json!({"matches": self.state.borrow().snapshot.find(text.as_deref(), regex.as_deref())?}));
             }
             Request::Click { target, double, button, action } => {
-                let (_, x, y) = self.point(&target).await?;
-                let button = button.unwrap_or(Button::Left).name();
-                self.cdp("Input.dispatchMouseEvent", json!({"type":"mouseMoved", "x":x, "y":y})).await?;
-                for count in 1..=if double { 2 } else { 1 } {
-                    for kind in ["mousePressed", "mouseReleased"] {
-                        self.cdp("Input.dispatchMouseEvent", json!({"type":kind, "x":x, "y":y, "button":button, "clickCount":count})).await?;
-                    }
-                }
+                self.click(&target, double, button.unwrap_or(Button::Left)).await?;
+                action
+            }
+            Request::Upload { target, files, action } => {
+                self.upload(&target, files).await?;
                 action
             }
             Request::Hover { target, action } => {
@@ -855,6 +916,52 @@ fn key_event(combo: &str) -> Result<(String, String, u32, u32)> {
     Ok((key, code, modifiers, vk))
 }
 
+/// An `<input type=file>`: whether it takes several files; else `null`.
+const FILE_INPUT: &str = "function() { return this instanceof HTMLInputElement && this.type === 'file' ? this.multiple : null; }";
+
+/// Write an upload's files where the page can read them: a folder of their
+/// own (names kept, as the page sees them) under the temp dir's
+/// `silo-uploads`, whose folders older than [`UPLOAD_KEEP`] go.
+fn save_uploads(files: Vec<UploadFile>) -> Result<Vec<std::path::PathBuf>> {
+    if files.is_empty() {
+        bail!("no files to upload");
+    }
+    let root = std::env::temp_dir().join("silo-uploads");
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > UPLOAD_KEEP);
+            if old {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let dir = root.join(format!("{nanos:x}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let mut paths = Vec::with_capacity(files.len());
+    for (i, file) in files.into_iter().enumerate() {
+        let name = upload_name(&file.name, i);
+        // Two files of one name each keep it, in folders of their own.
+        let folder = if paths.iter().any(|p: &std::path::PathBuf| p.file_name().is_some_and(|n| n == name.as_str())) {
+            dir.join(i.to_string())
+        } else {
+            dir.clone()
+        };
+        std::fs::create_dir_all(&folder)?;
+        let bytes = data_encoding::BASE64.decode(file.data_base64.as_bytes()).with_context(|| format!("{}: data_base64 is not base64", file.name))?;
+        let path = folder.join(&name);
+        std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// A file name safe to write: its last component, never empty or a dot name.
+fn upload_name(name: &str, i: usize) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or_default().trim().replace('\0', "");
+    if base.is_empty() || base == "." || base == ".." { format!("file-{}", i + 1) } else { base }
+}
+
 const FILL: &str = r#"function(value) {
   if (this.disabled || this.readOnly) throw new Error('fill target is disabled or read-only');
   this.focus();
@@ -901,6 +1008,7 @@ mod tests {
             ("scroll", json!({"dy":100})),
             ("wait_for", json!({"text":["ready"],"gone":false,"timeout_ms":1000})),
             ("dialog", json!({"accept":true,"prompt_text":"answer"})),
+            ("upload", json!({"target":"input[type=file]","files":[{"name":"a.png","data_base64":"aGk="}],"include_snapshot":true})),
             ("eval", json!({"function":"node => node.textContent","args":["e12"]})),
             ("console", json!({"since":1,"level":"error","limit":20})),
             ("network", json!({"failed_only":true})),
@@ -909,6 +1017,24 @@ mod tests {
             assert!(serde_json::from_value::<Request>(json!({"method":format!("browser.{method}"),"params":params})).is_ok(), "{method}");
         }
         assert!(serde_json::from_value::<Request>(json!({"method":"browser.click","params":{"target":"e12","button":"nope"}})).is_err());
+    }
+
+    #[test]
+    fn uploads_are_written_under_their_own_names() {
+        assert_eq!(upload_name("../../etc/passwd", 0), "passwd");
+        assert_eq!(upload_name("C:\\photos\\cat.jpg", 0), "cat.jpg");
+        assert_eq!(upload_name("..", 1), "file-2");
+        assert_eq!(upload_name("  ", 0), "file-1");
+        let file = |name: &str, data: &str| UploadFile { name: name.into(), data_base64: data.into() };
+        let paths = save_uploads(vec![file("a.txt", "aGk="), file("a.txt", "eW8="), file("b/c.txt", "")]).unwrap();
+        assert_eq!(paths.len(), 3);
+        assert!(paths.iter().all(|p| p.starts_with(std::env::temp_dir().join("silo-uploads"))));
+        assert_eq!(paths.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect::<Vec<_>>(), ["a.txt", "a.txt", "c.txt"]);
+        assert_ne!(paths[0], paths[1], "same name, own folder");
+        assert_eq!(std::fs::read(&paths[1]).unwrap(), b"yo");
+        std::fs::remove_dir_all(paths[0].parent().unwrap()).unwrap();
+        assert!(save_uploads(vec![file("x", "not base64!")]).is_err());
+        assert!(save_uploads(Vec::new()).is_err());
     }
 
     #[test]

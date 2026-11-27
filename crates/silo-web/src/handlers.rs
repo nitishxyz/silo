@@ -555,6 +555,7 @@ wrap_life_span_handler! {
 
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             self.shared.devtools.close();
+            crate::jsdialog::reset(&self.shared);
             lock(&self.shared.browser).take();
             if let Some(menu) = lock(&self.shared.menu).take() {
                 menu.cancel();
@@ -736,29 +737,39 @@ wrap_task! {
     }
 }
 
+// Every dialog is held for the app or an agent (`jsdialog.rs`).
 wrap_jsdialog_handler! {
-    struct AgentDialogs {
+    struct PageDialogs {
         shared: Arc<Shared>,
     }
 
     impl JsdialogHandler {
         fn on_jsdialog(
-            &self, _browser: Option<&mut Browser>, _origin_url: Option<&CefString>, _dialog_type: JsdialogType,
-            _message_text: Option<&CefString>, _default_prompt_text: Option<&CefString>,
+            &self, _browser: Option<&mut Browser>, origin_url: Option<&CefString>, dialog_type: JsdialogType,
+            message_text: Option<&CefString>, default_prompt_text: Option<&CefString>,
             callback: Option<&mut JsdialogCallback>, _suppress_message: Option<&mut c_int>,
         ) -> c_int {
-            self.shared.devtools.hold_dialog(callback)
+            use crate::jsdialog::JsDialogKind;
+            let kind = match dialog_type {
+                JsdialogType::CONFIRM => JsDialogKind::Confirm,
+                JsdialogType::PROMPT => JsDialogKind::Prompt,
+                _ => JsDialogKind::Alert,
+            };
+            let text = |s: Option<&CefString>| s.map(ToString::to_string).unwrap_or_default();
+            crate::jsdialog::open(&self.shared, kind, text(message_text), text(default_prompt_text), text(origin_url), callback)
         }
 
         fn on_before_unload_dialog(
-            &self, _browser: Option<&mut Browser>, _message_text: Option<&CefString>, _is_reload: c_int,
+            &self, _browser: Option<&mut Browser>, message_text: Option<&CefString>, is_reload: c_int,
             callback: Option<&mut JsdialogCallback>,
         ) -> c_int {
-            self.shared.devtools.hold_dialog(callback)
+            let message = message_text.map(ToString::to_string).unwrap_or_default();
+            let kind = crate::jsdialog::JsDialogKind::Leave { reload: is_reload != 0 };
+            crate::jsdialog::open(&self.shared, kind, message, String::new(), String::new(), callback)
         }
 
         fn on_reset_dialog_state(&self, _browser: Option<&mut Browser>) {
-            self.shared.devtools.reset_dialog();
+            crate::jsdialog::reset(&self.shared);
         }
     }
 }
@@ -851,7 +862,7 @@ pub(crate) fn client(shared: &Arc<Shared>, tunnel: &SharedTunnel) -> Client {
         PageLifeSpanHandler::new(Arc::clone(shared), Arc::clone(tunnel)),
         PageRequestHandler::new(Arc::clone(shared), Arc::clone(tunnel)),
         PagePermissionHandler::new(Arc::clone(shared)),
-        AgentDialogs::new(Arc::clone(shared)),
+        PageDialogs::new(Arc::clone(shared)),
         PageMenuHandler::new(Arc::clone(shared)),
         crate::download::handler(shared),
         crate::find::handler(shared),

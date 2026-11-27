@@ -24,7 +24,6 @@ pub(crate) struct Channel {
     next: AtomicI32,
     pending: Mutex<HashMap<i32, oneshot::Sender<Result<Value>>>>,
     registration: Mutex<Option<Registration>>,
-    dialog: Mutex<Option<JsdialogCallback>>,
     page_enabled: AtomicBool,
     events: broadcast::Sender<DevToolsEvent>,
     pub(crate) generation: AtomicU64,
@@ -36,7 +35,6 @@ impl Default for Channel {
             next: AtomicI32::new(1),
             pending: Mutex::new(HashMap::new()),
             registration: Mutex::new(None),
-            dialog: Mutex::new(None),
             page_enabled: AtomicBool::new(false),
             events: broadcast::channel(2048).0,
             generation: AtomicU64::new(0),
@@ -45,26 +43,9 @@ impl Default for Channel {
 }
 
 impl Channel {
-    pub(crate) fn hold_dialog(&self, callback: Option<&mut JsdialogCallback>) -> i32 {
-        if !self.page_enabled.load(Ordering::Relaxed) {
-            return 0;
-        }
-        let Some(callback) = callback else { return 0 };
-        let previous = lock(&self.dialog).replace(callback.clone());
-        drop(previous);
-        1
-    }
-
-    pub(crate) fn reset_dialog(&self) {
-        let callback = lock(&self.dialog).take();
-        drop(callback);
-    }
-
-    /// Answer the dialog held by [`Self::hold_dialog`]; false if none is.
-    pub(crate) fn answer_dialog(&self, accept: bool, prompt: Option<&str>) -> bool {
-        let Some(callback) = lock(&self.dialog).take() else { return false };
-        callback.cont(i32::from(accept), prompt.map(CefString::from).as_ref());
-        true
+    /// An agent has CDP's `Page` domain on: it sees the page's dialogs.
+    pub(crate) fn page_enabled(&self) -> bool {
+        self.page_enabled.load(Ordering::Relaxed)
     }
 
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<DevToolsEvent> {
@@ -72,7 +53,6 @@ impl Channel {
     }
 
     pub(crate) fn close(&self) {
-        self.reset_dialog();
         self.fail_pending();
         lock(&self.registration).take();
         self.generation.fetch_add(1, Ordering::Relaxed);

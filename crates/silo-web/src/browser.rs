@@ -141,10 +141,32 @@ impl Browser {
         self.shared.devtools.subscribe()
     }
 
-    /// Answer the page's pending JavaScript dialog (held while CDP's `Page`
-    /// domain is on, since a windowless engine shows none); false if none.
+    /// Answer whichever JavaScript dialog the page waits on (an agent's
+    /// answer); false if none.
     pub fn answer_dialog(&self, accept: bool, prompt: Option<&str>) -> bool {
-        self.shared.devtools.answer_dialog(accept, prompt)
+        crate::jsdialog::answer(&self.shared, None, accept, prompt)
+    }
+
+    /// Answer `Event::JsDialog` `id` (the user's answer); false if it no
+    /// longer waits.
+    pub fn answer_js_dialog(&self, id: u32, accept: bool, prompt: Option<&str>) -> bool {
+        crate::jsdialog::answer(&self.shared, Some(id), accept, prompt)
+    }
+
+    /// The next file chooser the page opens (not a save panel) gets `paths`
+    /// at once, with no panel: an agent's upload. Replaces earlier ones.
+    pub fn arm_upload(&self, paths: Vec<std::path::PathBuf>) {
+        *lock(&self.shared.upload) = Some(paths);
+    }
+
+    /// Drop the armed paths; true if no chooser took them.
+    pub fn disarm_upload(&self) -> bool {
+        lock(&self.shared.upload).take().is_some()
+    }
+
+    /// Whether armed paths still wait for a chooser.
+    pub fn upload_armed(&self) -> bool {
+        lock(&self.shared.upload).is_some()
     }
 
     /// Changes whenever the main frame navigates or its DevTools agent closes.

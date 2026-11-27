@@ -1553,6 +1553,7 @@ fn silo(name: &str) -> Option<(Kind, &'static str, &'static str, Option<&'static
         "browser_scroll" => (Browser, "Scrolling page", "Scrolled page", None),
         "browser_wait_for" => (Browser, "Waiting for", "Waited for", Some("text")),
         "browser_dialog" => (Browser, "Answering dialog", "Answered dialog", None),
+        "browser_upload" => (Browser, "Uploading", "Uploaded", Some("target")),
         "browser_eval" => (Browser, "Running script", "Ran script", None),
         "browser_console" => (Browser, "Reading console", "Read console", None),
         "browser_network" => (Browser, "Reading network log", "Read network log", None),

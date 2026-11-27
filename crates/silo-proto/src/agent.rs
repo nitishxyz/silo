@@ -156,6 +156,32 @@ pub struct BrowserDialogParams {
     pub include_snapshot: bool,
 }
 
+/// A file `browser.upload` gives the page: its name and bytes (the caller
+/// reads it; the app may run on another machine).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BrowserUploadFile {
+    pub name: String,
+    pub data_base64: String,
+}
+
+/// `browser.upload`: `target` is an `<input type=file>` (set directly,
+/// even hidden) or what opens a file chooser when clicked (a button, a
+/// label, a drop zone), which then gets `files` with no panel.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BrowserUploadParams {
+    pub block_id: BlockId,
+    pub target: String,
+    pub files: Vec<BrowserUploadFile>,
+    #[serde(default)]
+    pub include_snapshot: bool,
+}
+
+impl BrowserUploadParams {
+    /// Most bytes all files of one upload may have (before base64): the
+    /// request must fit a frame ([`crate::MAX_FRAME`]).
+    pub const MAX_BYTES: usize = 10 * 1024 * 1024;
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BrowserEvalParams {
     pub block_id: BlockId,

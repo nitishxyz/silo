@@ -116,6 +116,18 @@ wrap_dialog_handler! {
             callback: Option<&mut FileDialogCallback>,
         ) -> c_int {
             let Some(callback) = callback else { return 0 };
+            // An agent's upload (`Browser::arm_upload`): its files, no panel.
+            if mode != cef::FileDialogMode::SAVE
+                && let Some(paths) = lock(&self.shared.upload).take()
+            {
+                let one = mode != cef::FileDialogMode::OPEN_MULTIPLE;
+                let mut list = CefStringList::new();
+                for path in paths.iter().take(if one { 1 } else { usize::MAX }) {
+                    list.append(&path.to_string_lossy());
+                }
+                callback.cont(Some(&mut list));
+                return 1;
+            }
             // Agents' pages never get a panel.
             if self.shared.deny_prompts.load(Ordering::Acquire) {
                 callback.cancel();
